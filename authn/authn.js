@@ -234,7 +234,10 @@ function sessionOf(req) {
     return null;
   }
   if (session.expires < Date.now()) {
-    sessions.delete(id);
+    // Through expireSession() and not a bare delete: this is a session ENDING
+    // and it owes the same audit row and the same CAEP event every other way of
+    // ending one writes. See that function's header.
+    expireSession(sessions.realmMap(), id, session, 'a request that presented it');
     log.debug("Leaving sessionOf(). The session had expired and was discarded.");
     return null;
   }
@@ -329,7 +332,13 @@ function consoleSession(req) {
     return null;
   }
   if (session.expires < Date.now()) {
-    store.delete(id);
+    // The DEFAULT realm's store, whichever realm the console is being read in —
+    // which is what this whole function is about — so the expiry is run in that
+    // realm too, or the event would name the issuer of the realm somebody
+    // happened to be looking at.
+    realms.run(realms.DEFAULT_REALM, function () {
+      expireSession(store, id, session, 'the admin console');
+    });
     log.debug("Leaving consoleSession(). The session had expired and was discarded.");
     return null;
   }
@@ -476,6 +485,147 @@ function notifySession(kind, session, extra) {
 }
 
 // ---------------------------------------------------------------------------
+// A SESSION THAT RAN OUT — THE FOURTH WAY ONE ENDS, AND UNTIL 2026-09-04 THE
+// ONLY ONE THAT SAID NOTHING.
+//
+// Every sign-out door in this service goes through `dropSession()`:
+// /oauth2/logout, WS-Federation's wsignout1.0, SAML 2.0 Single Logout,
+// /logout, /admin/logout, /admin/sessions. All of them therefore write the
+// `session.end` audit row and emit CAEP's `session-revoked`.
+//
+// AN EXPIRY DID NEITHER. It was `sessions.delete(id)` in the two lookups, so a
+// session that ran out was gone with no audit row and no event — and the
+// receiver that had been told the session was ESTABLISHED was told nothing
+// when it ended. That is the failure CAEP exists to prevent, arriving through
+// the most ordinary cause there is.
+//
+// **AND IT WAS WORSE THAN LATE, IT WAS CONDITIONAL.** Both deletions were
+// lazy: they happen when the session is next LOOKED UP. A person who closes
+// the browser is never looked up again, so nothing ever fired at all — while
+// the same session sat in the map, live to `/admin/sessions` and to anything
+// else counting sessions, hours after it had expired. That is why this needed
+// a SWEEP and not just a shared function.
+//
+// The sweep is unref'd, so it never holds the process open, and it is started
+// LAZILY — by the first session created — so a process that signs nobody in
+// (the parent project's in-process Kerberos jobs, `npm test`,
+// `node env/generate_defaults.js`) never arms a timer it would only ever have
+// to be shut down for. It is the same shape of decision the worker pool makes
+// about forking nothing until the first post-quantum job.
+//
+// **IT SWEEPS EVERY REALM AND RUNS INSIDE EACH ONE.** The store is
+// `realms.map()`, so `sessions.forEach` walks the AMBIENT realm's partition —
+// and a timer has no ambient realm, so without `realms.run()` this would sweep
+// the default realm's sessions every time and silently leave every other
+// realm's to accumulate. Running inside the realm is also what makes the event
+// right rather than merely present: the observer builds a subject from the
+// realm's own issuer, and an event naming the wrong one is refused at the far
+// end and reads as a bad signature.
+const SESSION_SWEEP_MS = 30 * 1000;
+let sweepTimer = null;
+
+// ONE PLACE A SESSION ENDS BY RUNNING OUT, called by the two lazy lookups and
+// by the sweep. `via` says which, because "it expired and somebody came back to
+// find out" and "it expired and the sweep noticed" are the same act at
+// different moments and the audit log should not have to guess.
+function expireSession(store, id, session, via) {
+  log.debug("Entering expireSession(). id=" + id);
+  store.delete(id);
+  audit.audit({
+    action: 'session.end',
+    outcome: 'success',
+    actor: (session && session.user && session.user.username) || '',
+    protocol: (session && session.via) || 'Authentication service',
+    channel: 'none',
+    target: id,
+    summary: ((session && session.user && session.user.username) || 'somebody') +
+             '\'s session ' + id + ' expired and was discarded',
+    detail: {
+      sessionId: id,
+      // Not "signed out": nobody asked for this and no browser was involved.
+      // A receiver told the session was established has to be able to tell the
+      // two apart, which is what `initiating_entity` carries in the event.
+      reason: 'the session lifetime ran out',
+      noticedBy: via,
+      expiresAt: session && session.expires
+        ? new Date(session.expires).toISOString() : ''
+    }
+  });
+  // THE EVENT. `revoked` is CAEP's word for a session that is no longer good,
+  // and an expiry is exactly that — the observer decides what to send and this
+  // says what happened.
+  //
+  // `policy` and not `admin`, `user` or `system`, and the choice is the one
+  // useful thing this notice carries. Nobody initiated it: a LIFETIME this
+  // service configured ran out, which is what CAEP section 2 means by a policy
+  // evaluation — `system` is a maintenance activity and the other two name a
+  // person who did something. Without it the observer's rule would have made
+  // this `user`, and a receiver would have been told the person signed
+  // themselves out, which is not vague but false.
+  notifySession('revoked', session, {
+    via: via, byAdmin: false, expired: true,
+    initiatingEntity: 'policy',
+    reason: 'The session lifetime ran out. Nobody signed out — this service ' +
+            'stopped honouring the session because its absolute expiry ' +
+            'passed, and it is not extended by use.',
+    req: null });
+  log.debug("Leaving expireSession().");
+}
+
+function sweepExpiredSessions() {
+  log.debug("Entering sweepExpiredSessions().");
+  const nowMs = Date.now();
+  let gone = 0;
+  realms.list().forEach(function (realm) {
+    const store = sessions.realmMap(realm.id);
+    if (!store || !store.size) {
+      return;
+    }
+    // Collected first and deleted afterwards: expireSession() deletes from the
+    // map being walked, and the observer it then calls is somebody else's code
+    // that may reach back into this store.
+    const expired = [];
+    store.forEach(function (session, id) {
+      if (session && session.expires && session.expires <= nowMs) {
+        expired.push([id, session]);
+      }
+    });
+    if (!expired.length) {
+      return;
+    }
+    realms.run(realm, function () {
+      expired.forEach(function (pair) {
+        expireSession(store, pair[0], pair[1], 'the session sweep');
+        gone++;
+      });
+    });
+  });
+  if (gone) {
+    log.info('authn: the session sweep ended ' + gone + ' expired session(s). ' +
+             'Each one is an audit row and a CAEP session-revoked, which is ' +
+             'the whole reason the sweep exists: an expiry noticed only when ' +
+             'somebody comes back is an expiry nobody is ever told about.');
+  }
+  log.debug("Leaving sweepExpiredSessions(). " + gone + " ended.");
+}
+
+// Armed by the first session this process creates, and never before — see the
+// header. `unref()` so it cannot be the reason a process will not exit.
+function armSessionSweep() {
+  if (sweepTimer) {
+    return;
+  }
+  sweepTimer = setInterval(sweepExpiredSessions, SESSION_SWEEP_MS);
+  if (typeof sweepTimer.unref === 'function') {
+    sweepTimer.unref();
+  }
+  log.info('authn: the session sweep is running every ' +
+           (SESSION_SWEEP_MS / 1000) + 's. A session that expires is ended, ' +
+           'audited and reported over CAEP whether or not anybody comes back ' +
+           'to look at it.');
+}
+
+// ---------------------------------------------------------------------------
 // A SESSION THAT ALREADY EXISTED WAS PRESENTED AND HONOURED — which is single
 // sign-on, and is CAEP's `session-presented`.
 //
@@ -524,9 +674,26 @@ function startSession(res, username, amr, acr, via, detail) {
     user: userFor(username), authTime: nowSec(), expires: Date.now() + SESSION_TTL_MS,
     // Stated rather than omitted: a relying party that asked for a second factor
     // needs to be able to see that it did not get one.
-    amr: amr, acr: acr
+    amr: amr, acr: acr,
+    // WHICH PROTOCOL THIS SESSION WAS STARTED THROUGH, on the session itself
+    // (2026-09-04). It was already handed to `recordAuthentication()` and to
+    // the CAEP observer below and kept in neither place the session lives, so
+    // "what is this session" could only be answered fully by a register that
+    // may not be loaded — `ssf/ssf.js` is what fills the CAEP one, and a
+    // process without it lost the answer entirely. /admin/sessions reads it
+    // here, which is the store that owns the session.
+    //
+    // It is the protocol the sign-in came THROUGH and not the only one the
+    // session serves: every browser family here reads this same session, so a
+    // row saying `SAML 2.0` may well be carrying OIDC relying parties too, and
+    // the page says so rather than letting the column be read as exclusive.
+    via: via || 'OAuth 2.0 / OIDC'
   };
   sessions.set(sessionId, session);
+  // The first session this process holds arms the sweep that will end it if
+  // nobody signs it out. See armSessionSweep(): nothing is armed in a process
+  // that signs nobody in.
+  armSessionSweep();
   // `Secure` when — and only when — this port is TLS (global.https, which RFC
   // 9700 mode brings with it). It has to be conditional rather than always on:
   // a browser silently DROPS a Secure cookie that arrives over plain http, so

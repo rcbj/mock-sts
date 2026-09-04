@@ -625,11 +625,23 @@ function observe(notice) {
   if (act === 'presented') {
     values.ext_id = sessionId;
   }
+  // WHO INITIATED IT, in CAEP section 2's four words.
+  //
+  // The notice's own answer wins where it has one, and the one caller that
+  // gives one is the SESSION EXPIRY (2026-09-04), which is `policy`: nobody
+  // initiated it — a lifetime this service configured ran out, which is
+  // exactly what that word is for. Without this the choice was `admin` or
+  // `user`, and an expiry would have gone out claiming a person signed out,
+  // which is a receiver being told something false about a session rather
+  // than merely something vague.
+  const entity = ['admin', 'user', 'policy', 'system']
+    .indexOf(String(asked.initiatingEntity || '')) >= 0
+      ? String(asked.initiatingEntity)
+      : (act === 'revoked' ? (asked.byAdmin ? 'admin' : 'user') : 'user');
   const payload = buildPayload(uri, values, {
-    initiatingEntity: act === 'revoked'
-      ? (asked.byAdmin ? 'admin' : 'user') : 'user',
+    initiatingEntity: entity,
     reasonAdmin: asked.reason || reasonFor(act, asked),
-    reasonUser: reasonForUser(act)
+    reasonUser: reasonForUser(act, asked)
   });
   audit.audit({ action: 'caep.event.auto', category: 'signals',
     protocol: 'CAEP', channel: 'http', target: sessionId,
@@ -659,8 +671,16 @@ function reasonFor(act, notice) {
   return text;
 }
 
-function reasonForUser(act) {
+function reasonForUser(act, notice) {
   log.debug('Entering reasonForUser(). ' + act);
+  // AN EXPIRY IS NOT A SIGN-OUT AND THE PERSON HAS TO BE TOLD THE DIFFERENCE.
+  // `reason_user` is the sentence a receiver may show them, and "you have been
+  // signed out" for a session that simply ran out is the wording that makes
+  // somebody go looking for who signed them out.
+  if (act === 'revoked' && (notice || {}).expired) {
+    log.debug('Leaving reasonForUser(). Expired.');
+    return 'Your session expired. Sign in again to carry on.';
+  }
   const text = act === 'revoked'
     ? 'You have been signed out.'
     : (act === 'established' ? 'You signed in.' : 'You are still signed in.');

@@ -880,3 +880,27 @@ the override AND by the person's own answer must report as the person's,
 because that is the fact that survives the override being taken away. Reporting
 it the other way round would make `revoke-global-consent` look as though it had
 started asking people who had already agreed.
+
+## RESTORE THE SLOT YOU STUBBED — WITH WHAT WAS THERE, NOT WITH `null`
+
+`run.js` runs every file in ONE process, so `applications.js`'s directory slot
+is one reference shared by all of them. Two files stub it to answer without a
+directory, a socket or a realm, and until 2026-09-04 one restored `null` and the
+other restored nothing at all.
+
+Both were fine by accident. The files that need a REAL backing —
+`federation_map_bands.js`, `realm_directory_lookups.js` — were the first to
+require `ldap/ldap_server.js`, whose require-time `setDirectory()` repaired the
+damage on the way past. The moment any earlier file required that module (which
+`caep_initiating_entity.js` does, through `logout/logout.js`), node's module
+cache meant it was not required again, the repair never happened, and two tests
+failed **inside `common/applications.js`** naming a function a stub in a third
+file does not have.
+
+The lesson is the general one and it is why this is here rather than in a
+comment: **a test that leaves process-wide state behind is a test whose failure
+lands on somebody else's file**, in a run whose order it does not control. And
+restoring a *plausible* value is not restoring: `null` is right only in a
+process where `ldap_server.js` was never loaded, which is a fact about the file
+list rather than about the test. `applications.directoryInstalled()` exists so
+the honest restore is available; it is called by nothing in the service.

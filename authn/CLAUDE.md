@@ -565,3 +565,63 @@ a list of three with one disabled indistinguishable from a correct list of two. 
 application entry and one on another relationship are the same string,
 checkable the same four ways, and two implementations of "would this actually
 work" would answer differently the first time one of them learned a fifth.
+
+---
+
+## A SESSION THAT RAN OUT USED TO SAY NOTHING (2026-09-04)
+
+Every sign-out door in this service goes through `dropSession()` —
+`/oauth2/logout`, WS-Federation's `wsignout1.0`, SAML 2.0 Single Logout,
+`/logout`, `/admin/logout` and now `/admin/sessions` — so all of them write the
+`session.end` audit row and emit CAEP's `session-revoked`.
+
+**AN EXPIRY DID NEITHER.** It was a bare `sessions.delete(id)` in the two
+lookups, so a session that ran out vanished with no audit row and no event: the
+receiver that had been told the session was ESTABLISHED was told nothing when it
+ended, which is the failure CAEP exists to prevent arriving through the most
+ordinary cause there is.
+
+**AND IT WAS WORSE THAN LATE, IT WAS CONDITIONAL.** Both deletions were lazy —
+they happen when the session is next LOOKED UP. Somebody who closes the browser
+is never looked up again, so nothing ever fired at all, while the same session
+sat in the map hours after it had expired, live to anything counting sessions.
+That is why this needed a SWEEP and not merely a shared function.
+
+Three things about it are decisions:
+
+* **`expireSession()` is the one place a session ends by running out**, called
+  by both lazy lookups and by the sweep. `via` says which noticed it, because
+  "it expired and somebody came back" and "it expired and the sweep found it"
+  are the same act at different moments and the log should not have to guess.
+* **The sweep is armed by the FIRST session this process creates**, and
+  `unref()`'d. A process that signs nobody in — the parent project's in-process
+  Kerberos jobs, `npm test`, `node env/generate_defaults.js` — never arms a
+  timer it would then have to be shut down for. It is the shape of decision the
+  worker pool makes about forking nothing until the first post-quantum job.
+* **It sweeps every realm and runs INSIDE each one.** The store is
+  `realms.map()`, so a bare `forEach` walks the ambient realm's partition and a
+  timer has no ambient realm: without `realms.run()` it would sweep the default
+  realm's sessions every time and leave every other realm's to accumulate.
+  Running in the realm is also what makes the event right rather than merely
+  present, since the observer builds a subject from the realm's own issuer.
+
+**THE EVENT SAYS `policy` AND NOT `user`.** `caep.js`'s rule for a `revoked` act
+was `admin` when an administrator did it and `user` otherwise, and an expiry is
+neither — a lifetime this service configured ran out, which is what CAEP section
+2 means by a policy evaluation. Without that this event would have gone out
+claiming the person signed themselves out, which is not vague but false. The
+notice carries `initiatingEntity` and `expired`, and `reason_user` becomes
+"Your session expired" rather than "You have been signed out".
+
+## The session records the protocol it was started through
+
+`startSession()` puts `via` on the session as well as handing it to
+`recordAuthentication()` and to the observer. It was in neither place the
+session lives, so *what is this session* could only be answered fully by the
+CAEP register — which `ssf/ssf.js` fills, and a process without it lost the
+answer entirely. `/admin/sessions` reads it off the store that owns the session.
+
+It is the protocol the sign-in came THROUGH and not the only one the session
+serves: every browser family here reads this same session, so a row saying
+`SAML 2.0` may well be carrying OIDC relying parties too. That is what the
+*Carries* column on that page is for, and why the two are drawn separately.

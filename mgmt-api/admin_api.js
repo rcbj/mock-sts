@@ -1213,6 +1213,145 @@ const ROUTES = [
         responseDescription: 'The entry as created, in `entry`, with its `dn`.' }
     ] },
 
+  // ---------------------------------------------------------------------
+  // SESSIONS. The other half of /tokens, and the resource behind
+  // /admin/sessions — rule 7, in the same change as the page.
+  //
+  // It is a SEPARATE resource from /logout rather than a shape of it, and the
+  // two questions are why: that one is *what is alice still signed into*, keyed
+  // on one identity and reaching ten families; this one is *who is signed in at
+  // all*, across everybody, in the three families that have a session. A `user`
+  // parameter on the one below could not have answered it, because the answer
+  // has no user in it.
+  //
+  // Both read `logout/logout.js`, which is the one model of what a live session
+  // is — and the POST here is `terminate()` with a selection of one, the SAME
+  // function `POST /admin-api/logout/selective` calls. Two operations over one
+  // termination, which is the arrangement rule 7 asks for: the console grew a
+  // button, so this grew the operation that mirrors it.
+  { method: 'GET', path: BASE + '/sessions', tag: 'Sessions',
+    operationId: 'getSessions',
+    summary: 'Every session this service is holding right now, across the ' +
+             'three protocols that have one',
+    description: 'WHAT IS LIVE, as opposed to what has been ISSUED — which is ' +
+                 '`GET /admin-api/tokens`, and everything in that list ' +
+                 'outlives everything in this one.\n\nA session is state ' +
+                 'THIS SERVICE holds that makes somebody currently ' +
+                 'authenticated. Three protocols here have one and the other ' +
+                 'seven do not:\n\n* the **browser sign-on session** from ' +
+                 '`/authn/login`, which OAuth 2.0 / OIDC, WS-Federation, SAML ' +
+                 '2.0, SAML 1.1 and the admin console all share — so one row ' +
+                 'may be carrying relying parties, realms and service ' +
+                 'providers at once, and `protocol` says which protocol the ' +
+                 'sign-in came THROUGH while `carries` says what is riding ' +
+                 'on it;\n* the **Kerberos ticket-granting ticket**, because ' +
+                 'a TGT is the Kerberos session and a service ticket is one ' +
+                 'use of it;\n* the **LDAP connection**, because RFC 4511 ' +
+                 'section 4.2 makes a Bind the authorization state of a ' +
+                 'CONNECTION.\n\n**THE EXPIRY IS WORKED OUT DIFFERENTLY IN ' +
+                 'EACH AND `expiryRule` SAYS HOW.** A browser session expires ' +
+                 'at an absolute instant fixed when it was created and is NOT ' +
+                 'extended by use — there is no idle timeout here. A TGT ' +
+                 'expires at the `endtime` the KDC sealed into the ticket, ' +
+                 'which nothing can move. An LDAP connection has NO EXPIRY ' +
+                 'and answers `expiresAt: 0`, which is not an expiry of the ' +
+                 'epoch.\n\nEvery row carries the `key` and `id` that ' +
+                 '`POST /admin-api/sessions/revoke` takes, and — for a ' +
+                 'browser session — the `sessionId` that ' +
+                 '`GET /admin-api/tokens?session=` takes.',
+    mirrors: 'GET /admin/sessions',
+    parameters: [
+      { name: 'q', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Narrows to rows whose username, subject, handle, ' +
+                     'identity key, kind or protocol contains this. One box ' +
+                     'over all of them, because a reader arrives holding ' +
+                     'exactly one and does not know which.' },
+      { name: 'protocol', in: 'query', required: false,
+        schema: { type: 'string' },
+        description: 'Only sessions started through this protocol. The ' +
+                     '`protocol` values in the reply are what there is to ' +
+                     'ask for; they are read off the live rows rather than ' +
+                     'written down, because a federated sign-in names the ' +
+                     'relationship it came through.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The live sessions, filtered and paged.',
+    responseSchema: { $ref: '#/components/schemas/SessionList' },
+    handler: function (req, res) {
+      log.debug("Entering the management API sessions endpoint.");
+      sendJson(res, 200, admin.sessionsView(req));
+      log.debug("Leaving the management API sessions endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/sessions/:action', tag: 'Sessions',
+    mirrors: 'POST /admin/sessions',
+    handler: function (req, res) {
+      log.debug("Entering the management API sessions action endpoint.");
+      const body = parseBody(req);
+      // `by` REACHES THE EVENT and not only the audit row: the session
+      // family spends it as the `via` it hands `endSessionById()`, and
+      // `dropSession()` decides CAEP's `initiating_entity` by looking for
+      // `admin` or `console` in that string. "the management API" alone
+      // reported a person signing themselves out, which is the one
+      // distinction that member exists to draw.
+      const result = admin.sessionsAction(withAction(req, body),
+        { by: 'the management API at /admin-api/sessions' });
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API sessions action endpoint.");
+    },
+    actions: [
+      { action: 'revoke', operationId: 'revokeSession',
+        summary: 'End one live session',
+        description: 'The Revoke button on every row of /admin/sessions, ' +
+                     'driven without a browser. It is `terminate()` with a ' +
+                     'selection of one — the SAME function a global logout ' +
+                     'goes through — so it writes the same audit row, ' +
+                     'honours the same two settings and gives the same ' +
+                     'refusals.\n\n**IT IS NOT ONE ACT ACROSS THE THREE ' +
+                     'KINDS AND THE DIFFERENCE MATTERS.** On a browser ' +
+                     'session it ends that session and everything hanging ' +
+                     'off it: the relying parties are notified, the refresh ' +
+                     'tokens issued on it are revoked. On an LDAP row it ' +
+                     'closes the socket, which the client sees as its ' +
+                     'connection dropping mid-conversation. On a Kerberos ' +
+                     'row it does MORE than the row it names — it stamps a ' +
+                     'sign-out instant on the PRINCIPAL, after which every ' +
+                     'ticket-granting ticket that principal authenticated ' +
+                     'before now is refused KDC_ERR_TGT_REVOKED (20), ' +
+                     'because Kerberos has no per-ticket revocation. It ' +
+                     'still reaches no service ticket already in a cache: ' +
+                     'accepting one never contacts this KDC. Every row\'s ' +
+                     '`why` says which of the three it is before it is ' +
+                     'pressed.\n\nA row that names nothing any more — it ' +
+                     'ended between the read and the write — answers 400 ' +
+                     'saying so rather than 200 having done nothing, and the ' +
+                     'whole `terminate()` result is in `result`.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            key: { type: 'string',
+                   description: 'Whose session it is: the normalised identity ' +
+                                'key, which every row of ' +
+                                'GET /admin-api/sessions carries as `key`. ' +
+                                'The termination is keyed on an identity, ' +
+                                'which is why this is needed beside the id.' },
+            select: { type: 'string',
+                      description: 'Which session, in the form the list gives ' +
+                                   'it as `id`: `session:…`, `ldap:…` or ' +
+                                   '`krb5:…@REALM`. It is the identifier ' +
+                                   'POST /admin-api/logout/selective takes ' +
+                                   'too, because both go through one ' +
+                                   'termination.' }
+          },
+          required: ['key', 'select'],
+          examples: [{ key: 'alice', select: 'session:8mJ2b1u0Qb' }],
+          additionalProperties: false
+        },
+        responseDescription: 'What was ended, or why it could not be. The ' +
+                             'whole termination result is in `result`, ' +
+                             'including `skipped` and `unknown`.' }
+    ] },
+
   { method: 'GET', path: BASE + '/logout', tag: 'Sign-out',
     operationId: 'getLiveSessions',
     summary: 'Everything this service is still holding for one identity, ' +
@@ -1796,7 +1935,18 @@ const ROUTES = [
         schema: { type: 'string',
                   enum: ['valid', 'expired', 'revoked', 'not yet valid',
                          'no expiry stated'] },
-        description: 'One state.' }
+        description: 'One state.' },
+      { name: 'session', in: 'query', required: false,
+        schema: { type: 'string' },
+        description: 'Only what was issued UNDER one browser sign-on ' +
+                     'session, matched exactly on the id — the `sessionId` ' +
+                     'every row of GET /admin-api/sessions carries, and the ' +
+                     'join between the two resources.\n\nOnly a credential ' +
+                     'issued under a session records one, so an assertion, a ' +
+                     'Kerberos ticket, a token from either direct grant and ' +
+                     'anything an RFC 8693 exchange produced are absent by ' +
+                     'construction rather than missing. That is a fact about ' +
+                     'the credential and not a gap in the recording.' }
     ].concat(pagingParameters()),
     responseDescription: 'The matching rows, with the paging that found them.',
     responseSchema: { $ref: '#/components/schemas/IssuedList' },
@@ -4476,6 +4626,84 @@ const ROUTES = [
       log.debug("Entering the management API CAEP endpoint.");
       sendJson(res, 200, admin.caepView(req));
       log.debug("Leaving the management API CAEP endpoint.");
+    } },
+
+  // THE SECOND CAEP READ, AND IT EXISTS BECAUSE OF RULE 7 RATHER THAN BECAUSE
+  // THE DOCUMENT IS DIFFERENT. `/admin/caep-sessions` is a page of the console
+  // and had no operation naming it — the GET above mirrors `/admin/caep`, and
+  // one operation cannot mirror two pages. That gap was invisible until the
+  // parity check in tests/vendored/admin_api.js named it.
+  //
+  // ONE OPERATION ANSWERS BOTH SHAPES, `?session=` deciding which, for the
+  // reason /admin-api/permissions/groups gives: the list and the drill-down are
+  // the same question at two scales and the console draws them from one
+  // register, so two operations would be two places to disagree about what a
+  // session's history is.
+  { method: 'GET', path: BASE + '/caep/sessions', tag: 'CAEP',
+    operationId: 'getCaepSessions',
+    summary: 'The CAEP session register, searched and paged — or one ' +
+             'session with everything that has been said about it',
+    description: 'What /admin/caep-sessions draws. Without `session` it is ' +
+                 'the register: one row per session this service has HELD, ' +
+                 'including the ones it no longer holds, with its CAEP state, ' +
+                 'assurance, device compliance, risk and a count per event ' +
+                 'type — searched with `sessq` and paged with `sessionsPage` ' +
+                 'and `per`. Beside it, `applications`: what this transmitter ' +
+                 'has said to each RECEIVER across every session, searched ' +
+                 'with `appq` and paged with `applicationsPage`. That is the ' +
+                 'third question this page answers and the one somebody ' +
+                 'arrives with once more than one receiver exists — the ' +
+                 'sessions are per SESSION, the streams are per STREAM, and ' +
+                 'this is per APPLICATION.\n\nWith `session` it is that one session ' +
+                 'opened out: the events actually sent about it, in order, ' +
+                 'with the jti and the stream each went out on and what the ' +
+                 'register noticed as it was applied, paged with ' +
+                 '`eventsPage`.\n\n**THE REGISTER OUTLIVES THE SESSION AND ' +
+                 'THAT IS THE POINT.** The session store forgets one the ' +
+                 'moment it is signed out, so a row saying `revoked` is the ' +
+                 'only remaining evidence that it existed and was revoked — ' +
+                 'and it is why this is not the same list as ' +
+                 'GET /admin-api/sessions, which is what is LIVE.\n\nA ' +
+                 '`session` that names nothing answers 200 with ' +
+                 '`session: null` rather than 404: this register is capped at ' +
+                 '`caep.maxSessionsTracked` and drops the oldest, so an old ' +
+                 'identifier coming back empty is an ordinary outcome and not ' +
+                 'a missing resource.',
+    mirrors: 'GET /admin/caep-sessions',
+    parameters: [
+      { name: 'sessq', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Narrows the register to rows whose username, `sub`, ' +
+                     'session id, SSF subject or protocol contains this.' },
+      { name: 'session', in: 'query', required: false,
+        schema: { type: 'string' },
+        description: 'One session id. The reply is then that session and its ' +
+                     'events rather than the list.' },
+      { name: 'sessionsPage', in: 'query', required: false,
+        schema: { type: 'integer', minimum: 1 },
+        description: 'Which page of the register. Clamped, like every page ' +
+                     'parameter here.' },
+      { name: 'appq', in: 'query', required: false, schema: { type: 'string' },
+        description: 'Narrows the per-receiver list to rows whose ' +
+                     'application name, identifier or stream `aud` contains ' +
+                     'this. It deliberately does NOT match event types: a ' +
+                     'receiver that takes none of the eight is exactly the ' +
+                     'row somebody is looking for when they ask why nothing ' +
+                     'arrived.' },
+      { name: 'applicationsPage', in: 'query', required: false,
+        schema: { type: 'integer', minimum: 1 },
+        description: 'Which page of the per-receiver list. It shares `per` ' +
+                     'with the register above it, which is the arrangement ' +
+                     'every page here that carries two lists has.' },
+      { name: 'eventsPage', in: 'query', required: false,
+        schema: { type: 'integer', minimum: 1 },
+        description: 'Which page of ONE session\'s events, with `session`.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The register, or one session and its events.',
+    responseSchema: { $ref: '#/components/schemas/Caep' },
+    handler: function (req, res) {
+      log.debug("Entering the management API CAEP sessions endpoint.");
+      sendJson(res, 200, admin.caepSessionsView(req));
+      log.debug("Leaving the management API CAEP sessions endpoint.");
     } },
 
   { method: 'POST', route: BASE + '/caep/:action', tag: 'CAEP',

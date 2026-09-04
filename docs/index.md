@@ -111,6 +111,8 @@ assertion is accepted. See [what is not checked](what-is-not-checked.md).
 - [Endpoints](endpoints.md) — how to find out, rather than a list that goes stale
 - [Trust realms](trust-realms.md) — several logical identity services in one process, told apart by a path segment: what each one separates, and what every realm shares
 - [Signing out](signing-out.md) — `/logout`: one list of everything you are still signed into, across every family, and what cannot be ended
+- [Sessions](sessions.md) — what a session IS here: the browser sign-on session every protocol shares, the Kerberos TGT, the LDAP connection, the five things that are not sessions, and the six places one is visible
+- [CAEP events](caep-events.md) — the eight Continuous Access Evaluation Profile events: which activities in this service emit each one, which five nobody here can cause and how to send those by hand, and the three gates every event passes on its way to a receiver
 - [Persistence](persistence.md) — what survives a restart and what never can: three modes, and the reason nothing this service mints is ever written down
 - [What is not checked](what-is-not-checked.md) — the permissive posture, its three exceptions, and the one feature that inverts it
 - [Repository layout](layout.md) — where the code is, for contributors

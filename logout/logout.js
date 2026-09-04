@@ -239,12 +239,27 @@ const FAMILIES = [
         });
       });
     },
-    terminate: function (r) {
+    terminate: function (r, ctx) {
       // Through endSessionById(), never by deleting from the map: that function
       // is where the RFC 9700 section 2.2.2 refresh revocation and the one
       // `session.end` audit row live, and a delete here would be a sign-out
       // that revoked nothing and logged nothing while looking identical.
-      const ended = authn.endSessionById(r.handle, 'the protocol-independent logout');
+      //
+      // **THE `via` IS THE CALLER'S OWN WORDS AND THAT IS LOAD-BEARING SINCE
+      // 2026-09-04.** It was the constant below, which meant every door — a
+      // person signing themselves out at /logout, an operator ending somebody
+      // else's session from /admin/logout or /admin/sessions, a test driving
+      // /admin-api — produced the same sentence. `dropSession()` decides
+      // CAEP's `initiating_entity` by testing that string for `admin` or
+      // `console`, so the branch that says "an ADMINISTRATOR revoked this"
+      // was unreachable: every revocation this service emitted claimed the
+      // person had signed themselves out. That is the one distinction
+      // `initiating_entity` exists to draw, and it was being got wrong in the
+      // direction that matters — a receiver cannot tell a support desk ending
+      // a session from a person leaving. `ctx.by` carries what the door calls
+      // itself, and it is also the sentence that reaches `reason_admin`.
+      const ended = authn.endSessionById(r.handle,
+        ctx.by || 'the protocol-independent logout');
       return ended
         ? { ok: true, message: 'the sign-on session ' + r.handle + ' was ended' }
         : { ok: false, message: 'there was no session ' + r.handle + ' to end; it had ' +
@@ -740,11 +755,17 @@ FAMILIES.forEach(function (family) { FAMILY_BY_ID[family.id] = family; });
 // argument `gateStateFor()` in admin.js makes about the console's banner and
 // its guard, which were written separately and disagreed within the hour.
 // ---------------------------------------------------------------------------
-function contextFor(key, issuer) {
+function contextFor(key, issuer, by) {
   return {
     key: String(key || ''),
     sessions: sessionsForKey(key),
     issuer: issuer || '',
+    // WHICH DOOR ASKED, in the caller's own words. It is on the context
+    // because the SESSION family spends it as the `via` it hands
+    // `endSessionById()` — see that family's terminate() — and `via` is what
+    // decides CAEP's `initiating_entity`. Empty on the read paths, which do
+    // not end anything.
+    by: String(by || ''),
     // What a termination accumulates for the page to render afterwards: the
     // front-channel notifications to load in iframes, the WS-Federation cleanup
     // pings, and the SAML LogoutRequests to offer as links. They are collected
@@ -755,6 +776,235 @@ function contextFor(key, issuer) {
     cleanups: [],
     logoutRequests: []
   };
+}
+
+// ---------------------------------------------------------------------------
+// EVERY LIVE SESSION IN THIS SERVICE, ACROSS PROTOCOLS AND ACROSS PEOPLE.
+//
+// `inventoryFor()` below answers *what is alice still signed into*. This
+// answers the other half of the same question — *who is signed in at all* — and
+// it is what `/admin/sessions` and `GET /admin-api/sessions` draw.
+//
+// **IT IS HERE AND NOT IN `admin.js` BECAUSE THIS MODULE IS THE ONE MODEL OF
+// WHAT A LIVE SESSION IS.** That is this directory's whole reason to exist (see
+// its CLAUDE.md), and a console page that walked `authn.sessions`,
+// `boundConnections()` and the ticket register itself would be a SECOND answer
+// to "is this still live" — the exact thing rule 3m forbids, and the half that
+// would be wrong is the half somebody is about to press a button on.
+//
+// **THREE OF THE TEN FAMILIES HAVE A SESSION AND THE OTHER SEVEN DO NOT**, and
+// the distinction is not a simplification. A session is a state THIS SERVICE
+// holds that makes somebody currently authenticated; a token, an assertion, an
+// authorization code and an X509-SVID are things it has HANDED OUT, which
+// outlive any session and are `/admin/tokens`. The three are:
+//
+//   * the BROWSER SIGN-ON SESSION from `authn.js`, which every browser family
+//     here shares — so one row of this kind may be carrying OIDC relying
+//     parties, WS-Federation realms and SAML 2.0 service providers at once,
+//     and `via` says which protocol the sign-in came THROUGH rather than which
+//     protocols are riding on it;
+//   * the KERBEROS TICKET-GRANTING TICKET, which `recordTicket()` already calls
+//     the Kerberos session in as many words: a TGT is the session and a service
+//     ticket is one use of it;
+//   * the LDAP CONNECTION, because RFC 4511 section 4.2 makes the Bind an
+//     authorization state of the CONNECTION — in LDAP the connection IS the
+//     session, which is why the only sign-out that protocol has is closing it.
+//
+// **THE EXPIRY IS WORKED OUT DIFFERENTLY IN EACH AND THAT IS THE INTERESTING
+// COLUMN.** `expiryRule` carries the sentence, per row, because a single number
+// with no explanation is the thing that gets misread:
+//
+//   * a browser session expires at an ABSOLUTE instant fixed when it was
+//     created — an hour after the sign-in — and USING IT DOES NOT EXTEND IT.
+//     There is no idle timeout here at all, so a session in constant use dies
+//     at the same moment as one nobody touched;
+//   * a TGT expires at the `endtime` the KDC sealed INTO the ticket. Nothing
+//     here can move it: the ticket is in somebody's cache and is valid because
+//     it decrypts and its endtime has not passed. That is the whole of
+//     Kerberos's revocation model, which is why the button on that row does
+//     something different from what it looks like;
+//   * an LDAP connection HAS NO EXPIRY. It lasts until the next Bind, an
+//     Unbind, or the socket closing, and reporting an expiry of never as an
+//     expiry of `0` is exactly the confusion the sentence exists to stop.
+//
+// **A ROW CARRIES THE TWO THINGS `terminate()` NEEDS AND NOTHING ELSE NEW**:
+// the identity `key` and the row `id` that function already understands. Ending
+// one from `/admin/sessions` therefore goes through the SAME path a global
+// logout does — the same family `terminate()`, the same audit row, the same
+// refusals — rather than through a second implementation that could come to
+// disagree with it about what ending something means.
+//
+// A KERBEROS ROW'S `id` IS THE PRINCIPAL'S AND NOT THE TICKET'S, and several
+// rows can therefore share one. That is Kerberos rather than an approximation:
+// this KDC can stamp a sign-out instant on a principal and nothing finer
+// exists, so ending "this TGT" refuses every TGT that principal authenticated
+// before now and reaches no service ticket already in a cache. `why` says so on
+// every one of those rows, because a button that quietly did more than it said
+// would be worse than no button.
+// ---------------------------------------------------------------------------
+const SESSION_EXPIRY_RULES = {
+  session: 'Absolute, fixed when the session was created and NOT extended by ' +
+           'use: this service has no idle timeout, so a session somebody is ' +
+           'using ends at the same instant as one nobody has touched.',
+  krb5: 'The endtime the KDC sealed into the ticket. Nothing here can move ' +
+        'it or take it back — a TGT is valid because it decrypts and its ' +
+        'endtime has not passed, and short lifetimes ARE Kerberos\'s ' +
+        'revocation model.',
+  ldap: 'None. A Bind sets the authorization state of a CONNECTION (RFC 4511 ' +
+        'section 4.2), so it lasts until the next Bind, an Unbind, or the ' +
+        'socket closing. There is no expiry to count down to.'
+};
+
+function liveSessions() {
+  log.debug("Entering liveSessions().");
+  const nowMs = Date.now();
+  const out = [];
+
+  // THE BROWSER SIGN-ON SESSIONS. Read straight off the store that owns them,
+  // and an expired one is skipped rather than listed as expired: `authn.js`
+  // drops a session when it is next looked up, so one still in the map with a
+  // past `expires` is a session that has ended and has not been swept — and
+  // this page is what is LIVE.
+  authn.sessions.forEach(function (session) {
+    if (session.expires && session.expires <= nowMs) {
+      return;
+    }
+    const username = (session.user && session.user.username) || '';
+    const rides = [];
+    const oidc = Object.keys(session.oidcClients || {}).length;
+    const realms = Object.keys(session.wsfedRealms || {}).length;
+    const sps = Object.keys(session.saml2ServiceProviders || {}).length;
+    if (oidc) rides.push(oidc + ' OIDC relying part' + (oidc === 1 ? 'y' : 'ies'));
+    if (realms) rides.push(realms + ' WS-Federation realm' + (realms === 1 ? '' : 's'));
+    if (sps) rides.push(sps + ' SAML 2.0 service provider' + (sps === 1 ? '' : 's'));
+    out.push({
+      id: 'session:' + session.id,
+      family: 'session',
+      kind: 'Browser sign-on session',
+      key: stats.identityKeyOf(username),
+      username: username,
+      sub: (session.user && session.user.sub) || '',
+      // The protocol the sign-in came THROUGH. See startSession(): every
+      // browser family reads this one session, so this is not the list of
+      // protocols using it — `carries` is.
+      protocol: session.via || 'OAuth 2.0 / OIDC',
+      handle: session.id,
+      // The session id, which is what a token issued on it records — so this
+      // is the join to /admin/tokens and the only row kind that has one.
+      sessionId: session.id,
+      startedAt: (session.authTime || 0) * 1000,
+      expiresAt: session.expires || 0,
+      expiryRule: SESSION_EXPIRY_RULES.session,
+      amr: (session.amr || []).slice(),
+      acr: session.acr || '',
+      carries: rides,
+      detail: rides.length ? 'carries ' + rides.join(', ')
+                           : 'nothing is signed into on it yet',
+      terminable: true,
+      why: ''
+    });
+  });
+
+  // THE KERBEROS TICKET-GRANTING TICKETS, from the issued register — the only
+  // record of one that exists here, and deliberately not a store of the KDC's:
+  // a real KDC keeps no state about the tickets it has issued, which is what
+  // lets one be replicated read-only.
+  const realm = krb5Principals.REALM;
+  const signOutOn = config.value('logout.kerberosSignOut');
+  stats.issuedList().forEach(function (record) {
+    if (record.kind !== 'Kerberos TGT') {
+      return;
+    }
+    // `live` is issuedList()'s own word for it, so an expired ticket is left
+    // off by the same rule that leaves an expired session off.
+    if (record.state !== 'live') {
+      return;
+    }
+    const client = String(record.subject || '');
+    const key = stats.identityKeyOf(client);
+    const already = krb5Principals.signedOutAt([key], realm);
+    out.push({
+      id: 'krb5:' + key + '@' + realm,
+      family: 'krb5',
+      kind: 'Kerberos ticket-granting ticket',
+      key: key,
+      username: client,
+      sub: '',
+      protocol: 'Kerberos v5',
+      handle: key + '@' + realm,
+      // A Kerberos sign-in starts no browser session — it is the other kind of
+      // authentication entirely — so there is nothing to join to a token on.
+      sessionId: '',
+      startedAt: record.issuedAt || 0,
+      expiresAt: record.expiresAtMs || 0,
+      expiryRule: SESSION_EXPIRY_RULES.krb5,
+      amr: [],
+      acr: '',
+      carries: [],
+      detail: 'issued by this KDC for ' + (record.realm || realm) +
+              (record.etype ? ', ' + record.etype : '') +
+              (already ? '; the principal was signed out at ' +
+                already.toISOString() + ', so this ticket is already refused ' +
+                'at the KDC' : ''),
+      terminable: !!signOutOn,
+      why: signOutOn
+        ? 'Ending this stamps a sign-out instant on ' + key + '@' + realm +
+          ' — every ticket-granting ticket authenticated before now is then ' +
+          'refused KDC_ERR_TGT_REVOKED, not just this one, because Kerberos ' +
+          'has no per-ticket revocation. A service ticket already in a cache ' +
+          'goes on working: accepting one never contacts this KDC.'
+        : 'logout.kerberosSignOut is off, so this service leaves the KDC ' +
+          'alone and a ticket already issued goes on working. Turn it on to ' +
+          'have older tickets refused.'
+    });
+  });
+
+  // THE DIRECTORY CONNECTIONS. An anonymous bind has no key and is not
+  // somebody's session, so it is left off rather than listed under an empty
+  // name — `/admin/ldap/service` is where every connection is counted.
+  const ldapOn = config.value('logout.ldapDisconnect');
+  ldapServer.boundConnections().forEach(function (c) {
+    if (!c.key) {
+      return;
+    }
+    out.push({
+      id: 'ldap:' + c.id,
+      family: 'ldap',
+      kind: 'Directory connection',
+      key: c.key,
+      username: c.dn || c.key,
+      sub: '',
+      protocol: c.secure ? 'LDAPS' : 'LDAP',
+      handle: String(c.id),
+      sessionId: '',
+      startedAt: c.boundAt || 0,
+      // Zero here means NO EXPIRY WAS STATED, which is row()'s own convention
+      // and is why `expiryRule` is beside it rather than instead of it.
+      expiresAt: 0,
+      expiryRule: SESSION_EXPIRY_RULES.ldap,
+      amr: [],
+      acr: '',
+      carries: [],
+      detail: 'bound as ' + (c.dn || '(no DN)') + ' on ' +
+              (c.secure ? 'LDAPS ' : 'plain ') + c.port,
+      terminable: !!ldapOn,
+      why: ldapOn
+        ? 'Ending this closes the socket, which is the only sign-out LDAP ' +
+          'has. What the client sees is its connection dropping ' +
+          'mid-conversation: an unsolicited notice of disconnection (RFC ' +
+          '4511 section 4.4.1) would be the polite form and node-ldapjs has ' +
+          'no way to send one.'
+        : 'logout.ldapDisconnect is off, so this service leaves directory ' +
+          'connections alone. Turn it on to have them closed.'
+    });
+  });
+
+  // Newest first, across the three kinds together — the point of one table is
+  // that everything this service currently considers somebody signed in is in
+  // one place, in the order it happened.
+  out.sort(function (a, b) { return (b.startedAt || 0) - (a.startedAt || 0); });
+  log.debug("Leaving liveSessions(). " + out.length + " live session(s).");
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -875,7 +1125,7 @@ function terminate(key, selection, opts) {
   log.debug("Entering terminate(). key=" + key + ", selected=" +
             ((selection && selection.length) || 'all'));
   const options = opts || {};
-  const ctx = contextFor(key, options.issuer);
+  const ctx = contextFor(key, options.issuer, options.by);
   const wanted = (selection || []).map(String).filter(Boolean);
   const global = !wanted.length;
   const wantedSet = {};
@@ -1439,7 +1689,13 @@ if (typeof adminConsole.setLogoutReader === 'function') {
                terminable: typeof family.terminate === 'function' };
     }),
     inventoryFor: inventoryFor,
-    terminate: terminate
+    terminate: terminate,
+    // /admin/sessions and GET /admin-api/sessions (2026-09-04). The whole
+    // list rather than one identity's, and the rules that go with it — see
+    // liveSessions() for why enumerating them is this module's job and not
+    // the console's.
+    liveSessions: liveSessions,
+    SESSION_EXPIRY_RULES: SESSION_EXPIRY_RULES
   });
 }
 
@@ -1459,5 +1715,13 @@ module.exports = {
   // what makes the console, the API and this page one behaviour rather than
   // three — rule 7.
   inventoryFor: inventoryFor,
-  terminate: terminate
+  terminate: terminate,
+  // EVERY live session in the service, for /admin/sessions and
+  // GET /admin-api/sessions. It is on this slot rather than on one of its own
+  // for the reason the slot exists at all — see setLogoutReader() in
+  // admin-ui/admin.js — and it is validated with the other three, because a
+  // reader that installed the inventory and not this would leave that page
+  // saying no reader is loaded on a service that plainly has one.
+  liveSessions: liveSessions,
+  SESSION_EXPIRY_RULES: SESSION_EXPIRY_RULES
 };

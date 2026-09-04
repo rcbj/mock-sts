@@ -1082,6 +1082,28 @@ const SECTIONS = [
                'by what it has issued. Every figure is computed when the ' +
                'page is drawn rather than kept up to date as things happen, ' +
                'because "valid" and "expired" are functions of the clock.' },
+      // BEFORE Tokens and not after it, and the order is the argument: a
+      // session is the thing that is live NOW and a token is what came out of
+      // one, so a reader working out what is going on reads them in that
+      // direction. It sits under Metrics because that page COUNTS sessions
+      // two ways and names none of them — this is the list behind the first
+      // of those two figures.
+      { path: '/admin/sessions', label: 'Sessions',
+        blurb: 'Every session this service is holding RIGHT NOW, across the ' +
+               'three protocols that have one: the browser sign-on session ' +
+               'every browser family here shares, the Kerberos ' +
+               'ticket-granting ticket (a TGT IS the Kerberos session), and ' +
+               'the LDAP connection (RFC 4511 makes the Bind a state of the ' +
+               'CONNECTION, so in LDAP the connection is the session). Who ' +
+               'is signed in, through which protocol, what it carries, when ' +
+               'it expires &mdash; and <strong>how that expiry is worked ' +
+               'out, which is different in all three</strong>. Each row ' +
+               'links to the credentials issued on it and carries a Revoke ' +
+               'button that goes through the same termination ' +
+               '<a href="/logout">the protocol-independent sign-out</a> ' +
+               'uses. What this service has HANDED OUT is ' +
+               '<a href="/admin/tokens">Tokens</a>: those outlive every ' +
+               'session here.' },
       { path: '/admin/tokens', label: 'Tokens',
         blurb: 'Everything issued and still remembered, in ONE table: every ' +
                'JWT, every SAML assertion (WS-Trust\'s, WS-Federation\'s and ' +
@@ -1607,7 +1629,11 @@ const LIST_PARAMS = {
   // because that page now HAS a drill-down: every identifier links to
   // /admin/tokens/credential, and without this entry the way back from it landed
   // on page 1 of an unfiltered list of everything this service has ever issued.
-  '/admin/tokens': ['family', 'kind', 'state', 'per', 'page'],
+  // `session` joined the tokens page's three filters on 2026-09-04, when
+  // /admin/sessions started linking to it: every row there links to the
+  // credentials issued on that session, and there was no way to ask for them.
+  '/admin/tokens': ['family', 'kind', 'state', 'session', 'per', 'page'],
+  '/admin/sessions': ['q', 'protocol', 'per', 'page'],
   '/admin/logout': ['family', 'per', 'page'],
   '/admin/realms': ['per', 'page'],
   '/admin/federation': ['q', 'role', 'per', 'page'],
@@ -1627,7 +1653,21 @@ const LIST_PARAMS = {
   // control on this page is a GET that reloads it and a reader who searched
   // for a username, paged to the second twenty and picked a session must not
   // lose any of that to pressing Emit.
-  '/admin/caep': ['sessq', 'sessfrom', 'session']
+  '/admin/caep': ['sessq', 'sessfrom', 'session'],
+  // The CAEP SESSIONS list (2026-09-04), which has a drill-down of its own
+  // since the per-session detail moved off it: every session identifier on
+  // that table links to /admin/caep-sessions/session. `sessq` is the search
+  // over that one table and `sessionsPage` its page, named after the list for
+  // pagingOf()'s reason — that page carries a second table (the streams) and
+  // a bare `page` could not serve both. `per` is shared, as it is everywhere
+  // a page holds more than one list.
+  '/admin/caep-sessions': ['sessq', 'per', 'sessionsPage',
+                          // The per-receiver section's own search and page
+                          // (2026-09-04). Carried for the reason every other
+                          // list's are: a reader who narrowed that table and
+                          // then opened a session should come back to what
+                          // they were reading.
+                          'appq', 'applicationsPage']
 };
 
 // The list AS THE READER LEFT IT, picked out of a query by that table.
@@ -2428,6 +2468,18 @@ function page(title, active, inner, up, gate, req) {
     'details.fold>summary::before{content:"\\25b8";color:#12107c;flex:none;font-size:.9em}' +
     'details.fold[open]>summary::before{content:"\\25be"}' +
     'details.fold>summary:hover{color:#12107c}' +
+    // A SECTION drawn as a fold, for a block whose BODY is a reference
+    // table rather than a paragraph. The summary is styled as the <h2> it
+    // replaces — same size, same colour, same rule under it — so a reader
+    // meets the heading exactly where it was and the table under it costs
+    // one click instead of five screens of scrolling. It is not the plain
+    // fold's look because a section heading that reads like a paragraph's
+    // heading makes a page of eight cards look like a footnote.
+    'details.fold.section{margin:1.8em 0 1em}' +
+    'details.fold.section>summary{font-size:1.05em;color:#12107c;font-weight:600;' +
+    'border-bottom:1px solid #eee;padding-bottom:.2em}' +
+    'details.fold.section>summary::before{color:#12107c}' +
+    'details.fold.section>.foldbody{margin:.5em 0 0}' +
     // A fold inside a table cell takes the cell's own weight and slant. The
     // summary is emphasised elsewhere because it is a heading over a
     // paragraph; in a column it is the cell's text, and a bold row beside a
@@ -4862,6 +4914,18 @@ function tokensView(query) {
   const wantedFamily = String(query.family || '');
   const wantedKind = String(query.kind || '');
   const wantedState = String(query.state || '');
+  // WHICH SESSION A CREDENTIAL WAS ISSUED ON (2026-09-04). Every row of
+  // /admin/sessions links here with it set, because "what came out of this
+  // session" was a question this table held the answer to and could not be
+  // asked. It is an EXACT match on the session id and not a search: the id is
+  // what a token records, and a substring of one is not a session.
+  //
+  // A credential with NO session behind it — the two direct grants, a
+  // pre-authorized code, a token exchange, every assertion and every ticket —
+  // is therefore filtered out rather than shown, which is right: it was not
+  // issued on that session, and the empty answer is the honest one for a
+  // session nothing was issued on.
+  const wantedSession = String(query.session || '');
   // Not tokenList(): this page lists every JWT, every SAML assertion (whether
   // WS-Trust or WS-Federation issued it) and every Kerberos ticket, in one table in
   // the order they were issued.
@@ -4870,6 +4934,7 @@ function tokensView(query) {
     if (wantedFamily && record.family !== wantedFamily) return false;
     if (wantedKind && record.kind !== wantedKind) return false;
     if (wantedState && record.state !== wantedState) return false;
+    if (wantedSession && String(record.sessionId || '') !== wantedSession) return false;
     return true;
   });
   // Filter first, then page: paging a list and then filtering it would give a page 2
@@ -4888,7 +4953,7 @@ function tokensView(query) {
             filtered.length + ".");
   return {
     wantedFamily: wantedFamily, wantedKind: wantedKind,
-    wantedState: wantedState,
+    wantedState: wantedState, wantedSession: wantedSession,
     all: all, filtered: filtered, paging: paging, shown: shown,
     heldByFamily: heldByFamily,
     json: {
@@ -4898,7 +4963,7 @@ function tokensView(query) {
         return out;
       }, {}),
       filter: { family: wantedFamily || null, kind: wantedKind || null,
-                state: wantedState || null },
+                state: wantedState || null, session: wantedSession || null },
       // The clamped values, not what was asked for: `?page=999` on a two-page
       // list reports page 2, which is the page whose rows are in the reply.
       page: paging.page, pages: paging.pages, perPage: paging.perPage,
@@ -4915,12 +4980,456 @@ function tokensView(query) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// MONITORING -> SESSIONS. EVERY SESSION THIS SERVICE IS HOLDING RIGHT NOW.
+//
+// **IT IS THE OTHER HALF OF /admin/tokens AND THE TWO ARE NOT THE SAME LIST.**
+// That page is what this service has HANDED OUT — every one of those outlives
+// the session it came from, several by design and one (a Kerberos service
+// ticket) beyond recall entirely. This page is what it is still HOLDING: the
+// state that makes somebody currently authenticated, which is the question
+// somebody actually arrives with when they ask who is signed in.
+//
+// **THE MODEL IS `logout/logout.js`'s AND NOT THIS FILE'S**, through the sixth
+// slot. That module is the one answer to "what is a live session" across
+// families — see its CLAUDE.md — and this page walking `authn.sessions`,
+// `boundConnections()` and the ticket register itself would be a SECOND answer,
+// which is the thing rule 3m exists to prevent. It matters more here than on
+// /admin/logout because of the button: a Revoke drawn from one reading and
+// performed by another is a control that acts on something other than the row
+// it is beside.
+//
+// **THE EXPIRY COLUMN IS THE ONE WORTH READING TWICE.** Each of the three
+// session kinds works its expiry out differently and the difference is not a
+// detail — a browser session's is absolute and is not extended by use, a TGT's
+// was sealed into the ticket by the KDC and cannot be moved, and an LDAP
+// connection has no expiry at all. So the column carries the countdown AND the
+// rule, and the rule comes off `liveSessions()`'s row rather than being written
+// again here.
+//
+// **THE REVOKE BUTTON GOES THROUGH `terminate()`**, the same function
+// /logout's global sign-out uses, with a selection of one — so it writes the
+// same audit row, honours the same two settings and gives the same refusals.
+// What it does NOT do is pretend the three are alike: ending a browser session
+// ends that session, ending an LDAP connection closes a socket, and ending a
+// Kerberos row stamps a sign-out instant on a PRINCIPAL that refuses every
+// ticket it authenticated before now. The last of those does more than the row
+// it is on, and the row says so rather than the button quietly doing it.
+// ---------------------------------------------------------------------------
+
+// The protocols this list can hold, for the filter. Built from the rows
+// themselves rather than written down, because the set depends on what people
+// have signed in THROUGH — `session.via` is a federation relationship's name on
+// a federated sign-in — and a hand-written list would be a select with entries
+// that match nothing beside sign-ins it cannot name.
+function sessionProtocolsIn(rows) {
+  log.debug("Entering sessionProtocolsIn().");
+  const out = [];
+  rows.forEach(function (row) {
+    if (row.protocol && out.indexOf(row.protocol) < 0) {
+      out.push(row.protocol);
+    }
+  });
+  out.sort();
+  log.debug("Leaving sessionProtocolsIn(). " + out.length + " protocol(s).");
+  return out;
+}
+
+// WHEN THIS SESSION ENDS, AND HOW THAT IS WORKED OUT. Three answers rather than
+// one, because the three kinds are genuinely different and a column that showed
+// only a timestamp would be read as one rule with three values.
+function sessionExpiryCell(row, nowMs) {
+  const rule = row.expiryRule || '';
+  if (!row.expiresAt) {
+    return '<td class="sub" title="' + esc(rule) + '"><strong>no expiry</strong>' +
+      '<div class="sub">it ends when something ends it</div></td>';
+  }
+  const left = row.expiresAt - nowMs;
+  if (left <= 0) {
+    // Live rows only reach here in a race — the list was built a moment ago —
+    // and saying so is better than a negative countdown.
+    return '<td class="state-expired" title="' + esc(rule) + '">expired' +
+      '<div class="sub">' + esc(whenText(row.expiresAt)) + '</div></td>';
+  }
+  return '<td' + (left < 5 * 60 * 1000 ? ' class="state-expired"' : '') +
+    ' title="' + esc(rule) + '">in ' + esc(durationText(left)) +
+    '<div class="sub">' + esc(whenText(row.expiresAt)) + '</div></td>';
+}
+
+// WHAT CAME OUT OF THIS SESSION, as a link into /admin/tokens.
+//
+// Only a browser sign-on session has a join: a token records the `sessionId` it
+// was issued under, and nothing else here does. A Kerberos row therefore links
+// to its FAMILY — the TGT on this row is in that table and this service keeps no
+// handle on one, which is a fact about Kerberos rather than a gap — and an LDAP
+// connection links nowhere at all, because a bind issues no credential.
+function sessionCredentialsCell(row) {
+  if (row.family === 'session') {
+    return '<td><a href="' + esc('/admin/tokens' +
+      queryWith({ session: row.sessionId }, {})) +
+      '" title="' + esc('Every credential issued under this session') +
+      '">issued on it</a></td>';
+  }
+  if (row.family === 'krb5') {
+    return '<td><a href="' + esc('/admin/tokens' +
+      queryWith({ family: 'ticket' }, {})) +
+      '" title="' + esc('Every Kerberos ticket this KDC has minted. There is ' +
+        'no per-session link: a ticket carries no identifier this service ' +
+        'keeps a handle on.') + '">the ticket table</a></td>';
+  }
+  return '<td class="sub" title="' + esc('A Bind issues no credential. It ' +
+    'sets the authorization state of a connection, and that state is this ' +
+    'row.') + '">none</td>';
+}
+
+function sessionRow(row, nowMs, canWrite, back) {
+  log.debug("Entering sessionRow(). " + row.id);
+  const revoke = row.terminable && canWrite
+    ? '<form method="post" action="/admin/sessions">' +
+      '<input type="hidden" name="action" value="revoke">' +
+      '<input type="hidden" name="key" value="' + esc(row.key) + '">' +
+      '<input type="hidden" name="select" value="' + esc(row.id) + '">' +
+      '<input type="hidden" name="back" value="' + esc(back) + '">' +
+      '<button class="danger"' + (row.why ? ' title="' + esc(row.why) + '"' : '') +
+      '>Revoke</button></form>'
+    : (canWrite
+        ? '<span class="state-none" title="' + esc(row.why) + '">cannot</span>'
+        : '<span class="state-none" title="' +
+          esc('Ending a session needs the Admin Write role.') + '">—</span>');
+  const out = '<tr>' +
+    '<td>' + esc(row.kind) +
+    '<div class="sub">' + shortened(row.handle, 28) + '</div></td>' +
+    '<td>' + esc(row.protocol) +
+    (row.acr ? '<div class="sub">acr ' + esc(row.acr) +
+      (row.amr.length ? ', amr ' + esc(row.amr.join(' ')) : '') + '</div>' : '') +
+    '</td>' +
+    '<td>' + esc(row.username || '(unknown)') +
+    (row.sub ? '<div class="sub"><code>' + esc(row.sub) + '</code></div>' : '') +
+    '</td>' +
+    '<td class="sub">' +
+    (row.startedAt ? esc(whenText(row.startedAt))
+                   : '<span title="' + esc('Nothing recorded when this one ' +
+                     'started. A connection bound before this service began ' +
+                     'stamping the instant reads this way.') + '">not recorded</span>') +
+    '</td>' +
+    sessionExpiryCell(row, nowMs) +
+    '<td class="sub">' + esc(row.detail || '—') + '</td>' +
+    sessionCredentialsCell(row) +
+    '<td>' + revoke + '</td>' +
+    '</tr>';
+  log.debug("Leaving sessionRow().");
+  return out;
+}
+
+// One route, two answers, and the choice is here rather than in the route so
+// that GET /admin-api/sessions makes the same one — the rule every view in this
+// file follows, and the reason the management API cannot come to disagree with
+// the page about who is signed in.
+function sessionsView(req) {
+  log.debug("Entering sessionsView().");
+  const query = req.query || {};
+  if (!logoutReader) {
+    log.debug("Leaving sessionsView(). No logout reader.");
+    return { installed: false, all: [], protocols: [], shown: [], paging: null,
+             wantedText: '', wantedProtocol: '',
+             json: { installed: false, held: 0, matched: 0, shown: 0,
+                     sessions: [],
+                     note: 'logout/logout.js is not loaded in this process, ' +
+                           'so there is no reader for what is live.' } };
+  }
+  const all = logoutReader.liveSessions();
+  const wantedText = queryOne(query, 'q').trim();
+  const wantedProtocol = queryOne(query, 'protocol').trim();
+  // Filter first, then page — pagingOf()'s rule, and for its reason.
+  const filtered = all.filter(function (row) {
+    if (wantedProtocol && row.protocol !== wantedProtocol) return false;
+    return chooserMatches([row.username, row.sub, row.handle, row.key,
+                           row.kind, row.protocol], wantedText);
+  });
+  const paging = pagingOf(query, filtered.length, { noun: 'sessions' });
+  const shown = filtered.slice(paging.offset, paging.offset + paging.perPage);
+  const byKind = {};
+  all.forEach(function (row) {
+    byKind[row.family] = (byKind[row.family] || 0) + 1;
+  });
+  log.debug("Leaving sessionsView(). " + shown.length + " row(s) of " +
+            filtered.length + " (" + all.length + " live).");
+  return {
+    installed: true, all: all, filtered: filtered, shown: shown,
+    paging: paging, byKind: byKind,
+    protocols: sessionProtocolsIn(all),
+    wantedText: wantedText, wantedProtocol: wantedProtocol,
+    json: {
+      installed: true,
+      held: all.length, matched: filtered.length, shown: shown.length,
+      heldByKind: byKind,
+      filter: { q: wantedText || null, protocol: wantedProtocol || null },
+      // The clamped values, not what was asked for: `?page=999` on a two-page
+      // list reports page 2, which is the page whose rows are in the reply.
+      page: paging.page, pages: paging.pages, perPage: paging.perPage,
+      firstRow: paging.firstRow, lastRow: paging.lastRow,
+      at: Date.now(),
+      // The rules, once, beside the rows rather than repeated on each of them:
+      // a caller reading `expiresAt` needs to know which of the three arithmetics
+      // produced it, and every row already says which family it is.
+      expiryRules: logoutReader.SESSION_EXPIRY_RULES || {},
+      sessions: shown
+    }
+  };
+}
+
+app.get('/admin/sessions', function (req, res) {
+  log.debug("Entering the admin sessions page.");
+  const view = sessionsView(req);
+  const gate = gateStateFor(req);
+
+  if (!view.installed) {
+    const inner = messagesOf(req) +
+      '<div class="err"><strong>The logout reader is not installed in this ' +
+      'process</strong>, so nothing here can say what is live. Every row on ' +
+      'this page is read from <code>logout/logout.js</code>, which is the one ' +
+      'model of what a session IS across protocol families.</div>';
+    respond(req, res, view.json, 'Sessions', '/admin/sessions', inner);
+    log.debug("Leaving the admin sessions page. No reader.");
+    return;
+  }
+
+  const nowMs = Date.now();
+  const paging = view.paging;
+  // What every paging link carries with it. The page number is not in here —
+  // pageNavPair() supplies that per link — and neither is `format`, because
+  // JSON has no links in it.
+  const filterParams = { q: view.wantedText, protocol: view.wantedProtocol,
+                         per: req.query.per ? paging.perPage : '' };
+  const nav = pageNavPair('/admin/sessions', filterParams, paging);
+  // Where a Revoke sends the reader back to: THIS page of THIS filter, because
+  // the row above and below the one they ended is what they were reading.
+  const back = queryWith(filterParams, { page: paging.page });
+
+  const protocolOptions = ['<option value=""' +
+      (view.wantedProtocol ? '' : ' selected') + '>any protocol</option>']
+    .concat(view.protocols.map(function (name) {
+      return '<option value="' + esc(name) + '"' +
+             (name === view.wantedProtocol ? ' selected' : '') + '>' +
+             esc(name) + '</option>';
+    })).join('');
+
+  const rows = view.shown.length
+    ? view.shown.map(function (row) {
+        return sessionRow(row, nowMs, gate.write, back);
+      }).join('')
+    : '<tr><td colspan="8">' +
+      (view.all.length
+        ? 'Nothing matches. ' + view.all.length + ' session(s) are live ' +
+          'under other names or other protocols.'
+        : 'Nothing is signed in. Sign somebody in &mdash; an OIDC flow, a ' +
+          'SAML 2.0 sign-in, an <code>ldapsearch</code> that binds, a ' +
+          '<code>kinit</code> &mdash; and a row appears here.') +
+      '</td></tr>';
+
+  const inner = messagesOf(req) +
+
+    note('<strong>Every session this service is holding right now</strong>, ' +
+    'across the three protocols that have one. A session is state THIS ' +
+    'SERVICE holds that makes somebody currently authenticated; a token, an ' +
+    'assertion, a ticket and an SVID are things it has HANDED OUT, they ' +
+    'outlive every session here, and they are ' +
+    '<a href="/admin/tokens">Tokens</a>. Keeping the two apart is the whole ' +
+    'point of a page of each.') +
+
+    '<div class="tiles">' +
+    tile(view.all.length, 'live sessions') +
+    tile(view.byKind.session || 0, 'browser sign-on') +
+    tile(view.byKind.krb5 || 0, 'Kerberos TGTs') +
+    tile(view.byKind.ldap || 0, 'LDAP connections') +
+    '</div>' +
+
+    note('<strong>The three are not variants of one thing and their ' +
+    'expiries are worked out differently</strong>, which is why the Expires ' +
+    'column carries the rule as well as the time &mdash; hover it on any ' +
+    'row:') +
+    '<ul>' +
+    '<li><strong>The browser sign-on session</strong> &mdash; the cookie from ' +
+    '<code>/authn/login</code>, which OAuth 2.0 / OIDC, WS-Federation, SAML ' +
+    '2.0, SAML 1.1 and this console all read. It expires at an ABSOLUTE ' +
+    'instant fixed when it was created and <strong>using it does not extend ' +
+    'it</strong>: there is no idle timeout here, so a session in constant use ' +
+    'dies at the same moment as one nobody has touched. The <em>Carries</em> ' +
+    'column is what has signed in ON it, which is what makes ending one reach ' +
+    'further than it looks.</li>' +
+    '<li><strong>The Kerberos ticket-granting ticket</strong> &mdash; a TGT ' +
+    'IS the Kerberos session and a service ticket is one use of it. It ' +
+    'expires at the <code>endtime</code> the KDC sealed INTO the ticket, and ' +
+    'nothing here can move it or take it back: a ticket is valid because it ' +
+    'decrypts and its endtime has not passed. Short lifetimes are the whole ' +
+    'of Kerberos\'s revocation model.</li>' +
+    '<li><strong>The LDAP connection</strong> &mdash; RFC 4511 section 4.2 ' +
+    'makes a Bind the authorization state of a CONNECTION, so in LDAP the ' +
+    'connection is the session and closing it is the only sign-out the ' +
+    'protocol has. It has <strong>no expiry at all</strong>: it lasts until ' +
+    'the next Bind, an Unbind, or the socket closing.</li>' +
+    '</ul>' +
+
+    warn('<strong>Revoke is not one act either.</strong> On a browser ' +
+    'session it ends that session and everything hanging off it &mdash; the ' +
+    'relying parties are notified, the refresh tokens issued on it are ' +
+    'revoked. On an LDAP row it closes the socket, which the client sees as ' +
+    'its connection dropping mid-conversation. On a Kerberos row <strong>it ' +
+    'does more than the row it is on</strong>: it stamps a sign-out instant ' +
+    'on the PRINCIPAL, so every ticket-granting ticket that principal ' +
+    'authenticated before now is refused &mdash; and it still reaches no ' +
+    'service ticket already in a cache, because accepting one never contacts ' +
+    'this KDC. Every button carries its own sentence; hover it before ' +
+    'pressing it. All three go through the same termination ' +
+    '<a href="/logout">the protocol-independent sign-out</a> performs, so ' +
+    'they write the same audit row and honour the same two settings.') +
+
+    '<h2>Live sessions</h2>' +
+    // No `page` input in this form, and that is the point: changing the filter
+    // or the page size sends the reader back to page 1. Carrying the old page
+    // number over would land somebody on page 6 of a two-page result.
+    '<form method="get" action="/admin/sessions"><div class="formrow">' +
+      '<label for="q">Search</label>' +
+      '<input type="text" id="q" name="q" size="28" value="' +
+      esc(view.wantedText) + '" placeholder="a username, a subject, a DN or ' +
+      'a session id">' +
+      '<label for="protocol">Protocol</label>' +
+      '<select id="protocol" name="protocol">' + protocolOptions + '</select>' +
+      '<label for="per">Per page</label>' +
+      '<select id="per" name="per">' + perPageOptions(paging.perPage) +
+      '</select>' +
+      '<button class="secondary">Filter</button>' +
+      (view.wantedText || view.wantedProtocol
+        ? ' <a href="/admin/sessions">clear</a>' : '') +
+    '</div></form>' +
+    note('The search matches the username, the subject, the session id, the ' +
+    'bind DN and the principal name together, because a reader arrives ' +
+    'holding exactly one of those. The protocol is the one the sign-in came ' +
+    'THROUGH and not the only one the session serves: every browser family ' +
+    'here reads the same session, so a row saying <code>SAML 2.0</code> may ' +
+    'well be carrying OIDC relying parties too &mdash; which is what the ' +
+    '<em>Carries</em> column says.') +
+    nav.head +
+    '<table><tr><th>Kind</th><th>Protocol</th><th>Who</th><th>Since</th>' +
+    '<th>Expires</th><th>Carries</th><th>Credentials</th><th></th></tr>' +
+    rows + '</table>' +
+    nav.foot +
+    note(view.filtered.length + ' row(s) match' +
+    (paging.pages > 1
+      ? ', of which rows ' + paging.firstRow + '&ndash;' + paging.lastRow +
+        ' are on this page (' + paging.page + ' of ' + paging.pages + ')'
+      : '') +
+    '; ' + view.all.length + ' live in total. Newest first. Everything here ' +
+    'is read live from the module that owns it every time this page is ' +
+    'drawn &mdash; there is no cache, deliberately, because a cached answer ' +
+    'to <em>is this still live</em> would be the half a reader is about to ' +
+    'press a button on.') +
+
+    note('<a href="/admin/logout">What ONE person is still signed into</a>, ' +
+    'which is this question asked the other way round and reaches seven more ' +
+    'families &middot; ' +
+    '<a href="/admin/tokens">what has been issued</a> &middot; ' +
+    '<a href="/admin/caep-sessions">what has been SAID about these ' +
+    'sessions</a> over Shared Signals &middot; ' +
+    '<a href="/admin/metrics">the counts</a> &middot; ' +
+    '<a href="/admin/sessions?format=json">this page as JSON</a> &middot; ' +
+    '<a href="/admin-api/sessions">the same over the management API</a>');
+
+  respond(req, res, view.json, 'Sessions', '/admin/sessions', inner);
+  log.debug("Leaving the admin sessions page.");
+});
+
+// THE ONE ACTION, AND IT IS `logout.terminate()` WITH A SELECTION OF ONE.
+//
+// Not a second implementation of what ending a session means: that function
+// re-collects from every family, ends what was named, writes the one audit row
+// for the act and reports what it could not end and why — all of which a
+// hand-written revoke here would have had to reproduce and would have
+// reproduced differently. `/admin/sessions` is a VIEW of that model with a
+// button on it.
+//
+// The `key` comes off the row rather than out of a name box, because
+// terminate() is keyed on an identity and the row already knows which one; a
+// posted key that names nobody simply ends nothing, and says so.
+function sessionsAction(body, opts) {
+  log.debug("Entering sessionsAction().");
+  if (!logoutReader) {
+    log.debug("Leaving sessionsAction(). No logout reader.");
+    return { ok: false, errors: [
+      'logout/logout.js is not loaded in this process, so there is nothing ' +
+      'to end.'] };
+  }
+  const asked = body || {};
+  const action = String(asked.action || '');
+  if (action !== 'revoke') {
+    log.debug("Leaving sessionsAction(). Unknown action.");
+    return { ok: false, errors: ['Unknown action "' + action +
+      '". There is one: revoke.'] };
+  }
+  const key = String(asked.key || '').trim();
+  const selected = String(asked.select || '').trim();
+  if (!key || !selected) {
+    log.debug("Leaving sessionsAction(). Nothing named.");
+    return { ok: false, errors: [
+      'Both "key" (whose session it is) and "select" (the session id, in the ' +
+      'form the sessions list gives it — "session:…", "ldap:…" or ' +
+      '"krb5:…@REALM") are needed. GET /admin-api/sessions carries both on ' +
+      'every row.'] };
+  }
+  const result = logoutReader.terminate(key, [selected], {
+    actor: (opts && opts.actor) || '',
+    by: (opts && opts.by) || 'the sessions page',
+    channel: 'http'
+  });
+  // terminate() reports per row. One row was named, so its sentence IS the
+  // answer — and a refusal (a Kerberos row while logout.kerberosSignOut is
+  // off, a stale id from a page drawn a minute ago) has to come back as a
+  // refusal rather than as a success that did nothing.
+  const done = (result.terminated || []).length;
+  const unknown = (result.unknown || []).length;
+  const said = []
+    .concat((result.terminated || []).map(function (one) { return one.message; }))
+    .concat((result.skipped || []).map(function (one) { return one.message; }))
+    .join(' ');
+  if (done) {
+    log.debug("Leaving sessionsAction(). Ended.");
+    return { ok: true, message: said || 'the session was ended', result: result };
+  }
+  log.debug("Leaving sessionsAction(). Nothing was ended.");
+  return { ok: false, result: result, errors: [
+    said || (unknown
+      ? 'Nothing here is called "' + selected + '" any more. It had already ' +
+        'ended, or the list this button came from was drawn before it did.'
+      : 'Nothing was ended.') ] };
+}
+
+app.post('/admin/sessions', function (req, res) {
+  log.debug("Entering the admin sessions action endpoint.");
+  const body = parseBody(req);
+  // NO ROLE CHECK HERE, and that is not an omission: the console's gate is
+  // MIDDLEWARE and it refuses every non-GET without Admin Write with a 403 and
+  // a page saying which group grants it — see the gate above. A second check
+  // here would be a second refusal, in a different shape (a 303 carrying a
+  // message), for the same act; the browser suite asserts the 403, so the two
+  // would have disagreed the first time anybody looked.
+  const gate = gateStateFor(req);
+  const result = sessionsAction(body, { actor: gate.username || '',
+                                        by: 'the /admin/sessions page' });
+  // Back to the page and filter the button was on, rebuilt from the whitelist
+  // rather than echoed — the rule every form on this console follows.
+  const back = '/admin/sessions' +
+    queryWith(listViewFromBack('/admin/sessions', body.back), {});
+  respondToAction(req, res, back, result);
+  log.debug("Leaving the admin sessions action endpoint.");
+});
+
 app.get('/admin/tokens', function (req, res) {
   log.debug("Entering the admin tokens page.");
   const view = tokensView(req.query);
   const wantedFamily = view.wantedFamily;
   const wantedKind = view.wantedKind;
   const wantedState = view.wantedState;
+  const wantedSession = view.wantedSession;
   const all = view.all;
   const filtered = view.filtered;
   const paging = view.paging;
@@ -4930,6 +5439,7 @@ app.get('/admin/tokens', function (req, res) {
   // pageNavPair() supplies that per link — and neither is `format`, because JSON has no
   // links in it and a caller asking for JSON passes its own parameters anyway.
   const filterParams = { family: wantedFamily, kind: wantedKind, state: wantedState,
+                         session: wantedSession,
                          per: req.query.per ? paging.perPage : '' };
   const nav = pageNavPair('/admin/tokens', filterParams, paging);
   // What the POST handler sends the browser back to. A row button returns to THIS
@@ -5035,9 +5545,31 @@ app.get('/admin/tokens', function (req, res) {
       '<label for="kind">Kind</label><select id="kind" name="kind">' + kindOptions + '</select>' +
       '<label for="state">State</label><select id="state" name="state">' + stateOptions + '</select>' +
       '<label for="per">Per page</label><select id="per" name="per">' + perOptions + '</select>' +
+      // The session filter rides as a HIDDEN input rather than as a fourth
+      // select: it is not a choice out of a short list, it is one session
+      // somebody arrived from — so it survives a Filter and is taken off by
+      // the sentence below, which names the session it is holding.
+      (wantedSession
+        ? '<input type="hidden" name="session" value="' + esc(wantedSession) + '">'
+        : '') +
       '<button class="secondary">Filter</button>' +
-      (wantedFamily || wantedKind || wantedState ? ' <a href="/admin/tokens">clear</a>' : '') +
+      (wantedFamily || wantedKind || wantedState || wantedSession
+        ? ' <a href="/admin/tokens">clear</a>' : '') +
     '</div></form>' +
+    (wantedSession
+      ? note('Narrowed to what was issued on the browser sign-on session ' +
+        '<code>' + esc(wantedSession) + '</code>, which is how ' +
+        '<a href="' + esc('/admin/sessions') + '">Sessions</a> links here. ' +
+        'Only credentials issued UNDER a session carry one, so an assertion, ' +
+        'a Kerberos ticket, a token from either direct grant and anything an ' +
+        'RFC 8693 exchange produced are absent by construction rather than ' +
+        'missing &mdash; that is a fact about the credential and not a gap in ' +
+        'the recording. ' +
+        '<a href="' + esc('/admin/tokens' +
+          queryWith({ family: wantedFamily, kind: wantedKind,
+                      state: wantedState }, {})) +
+        '">Show every session\'s</a>.')
+      : '') +
     // Family and Kind are ANDed, like any two filters, so a contradictory pair
     // (Kerberos tickets, id_token) matches nothing. Said here rather than prevented,
     // because the alternative is a page that silently ignores one of the two
@@ -11728,15 +12260,25 @@ let logoutReader = null;
 
 function setLogoutReader(reader) {
   const complete = reader && typeof reader.inventoryFor === 'function' &&
-                   typeof reader.terminate === 'function' && Array.isArray(reader.FAMILIES);
+                   typeof reader.terminate === 'function' &&
+                   // liveSessions() joined the three on 2026-09-04, for
+                   // /admin/sessions and GET /admin-api/sessions. It is
+                   // validated with them rather than tested at each call site
+                   // for the reason the whole slot is validated whole: a
+                   // reader carrying the inventory and not this would leave
+                   // that page saying no reader is installed on a service that
+                   // plainly has one.
+                   typeof reader.liveSessions === 'function' &&
+                   Array.isArray(reader.FAMILIES);
   if (!complete) {
     // A warning and not a throw, for the reason admin_rbac.js's install has:
     // a console that will not start is worse than a console with one page that
     // says why it cannot answer.
     log.warn('admin: a logout reader was offered that does not carry ' +
-             'inventoryFor(), terminate() and FAMILIES. It is refused whole — a partial one ' +
-             'would leave /admin/logout listing what is live and unable to end any of it, ' +
-             'which is the worst of the two halves.');
+             'inventoryFor(), terminate(), liveSessions() and FAMILIES. It is refused ' +
+             'whole — a partial one would leave /admin/logout and /admin/sessions listing ' +
+             'what is live and unable to end any of it, which is the worst of the two ' +
+             'halves.');
     return;
   }
   logoutReader = reader;
@@ -22296,14 +22838,28 @@ function caepStateCell(state) {
   return out;
 }
 
-function caepSessionRow(row, shorts, prefix) {
+// ONE ROW OF THE SESSIONS TABLE, and its first cell is the way IN since
+// 2026-09-04. What used to be under this table — a card per session listing
+// every event sent about it — is /admin/caep-sessions/session now, one session
+// at a time. `listView` is what the reader was looking at when they clicked, so
+// the drill-down's trail comes back to the search and the page they left rather
+// than to the top of an unfiltered list.
+//
+// `back` is the same query as a POSTable field, for the Reset button in the
+// last cell: resetting a row on page three used to answer with page one, so the
+// row somebody had just acted on was off screen and so was its neighbour.
+function caepSessionRow(row, shorts, prefix, listView, back) {
   log.debug("Entering caepSessionRow().");
   const counts = shorts.map(function (short) {
     const n = row.counts[prefix + short] || 0;
     return '<td class="' + (n ? '' : 'sub') + '">' + esc(String(n)) + '</td>';
   }).join('');
+  const href = '/admin/caep-sessions/session' +
+    queryWith(listView || {}, { id: row.sessionId });
   const out = '<tr>' +
-    '<td><code>' + esc(row.sessionId) + '</code>' +
+    '<td><a href="' + esc(href) + '" title="' +
+    esc('Everything that has been said about this session, in order') +
+    '"><code>' + esc(row.sessionId) + '</code></a>' +
     '<div class="sub">' + esc(row.protocol || '') + '</div></td>' +
     '<td>' + esc(row.username || row.sub || '(unknown)') +
     '<div class="sub"><code>' + esc(row.sub) + '</code></div></td>' +
@@ -22318,10 +22874,20 @@ function caepSessionRow(row, shorts, prefix) {
     '">' + esc(row.risk.level || '—') + '</td>' +
     counts +
     '<td><strong>' + esc(String(row.total)) + '</strong></td>' +
-    '<td><form method="post" action="/admin/caep-sessions">' +
+    // IT POSTS TO /admin/caep AND NOT TO THE PAGE IT IS ON, which is the
+    // arrangement the applications page's permission forms already have with
+    // /admin/delegation: a form may live on one page and post to another's
+    // handler, and MOVING A FORM IS NOT MOVING AN ACTION. There is one CAEP
+    // action handler, it has one operation on /admin-api, and a second route
+    // here would have wanted a second operation over the same function —
+    // which is the duplication rule 7 is trying to prevent rather than
+    // require. `from` and `back` are what bring the reader back to this page.
+    '<td><form method="post" action="/admin/caep">' +
     '<input type="hidden" name="action" value="reset-session">' +
     '<input type="hidden" name="session_id" value="' +
     esc(row.sessionId) + '">' +
+    '<input type="hidden" name="from" value="sessions">' +
+    '<input type="hidden" name="back" value="' + esc(back || '') + '">' +
     '<button class="secondary">Reset</button></form></td>' +
     '</tr>';
   log.debug("Leaving caepSessionRow().");
@@ -22332,39 +22898,96 @@ function caepSessionRow(row, shorts, prefix) {
 // with the findings the register made as each one was applied. The counts on
 // the table above say HOW MANY and this says WHICH, and the two are different
 // questions — see caep.js on why the ring and the counters are separate.
-function caepSessionCard(row) {
-  log.debug("Entering caepSessionCard().");
-  const events = row.events.length
-    ? row.events.map(function (one) {
-        return '<tr><td class="sub">' + esc(one.at) + '</td>' +
-          '<td>' + esc(one.name) + '</td>' +
-          '<td><code>' + esc(one.jti) + '</code></td>' +
-          '<td><code>' + esc(one.streamId || '(none)') + '</code></td>' +
-          '<td class="sub">' + esc((one.warnings || []).join(' ') || '—') +
-          '</td></tr>';
-      }).join('')
-    : '<tr><td colspan="5">Nothing has been said about this session. That ' +
-      'is the ordinary case when no stream asked for the type, and it is ' +
-      'the answer to &ldquo;why did nothing arrive&rdquo; nine times out of ' +
-      'ten.</td></tr>';
-  const claims = Object.keys(row.claims).length
-    ? '<div class="sub">Claims changed: <code>' +
-      esc(JSON.stringify(row.claims)) + '</code></div>'
-    : '';
-  const notes = row.notes.length
-    ? '<div class="sub">' + esc(row.notes.join(' ')) + '</div>'
-    : '';
-  const out = '<div class="card"><h3><code>' + esc(row.sessionId) +
-    '</code> &mdash; ' + esc(row.username || row.sub) + '</h3>' +
-    '<div class="sub">' + esc(row.subject) + '</div>' +
-    '<div class="sub">Established ' + esc(row.establishedAt) +
-    ', last changed ' + esc(row.updatedAt) + '. State <strong>' +
-    esc(row.state) + '</strong>.</div>' +
-    claims + notes +
-    '<table><tr><th>When</th><th>Event</th><th>jti</th><th>Stream</th>' +
-    '<th>What the register noticed</th></tr>' + events + '</table></div>';
-  log.debug("Leaving caepSessionCard().");
+//
+// **IT IS A PAGE OF ITS OWN SINCE 2026-09-04 AND USED TO BE A CARD PER SESSION
+// UNDER THE TABLE.** That block was drawn for EVERY session the register held,
+// each with a table of its own, so a service driven for an afternoon answered
+// /admin/caep-sessions with a couple of hundred nested tables under the one
+// table anybody had come to read — and the sessions table itself was then off
+// the top of the screen for the whole of it. One session at a time, reached by
+// clicking the identifier, is the arrangement /admin/tokens and its credential
+// drill-down already have.
+function caepEventRow(one) {
+  return '<tr><td class="sub">' + esc(one.at) + '</td>' +
+    '<td>' + esc(one.name) + '</td>' +
+    '<td><code>' + esc(one.jti) + '</code></td>' +
+    '<td><code>' + esc(one.streamId || '(none)') + '</code></td>' +
+    '<td class="sub">' + esc((one.warnings || []).join(' ') || '—') +
+    '</td></tr>';
+}
+
+// The facts about one session that are not events: who it belongs to, what
+// state it is in, and the three CAEP dimensions a receiver acts on. Drawn as a
+// table rather than as the run of `<div class="sub">` lines the card used,
+// because on a page of its own this is the summary somebody reads first and a
+// paragraph of eight facts is not read at all.
+function caepSessionFacts(row) {
+  log.debug("Entering caepSessionFacts().");
+  function line(label, value, cls) {
+    return '<tr><th>' + esc(label) + '</th><td' +
+      (cls ? ' class="' + cls + '"' : '') + '>' + value + '</td></tr>';
+  }
+  const out = '<table>' +
+    line('Session', '<code>' + esc(row.sessionId) + '</code>') +
+    line('Who', esc(row.username || row.sub || '(unknown)') +
+      ' <span class="sub"><code>' + esc(row.sub) + '</code></span>') +
+    line('Subject', '<span class="sub">' + esc(row.subject) + '</span>') +
+    line('Issuer', '<span class="sub"><code>' + esc(row.iss || '—') +
+      '</code></span>') +
+    line('Protocol', '<span class="sub">' + esc(row.protocol || '—') +
+      '</span>') +
+    line('State', esc(row.state),
+      row.state === 'revoked' ? 'state-invalid'
+        : (row.state === 'presented' ? 'state-valid' : 'sub')) +
+    line('Established', '<span class="sub">' + esc(row.establishedAt) +
+      '</span>') +
+    line('Last changed', '<span class="sub">' + esc(row.updatedAt) +
+      '</span>') +
+    line('Assurance', '<span class="sub">' + esc(row.assurance.level
+      ? (row.assurance.namespace + ' ' + row.assurance.level) : '—') +
+      '</span>') +
+    line('Device compliance', esc(row.compliance || '—'),
+      row.compliance === 'not-compliant' ? 'state-invalid' : 'sub') +
+    line('Risk', esc(row.risk.level || '—') +
+      (row.risk.subject ? ' <span class="sub">' + esc(row.risk.subject) +
+        '</span>' : ''),
+      row.risk.level === 'HIGH' ? 'state-invalid' : 'sub') +
+    line('acr / amr', '<span class="sub"><code>' + esc(row.acr || '—') +
+      '</code> / <code>' + esc((row.amr || []).join(' ') || '—') +
+      '</code></span>') +
+    (Object.keys(row.claims).length
+      ? line('Claims changed', '<code>' + esc(JSON.stringify(row.claims)) +
+        '</code>')
+      : '') +
+    ((row.credentials || []).length
+      ? line('Credentials', '<span class="sub">' +
+        esc(row.credentials.join(', ')) + '</span>')
+      : '') +
+    ((row.notes || []).length
+      ? line('Notes', '<span class="sub">' + esc(row.notes.join(' ')) +
+        '</span>')
+      : '') +
+    '</table>';
+  log.debug("Leaving caepSessionFacts().");
   return out;
+}
+
+// What has been said about this session PER TYPE, which is the row of the
+// sessions table the reader clicked, drawn the long way round. It is here and
+// not only there because the eight columns of that table are headed by an
+// abbreviation — `revoked`, `established`, `credential` — and this is the one
+// place there is room for the type's whole name and its URI.
+function caepSessionCounts(row, types) {
+  log.debug("Entering caepSessionCounts().");
+  const rows = types.map(function (type) {
+    const n = row.counts[type.uri] || 0;
+    return '<tr><td>' + esc(type.name) + '</td>' +
+      '<td class="sub"><code>' + esc(type.short) + '</code></td>' +
+      '<td class="' + (n ? '' : 'sub') + '">' + esc(String(n)) + '</td></tr>';
+  }).join('');
+  log.debug("Leaving caepSessionCounts(). " + types.length + " type(s).");
+  return '<table><tr><th>Event type</th><th>Short name</th><th>Sent</th></tr>' +
+    rows + '</table>';
 }
 
 // ---------------------------------------------------------------------------
@@ -22530,8 +23153,19 @@ app.get('/admin/caep', function (req, res) {
             'all reach the same funnel here and all produce a row.'))
       : '') +
 
+    // THE CATALOGUE IS FOLDED AND STARTS CLOSED, which is the one place on
+    // this console where a section rather than a paragraph is behind a
+    // disclosure. Eight cards, each with a table of the event's own members,
+    // is five screens of REFERENCE sitting between the settings above it and
+    // the links below — so the controls somebody came for were off the bottom
+    // of the page on every visit, and the reference they were scrolling past
+    // is the half nobody needs twice. Closed by default rather than open: a
+    // reader who wants the members knows they want them, and the summary says
+    // how many are there. Native <details>, so `script-src 'none'` is
+    // untouched — the same answer note() gives, one level up.
     (json.installed
-      ? '<h2>The eight event types</h2>' +
+      ? '<details class="fold section"><summary>The eight event types' +
+        '</summary><div class="foldbody">' +
         note('Each row\'s members are the specification\'s own, with the ' +
         'four CAEP section 2 gives EVERY event beneath them: ' +
         '<code>event_timestamp</code>, <code>initiating_entity</code>, ' +
@@ -22541,7 +23175,8 @@ app.get('/admin/caep', function (req, res) {
         'anything else in the payload, and a conforming transmitter need ' +
         'not send one. <code>caep.omitEventTimestamp</code> produces that ' +
         'event on purpose.') +
-        catalogue
+        catalogue +
+        '</div></details>'
       : '') +
 
     configFormsFor('/admin/caep') +
@@ -22559,12 +23194,17 @@ app.get('/admin/caep', function (req, res) {
 app.post('/admin/caep', function (req, res) {
   log.debug("Entering the admin CAEP action endpoint.");
   const body = parseBody(req);
+  // THE ONE CAEP ACTION HANDLER, AND THREE PAGES POST TO IT: this one, the
+  // sessions table and the one-session drill-down. `from` says which, read as
+  // an ENUM and never as a path — the rule backTo() follows on the tokens page,
+  // and the reason a hand-written field cannot make this an open redirect.
+  const back = caepSessionsBackTo(body);
   caepAction(body).then(function (result) {
-    respondToAction(req, res, '/admin/caep', result);
+    respondToAction(req, res, back, result);
     log.debug("Leaving the admin CAEP action endpoint.");
   }).catch(function (e) {
     log.error('admin: the CAEP action threw: ' + e.message);
-    respondToAction(req, res, '/admin/caep',
+    respondToAction(req, res, back,
       { ok: false, errors: ['The action failed: ' + e.message] });
     log.debug("Leaving the admin CAEP action endpoint. Threw.");
   });
@@ -22584,6 +23224,159 @@ app.post('/admin/caep', function (req, res) {
 // done*, and this is an OBSERVATION. The settings are a configuration and live
 // at /admin/caep.
 // ---------------------------------------------------------------------------
+// THE SEARCH AND THE SLICE, as one pure function called twice — by the page and
+// by GET /admin-api/caep/sessions. Written once for the reason
+// `permissionsListState()` is: the markup and the reply have to agree about
+// what was filtered and what was drawn, and two walks of one list is how they
+// come to disagree about a session that ended in between.
+function caepSessionsState(req, report) {
+  log.debug("Entering caepSessionsState().");
+  const wanted = queryOne(req.query, 'sessq').trim();
+  const matched = (report.sessions || []).filter(function (row) {
+    return chooserMatches([row.username, row.sub, row.sessionId, row.subject,
+                           row.protocol], wanted);
+  });
+  const page = pagedRows(req.query, matched,
+    { name: 'sessions', noun: 'sessions' });
+  log.debug("Leaving caepSessionsState(). " + page.shown.length + " of " +
+            matched.length + ".");
+  return { wanted: wanted, matched: matched, page: page };
+}
+
+// THE PER-RECEIVER SECTION'S SEARCH AND SLICE, the same shape
+// `caepSessionsState()` has and for the same reason: the markup and the reply
+// have to agree about what was filtered and what was drawn.
+//
+// The search is over the RECEIVER — its identifier, its name, and the `aud` its
+// SETs are addressed to — because those are the three strings a reader arrives
+// holding and they are routinely different. It is NOT over the event types: a
+// receiver that takes none of the eight is exactly the row somebody is looking
+// for when they ask why nothing arrived, and a search that hid it would hide
+// the answer.
+function caepApplicationsState(req, report) {
+  log.debug("Entering caepApplicationsState().");
+  const wanted = queryOne(req.query, 'appq').trim();
+  const matched = (report.applications || []).filter(function (row) {
+    return chooserMatches([row.identifier, row.name, row.audiences.join(' ')],
+                          wanted);
+  });
+  const page = pagedRows(req.query, matched,
+    { name: 'applications', noun: 'receivers' });
+  log.debug("Leaving caepApplicationsState(). " + page.shown.length + " of " +
+            matched.length + ".");
+  return { wanted: wanted, matched: matched, page: page };
+}
+
+// One row of it. The eight count columns are in the SAME ORDER as the sessions
+// table's, off the same `caepShortNames()`, because a reader moving between the
+// two tables is reading one vocabulary — and a column that moved between them
+// would be worse than a column too many.
+function caepApplicationRow(row, shorts, prefix) {
+  log.debug("Entering caepApplicationRow(). " + row.identifier);
+  const counts = shorts.map(function (short) {
+    const n = row.counts[prefix + short] || 0;
+    return '<td class="' + (n ? '' : 'sub') + '">' + esc(String(n)) + '</td>';
+  }).join('');
+  // WHERE IT IS IN THE REGISTRY, when it is there at all. A receiver seen when
+  // a stream was created has an entry; one that agreed a stream while
+  // `ssf.authRequired` was off has none, and that row is the collected total
+  // for all of them rather than an application.
+  const who = row.registered
+    ? '<a href="' + esc('/admin/applications' +
+        queryWith({ application: row.identifier }, {})) + '">' +
+      esc(row.name || row.identifier) + '</a>' +
+      (row.name && row.name !== row.identifier
+        ? '<div class="sub"><code>' + esc(row.identifier) + '</code></div>'
+        : '')
+    : '<span class="sub">' + esc(row.name || row.identifier) + '</span>';
+  const streams = row.streamCount
+    ? esc(String(row.streamCount)) +
+      (row.enabled === row.streamCount
+        ? ''
+        : ' <span class="state-invalid">(' + esc(String(row.enabled)) +
+          ' enabled)</span>') +
+      '<div class="sub">' + esc(row.deliveries.join(', ')) + '</div>'
+    : '<span class="state-none" title="' +
+      esc('Declared for Shared Signals and no stream has been agreed. That ' +
+          'is the ordinary state of a receiver that has not connected yet, ' +
+          'and it is the first thing to check when nothing arrives.') +
+      '">none</span>';
+  // THE AUDIENCE, BESIDE THE IDENTIFIER RATHER THAN INSTEAD OF IT. They are
+  // different fields — one is what the receiver authenticated as and the other
+  // is what it asked its SETs to be addressed to — and a receiver whose `aud`
+  // is not its own name is doing something legitimate that is invisible
+  // anywhere else in this console.
+  // shortened() rather than the whole string, for the reason the tokens page
+  // uses it on a jti: an `aud` is routinely a URL, `code` is `word-break:
+  // break-all`, and a fifteen-column table gives this one about three
+  // characters of width — so the untruncated value wrapped to six lines and
+  // made every row on the page that tall. The whole value is the tooltip.
+  const audience = row.audiences.length
+    ? (row.audiences.length === 1 && row.audiences[0] === row.identifier
+        ? '<span class="sub" title="' +
+          esc('The receiver asked its Security Event Tokens to be addressed ' +
+              'to the same name it authenticated as. That is the ordinary ' +
+              'case and not a requirement: `aud` is the receiver\'s own ' +
+              'choice and this service never defaults it.') +
+          '">the same</span>'
+        : shortened(row.audiences.join(', '), 20))
+    : '<span class="sub" title="' +
+      esc('No stream, so nothing is addressed anywhere yet.') +
+      '">&mdash;</span>';
+  const out = '<tr>' +
+    '<td>' + who + '</td>' +
+    '<td>' + streams + '</td>' +
+    '<td class="sub">' + audience + '</td>' +
+    '<td class="' + (row.takes.length ? '' : 'state-invalid') + '">' +
+    esc(row.takes.length ? String(row.takes.length) + ' of 8'
+                         : 'none of CAEP\'s eight') + '</td>' +
+    counts +
+    '<td><strong>' + esc(String(row.total)) + '</strong></td>' +
+    '<td class="sub">' + esc(String(row.sessions)) + '</td>' +
+    '<td class="sub">' + esc(String(row.delivered)) + ' / ' +
+    '<span class="' + (row.failed ? 'state-invalid' : 'sub') + '">' +
+    esc(String(row.failed)) + '</span>' +
+    (row.lastPushError
+      ? '<div class="sub" title="' + esc(row.lastPushError) + '">last error ' +
+        'recorded</div>'
+      : '') + '</td>' +
+    '</tr>';
+  log.debug("Leaving caepApplicationRow().");
+  return out;
+}
+
+// The reply BOTH doors answer with. `/admin/caep-sessions?format=json` and
+// GET /admin-api/caep/sessions are the same document — rule 7 — and the drill-
+// down is `?session=`, which is one operation answering two shapes for the
+// reason /admin-api/permissions/groups gives: they are the same question at two
+// scales and the console draws them with one register.
+function caepSessionsJson(req) {
+  log.debug("Entering caepSessionsJson().");
+  const json = caepJson(req);
+  const asked = String(req.query.session || '').trim();
+  if (asked) {
+    const row = (json.sessions || []).filter(function (one) {
+      return String(one.sessionId) === asked;
+    })[0] || null;
+    const eventPage = pagedRows(req.query, (row && row.events) || [],
+      { name: 'events', noun: 'events' });
+    log.debug("Leaving caepSessionsJson(). One session.");
+    return { installed: json.installed, id: asked, session: row,
+             eventTypes: json.eventTypes || [],
+             events: eventPage.shown,
+             paging: { events: pagingJson(eventPage.paging) } };
+  }
+  const state = caepSessionsState(req, json);
+  const appState = caepApplicationsState(req, json);
+  log.debug("Leaving caepSessionsJson(). The list.");
+  return Object.assign({}, json, {
+    filter: { sessions: state.wanted || null,
+              applications: appState.wanted || null },
+    paging: { sessions: pagingJson(state.page.paging),
+              applications: pagingJson(appState.page.paging) }
+  });
+}
+
 app.get('/admin/caep-sessions', function (req, res) {
   log.debug("Entering the admin CAEP sessions page.");
   const json = caepJson(req);
@@ -22595,15 +23388,62 @@ app.get('/admin/caep-sessions', function (req, res) {
       esc(short.replace('session-', '').replace('-change', '')) + '</th>';
   }).join('');
 
-  const rows = (json.sessions || []).length
-    ? json.sessions.map(function (row) {
-        return caepSessionRow(row, shorts, prefix);
+  // ---------------------------------------------------------------------
+  // THE SEARCH AND THE PAGING OVER THE SESSIONS TABLE (2026-09-04).
+  //
+  // This list is unbounded up to `caep.maxSessionsTracked`, which is 200 by
+  // default and settable to anything — one row per session this service has
+  // held, including every session it has since forgotten — so the page grew by
+  // one row per sign-in for the life of the process and the streams table under
+  // it went out of reach. It is `sectionSearchForm` + `pagedRows` +
+  // `pageNavPair`, the arrangement every other list in this console has, and
+  // the parameters are NAMED after the list for pagingOf()'s reason: this page
+  // carries a second table and a bare `page` could not serve both.
+  //
+  // THE SEARCH IS OVER WHO AND WHICH, because those are the two things a reader
+  // arrives holding — a username somebody complained about, or a session
+  // identifier out of a log — and they do not know which column it will be in.
+  // The subject spelling is matched too, since that is what a receiver saw and
+  // is therefore what a reader comparing a Security Event Token against this
+  // page has in front of them.
+  //
+  // Filter first, then page — pagingOf()'s rule, for its reason: paging a list
+  // and then filtering it gives a page 2 whose length depends on what page 1
+  // happened to hold.
+  const state = caepSessionsState(req, json);
+  const sessWanted = state.wanted;
+  const sessPage = state.page;
+  const appState = caepApplicationsState(req, json);
+  const appNav = pageNavPair('/admin/caep-sessions', pageParamsOf(req.query),
+                             appState.page.paging);
+  // EVERY parameter the reader is already carrying, so that paging this table
+  // moves nothing else on the page. pageNavPair() overrides only the one name
+  // off the paging object it is handed.
+  const navParams = pageParamsOf(req.query);
+  const sessNav = pageNavPair('/admin/caep-sessions', navParams, sessPage.paging);
+  // The list AS THE READER LEFT IT, for the drill-down links and for the Reset
+  // buttons' `back` field. listViewOf() is the whitelist; `back` is the same
+  // set as a query string, rebuilt from it rather than echoed.
+  const listView = listViewOf('/admin/caep-sessions', req.query);
+  const back = queryWith(listView, {});
+
+  const rows = sessPage.shown.length
+    ? sessPage.shown.map(function (row) {
+        return caepSessionRow(row, shorts, prefix, listView, back);
       }).join('')
-    : '<tr><td colspan="' + (shorts.length + 8) + '">No sessions are ' +
-      'tracked. Sign somebody in &mdash; an OIDC flow, a SAML 2.0 sign-in, ' +
-      'WS-Federation &mdash; and a row appears here whether or not any ' +
-      'stream is agreed, which is what makes &ldquo;nothing arrived&rdquo; ' +
-      'traceable to &ldquo;nobody asked&rdquo;.</td></tr>';
+    : '<tr><td colspan="' + (shorts.length + 8) + '">' +
+      (sessWanted
+        ? 'No tracked session matches <code>' + esc(sessWanted) + '</code>. ' +
+          ((json.sessions || []).length
+            ? (json.sessions || []).length + ' session(s) are tracked under ' +
+              'other names.'
+            : 'None is tracked at all yet.')
+        : 'No sessions are tracked. Sign somebody in &mdash; an OIDC flow, a ' +
+          'SAML 2.0 sign-in, WS-Federation &mdash; and a row appears here ' +
+          'whether or not any stream is agreed, which is what makes ' +
+          '&ldquo;nothing arrived&rdquo; traceable to &ldquo;nobody ' +
+          'asked&rdquo;.') +
+      '</td></tr>';
 
   const streamRows = (json.streams || []).length
     ? json.streams.map(function (row) {
@@ -22647,8 +23487,10 @@ app.get('/admin/caep-sessions', function (req, res) {
     'whole reason this page exists: the session store forgets a session the ' +
     'moment it is signed out, so a row whose state is <code>revoked</code> ' +
     'is the only remaining evidence that it existed and was revoked. The ' +
-    'counts are per event type and they never forget; the events listed ' +
-    'under each session are the last few, which is a different question.') +
+    'counts are per event type and they never forget; WHICH events those ' +
+    'were is <a href="/admin/caep-sessions/session">each session\'s own ' +
+    'page</a>, which is a different question and is a click away from every ' +
+    'identifier below.') +
 
     (json.installed && json.omitEventTimestamp
       ? warn('<code>caep.omitEventTimestamp</code> is on, so every event ' +
@@ -22674,9 +23516,36 @@ app.get('/admin/caep-sessions', function (req, res) {
     '</div>' +
 
     '<h2>Sessions</h2>' +
+    note('<strong>Every identifier in the first column opens that session ' +
+    'on its own page</strong> &mdash; what has actually been sent about it, ' +
+    'in order, with what the register noticed as each one was applied. That ' +
+    'was a card per session under this table until 2026-09-04, which meant ' +
+    'this table was off the top of the screen the moment more than a handful ' +
+    'of people had signed in.') +
+    sectionSearchForm({
+      path: '/admin/caep-sessions', query: req.query,
+      param: 'sessq', pageParam: 'sessionsPage',
+      label: 'Narrow to a person or a session',
+      placeholder: 'a username, a subject or a session id',
+      what: 'It matches the username, the <code>sub</code>, the session ' +
+        'identifier, the SSF subject as a receiver was sent it, and the ' +
+        'protocol the session was started through &mdash; because a reader ' +
+        'arrives holding exactly one of those and does not know which column ' +
+        'it will be in. It narrows this table only; the streams below it are ' +
+        'about the transmitter rather than about anybody.'
+    }) +
+    perPageForm('/admin/caep-sessions', 'sessq', sessWanted,
+                sessPage.paging.perPage,
+                'Only the sessions table is paged. The streams under it ' +
+                'are one row per stream agreed with this transmitter, which ' +
+                'is a number somebody configured rather than one that grows ' +
+                'by itself.',
+                {}) +
+    sessNav.head +
     '<table><tr><th>Session</th><th>Who</th><th>State</th>' +
     '<th>Assurance</th><th>Device</th><th>Risk</th>' + headers +
     '<th>Total</th><th></th></tr>' + rows + '</table>' +
+    sessNav.foot +
 
     '<h2>Where a CAEP event could go</h2>' +
     note('A session with a count of zero almost always means <strong>no ' +
@@ -22688,15 +23557,93 @@ app.get('/admin/caep-sessions', function (req, res) {
     '<th>Subjects</th><th>CAEP types it takes</th></tr>' + streamRows +
     '</table>' +
 
-    (json.installed && (json.sessions || []).length
-      ? '<h2>What has been said about each session</h2>' +
-        json.sessions.map(caepSessionCard).join('')
+    '<h2>Per application</h2>' +
+    note('<strong>What this transmitter has said to each receiver, across ' +
+    'every session.</strong> The table above this one is per STREAM and the ' +
+    'one above that is per SESSION; this is the third question, and it is ' +
+    'the one somebody actually arrives with once more than one receiver ' +
+    'exists: <em>is the application I am testing getting anything, and ' +
+    'what.</em> The counts are per event type and they never forget &mdash; ' +
+    'they are counted when the Security Event Token is built and queued, ' +
+    'which is when this service has SAID something, so a poll stream nobody ' +
+    'has polled yet still shows what is waiting for it.') +
+    note('<strong>An application with no stream is a row rather than an ' +
+    'omission</strong>, and it is the commonest state a receiver under test ' +
+    'is in: declared here with the Shared Signals box ticked, nothing agreed ' +
+    'yet. Every count is zero and the <em>Streams</em> column says so, which ' +
+    'is the first thing to check when nothing arrives. A row whose ' +
+    '<em>Takes</em> column says <code>none of CAEP\'s eight</code> is the ' +
+    'second: SSF has no refusal for a type a transmitter will not deliver, ' +
+    'so the type\'s absence from <code>events_delivered</code> is the only ' +
+    'notice a receiver ever gets.') +
+    note('<strong>The identifier is what the receiver authenticated as when ' +
+    'it created the stream, and <code>aud</code> is what it asked its ' +
+    'Security Event Tokens to be addressed to.</strong> They are different ' +
+    'fields and this is the only place both are shown: <code>aud</code> is ' +
+    'REQUIRED on a stream and is deliberately never defaulted to the caller, ' +
+    'because an audience this service invented would be one the receiver ' +
+    'never learns it has to check for. Where they agree the column says so ' +
+    'rather than repeating the name. A row named <em>(no application)</em> ' +
+    'is the collected total for streams agreed while ' +
+    '<code>ssf.authRequired</code> was off &mdash; there was no principal to ' +
+    'record, and those events are real.') +
+    sectionSearchForm({
+      path: '/admin/caep-sessions', query: req.query,
+      param: 'appq', pageParam: 'applicationsPage',
+      label: 'Narrow to a receiver',
+      placeholder: 'an application name, an identifier or an aud',
+      what: 'It matches the application name, the identifier it ' +
+        'authenticated as, and the <code>aud</code> on its streams &mdash; ' +
+        'the three strings a reader arrives holding, which are routinely ' +
+        'different. It does NOT match the event types: a receiver that takes ' +
+        'none of the eight is exactly the row somebody is looking for when ' +
+        'they ask why nothing arrived.'
+    }) +
+    appNav.head +
+    '<table><tr><th>Receiver</th><th>Streams</th><th>aud</th><th>Takes</th>' +
+    headers + '<th>Total</th><th>Sessions</th><th>Delivered / failed</th>' +
+    '</tr>' +
+    (appState.page.shown.length
+      ? appState.page.shown.map(function (row) {
+          return caepApplicationRow(row, shorts, prefix);
+        }).join('')
+      : '<tr><td colspan="' + (shorts.length + 7) + '">' +
+        (appState.wanted
+          ? 'No receiver matches <code>' + esc(appState.wanted) + '</code>. ' +
+            ((json.applications || []).length
+              ? (json.applications || []).length + ' receiver(s) are known ' +
+                'under other names.'
+              : 'None is known at all yet.')
+          : 'No application here supports Shared Signals yet. An entry ' +
+            'appears the moment a receiver creates a stream at ' +
+            '<code>/ssf/stream</code>, and one can be declared ahead of that ' +
+            'by ticking Shared Signals on ' +
+            '<a href="/admin/applications/new">a new application</a>.') +
+        '</td></tr>') +
+    '</table>' +
+    appNav.foot +
+    note((appState.matched.length) + ' receiver(s) match' +
+    (appState.page.paging.pages > 1
+      ? ', of which rows ' + appState.page.paging.firstRow + '&ndash;' +
+        appState.page.paging.lastRow + ' are on this page (' +
+        appState.page.paging.page + ' of ' + appState.page.paging.pages + ')'
       : '') +
+    '. Busiest first. <em>Delivered / failed</em> is the PIPE &mdash; how many ' +
+    'Security Event Tokens left this service and how many could not be ' +
+    'handed over &mdash; and it is a different number from the total beside ' +
+    'it, which is what was SAID: on a poll stream nothing is delivered until ' +
+    'the receiver asks, and the two agreeing is a property of push delivery ' +
+    'rather than of a healthy transmitter. <em>Sessions</em> counts the ' +
+    'DISTINCT sessions this receiver has been told about, across all of its ' +
+    'streams together.') +
+
 
     (json.installed
-      ? '<form method="post" action="/admin/caep-sessions">' +
+      ? '<form method="post" action="/admin/caep">' +
         '<div class="formrow">' +
         '<input type="hidden" name="action" value="clear">' +
+        '<input type="hidden" name="from" value="sessions">' +
+        '<input type="hidden" name="back" value="' + esc(back) + '">' +
         '<button class="secondary">Clear the register</button>' +
         '</div></form>' +
         note('Clearing forgets the RECORD. Nobody is signed out and no ' +
@@ -22712,26 +23659,218 @@ app.get('/admin/caep-sessions', function (req, res) {
     '&middot; <a href="/admin/caep-sessions?format=json">this page as ' +
     'JSON</a>');
 
-  respond(req, res, json, 'CAEP sessions', '/admin/caep-sessions', inner);
+  // WHAT THE BROWSER WAS SHOWN, BESIDE THE WHOLE LIST RATHER THAN INSTEAD OF
+  // IT — the arrangement /admin/delegation's configured half already has.
+  // `sessions` stays ENTIRE, because GET /admin-api/caep answers with this
+  // same report and a caller that had to walk fifty-row pages of it would be
+  // paying for this page's layout, which is not a fact about the register.
+  // But a `?sessq=` the markup honours and the reply ignores is exactly the
+  // silent disagreement this console keeps warning about, so what the page did
+  // is REPORTED: `paging.sessions.total` against `sessions.length` shows the
+  // filter that was applied and the slice that was drawn, neither of them
+  // guessed from the markup.
+  respond(req, res, Object.assign({}, json, {
+            filter: { sessions: sessWanted || null,
+                      applications: appState.wanted || null },
+            paging: { sessions: pagingJson(sessPage.paging),
+                      applications: pagingJson(appState.page.paging) }
+          }), 'CAEP sessions', '/admin/caep-sessions', inner);
+  // NOTE: the same document caepSessionsJson() builds for the API. It is
+  // assembled here rather than called because the page has already done the
+  // filtering and the slicing to draw the table, and a second walk would be
+  // the disagreement that function's header warns about.
   log.debug("Leaving the admin CAEP sessions page.");
 });
 
-app.post('/admin/caep-sessions', function (req, res) {
-  log.debug("Entering the admin CAEP sessions action endpoint.");
-  const body = parseBody(req);
-  // THE SAME ACTION FUNCTION AS /admin/caep, and that is the point: a reset
-  // button beside the row it resets is worth having, and a second
-  // implementation of what a reset does would be two doors that could come to
-  // disagree. Only the page it answers back to differs.
-  caepAction(body).then(function (result) {
-    respondToAction(req, res, '/admin/caep-sessions', result);
-    log.debug("Leaving the admin CAEP sessions action endpoint.");
-  }).catch(function (e) {
-    log.error('admin: the CAEP sessions action threw: ' + e.message);
-    respondToAction(req, res, '/admin/caep-sessions',
-      { ok: false, errors: ['The action failed: ' + e.message] });
-    log.debug("Leaving the admin CAEP sessions action endpoint. Threw.");
-  });
+// WHERE A CAEP ACTION ANSWERS BACK TO. Three pages post to one handler — the
+// settings page, the sessions table and the one-session drill-down — and `from`
+// says which, read as an ENUM and never as a path, which is the rule backTo()
+// follows on the tokens page and the reason an open redirect is not reachable
+// from this field. The list view is REBUILT out of `back` by
+// listViewFromBack(), from the whitelist in LIST_PARAMS, so the worst a
+// hand-written field can produce is another page of the same table.
+function caepSessionsBackTo(body) {
+  log.debug("Entering caepSessionsBackTo().");
+  const from = String((body || {}).from || '');
+  if (from === 'session') {
+    const target = '/admin/caep-sessions/session' +
+      queryWith(listViewFromBack('/admin/caep-sessions', body.back),
+                { id: String(body.session_id || '') });
+    log.debug("Leaving caepSessionsBackTo(). " + target);
+    return target;
+  }
+  if (from === 'sessions') {
+    const target = '/admin/caep-sessions' +
+      queryWith(listViewFromBack('/admin/caep-sessions', body.back), {});
+    log.debug("Leaving caepSessionsBackTo(). " + target);
+    return target;
+  }
+  log.debug("Leaving caepSessionsBackTo(). The CAEP page.");
+  return '/admin/caep';
+}
+
+// ---------------------------------------------------------------------------
+// GET /admin/caep-sessions/session?id=… — WHAT HAS BEEN SAID ABOUT ONE SESSION.
+//
+// A DRILL-DOWN OF /admin/caep-sessions, and the first that page has had: every
+// identifier in its first column links here. It hangs under it exactly as
+// /admin/tokens/credential hangs under the tokens table — no `NAV` row,
+// `active` is '/admin/caep-sessions', `up` carries the search and the page the
+// reader left — so the trail reads `CAEP sessions › somebody` and the way back
+// is the row they clicked rather than the top of an unfiltered list.
+//
+// **IT EXISTS BECAUSE THE CONTENT USED TO BE ON THE LIST PAGE, ALL OF IT AT
+// ONCE.** That page drew a card per tracked session under its table, each with
+// an event table inside it, so the answer to "what went out about alice" was
+// several hundred nested tables below the table that names her — and the
+// sessions table, which is the thing anybody arrives for, was off the top of
+// the screen for the whole of it. `caep.maxSessionsTracked` is 200 by default
+// and settable higher, so this was not a corner case; it was every service that
+// had been running for an afternoon.
+//
+// **A SESSION THIS REGISTER NO LONGER HOLDS IS NOT A 404**, which is the rule
+// /admin/logout and the delegation drill-downs already follow. The register is
+// capped and drops the oldest, and `Clear the register` empties it outright, so
+// a link that comes back empty is the ordinary outcome of a busy service rather
+// than a mistake — and this page says which of the two states it is in instead
+// of answering with a status code that says neither.
+//
+// One form on it, and it is the SAME reset the table has: rule 7 is satisfied
+// by `POST /admin-api/caep/reset-session`, which already existed, because
+// moving a form is not moving an action.
+// ---------------------------------------------------------------------------
+app.get('/admin/caep-sessions/session', function (req, res) {
+  log.debug("Entering the admin CAEP one-session page.");
+  const json = caepJson(req);
+  const asked = String(req.query.id || '').trim();
+  const row = (json.sessions || []).filter(function (one) {
+    return String(one.sessionId) === asked;
+  })[0] || null;
+
+  const listView = listViewOf('/admin/caep-sessions', req.query);
+  const up = upTo('/admin/caep-sessions',
+                  row ? (row.username || row.sub || asked) : 'One session',
+                  listView);
+  const backLink = note('<a class="btn" href="' + esc(up.href) +
+    '">&larr; Back to the sessions table</a>');
+  // The list view as a POSTable field, for the reset form below: the reader
+  // came from page three of a search and should go back to it.
+  const back = queryWith(listView, {});
+
+  if (!row) {
+    const inner = messagesOf(req) + backLink +
+      note(asked
+        ? '<strong>No tracked session is called <code>' + esc(asked) +
+          '</code>.</strong> That is not necessarily a wrong link. This ' +
+          'register is capped at <code>caep.maxSessionsTracked</code> ' +
+          'sessions and drops the oldest, and the <em>Clear the register</em> ' +
+          'button on the sessions table empties it outright &mdash; so an old ' +
+          'link coming back empty is the ordinary outcome on a service that ' +
+          'has been running a while. What it does NOT mean is that the ' +
+          'session was never real: nothing here is ever deleted because a ' +
+          'session ended, and a session that ended is exactly what this ' +
+          'register is for keeping.'
+        : '<strong>Name a session.</strong> This page draws ONE of them and ' +
+          'the way to it is a link on <a href="' + esc(up.href) + '">the ' +
+          'sessions table</a> &mdash; every identifier there is one. It is ' +
+          'keyed on the session identifier this service gave the session, ' +
+          'which is what the SSF subject sent to a receiver names.');
+    respond(req, res, { installed: json.installed, id: asked || null,
+                        session: null },
+            'CAEP sessions — one session', '/admin/caep-sessions', inner, up);
+    log.debug("Leaving the admin CAEP one-session page. Nothing was found.");
+    return;
+  }
+
+  // The events, paged. `eventsPage` rather than `page` because this list is
+  // named for pagingOf()'s reason and because the parameter travels back to the
+  // list page in the trail, where a bare `page` would be the sessions table's.
+  const eventPage = pagedRows(req.query, row.events || [],
+    { name: 'events', noun: 'events' });
+  const navParams = pageParamsOf(req.query);
+  const eventNav = pageNavPair('/admin/caep-sessions/session', navParams,
+                               eventPage.paging);
+
+  const eventRows = eventPage.shown.length
+    ? eventPage.shown.map(caepEventRow).join('')
+    : '<tr><td colspan="5">Nothing has been said about this session. That ' +
+      'is the ordinary case when no stream asked for the type, and it is ' +
+      'the answer to &ldquo;why did nothing arrive&rdquo; nine times out of ' +
+      'ten &mdash; <a href="/admin/caep-sessions">the streams table</a> is ' +
+      'where that shows up.</td></tr>';
+
+  const inner = messagesOf(req) + backLink +
+
+    note('<strong>Everything this transmitter has said about one ' +
+    'session.</strong> The sessions table counts HOW MANY events of each type ' +
+    'went out; this says WHICH, in order, with what the register noticed as ' +
+    'each one was applied. They are separate on purpose &mdash; the state ' +
+    'machine and the counters answer different questions, and ' +
+    '<code>ssf/caep.js</code> argues why.') +
+
+    '<h2>The session</h2>' +
+    caepSessionFacts(row) +
+
+    '<h2>What has been said about it</h2>' +
+    note('A <strong>warning</strong> in the last column is this register\'s ' +
+    'own reading of an event it had just applied &mdash; a state change that ' +
+    'was not a transition, a payload member the type does not define &mdash; ' +
+    'and not something a receiver was told. SSF has no channel for that: an ' +
+    'event either goes out or does not.') +
+    perPageForm('/admin/caep-sessions/session', 'id', asked,
+                eventPage.paging.perPage,
+                'It applies to the event list below.', listView) +
+    eventNav.head +
+    '<table><tr><th>When</th><th>Event</th><th>jti</th><th>Stream</th>' +
+    '<th>What the register noticed</th></tr>' + eventRows + '</table>' +
+    eventNav.foot +
+
+    '<h2>Per event type</h2>' +
+    note('The same eight columns the sessions table carries, written out ' +
+    'with room for each type\'s whole name. A count of zero almost always ' +
+    'means <strong>no stream asked for that type</strong> rather than ' +
+    'anything being wrong.') +
+    caepSessionCounts(row, json.eventTypes || []) +
+
+    '<h2>Reset this session\'s CAEP state</h2>' +
+    '<form method="post" action="/admin/caep">' +
+    '<input type="hidden" name="action" value="reset-session">' +
+    '<input type="hidden" name="session_id" value="' + esc(row.sessionId) +
+    '">' +
+    // WHICH PAGE PRESSED IT. Read as an enum by caepSessionsBackTo(), never as
+    // a path — see its header.
+    '<input type="hidden" name="from" value="session">' +
+    '<input type="hidden" name="back" value="' + esc(back) + '">' +
+    '<div class="formrow"><button class="secondary">Reset</button></div>' +
+    '</form>' +
+    note('It forgets what has been SAID about this session and puts its ' +
+    'state back to where it started. <strong>Nobody is signed out and no ' +
+    'stream is touched</strong> &mdash; a control on a monitoring page that ' +
+    'ended a session would be a monitoring page with a weapon on it.') +
+
+    note('<a href="/admin/caep-sessions">Every session</a> &middot; ' +
+    '<a href="/admin/caep">the settings, the catalogue and the by-hand emit ' +
+    'form</a> &middot; ' +
+    '<a href="' + esc('/admin/caep' + queryWith({ session: row.sessionId },
+                                                {})) +
+    '">emit an event about this session</a> &middot; ' +
+    '<a href="/admin/ssf">the streams</a> &middot; ' +
+    '<a href="' + esc('/admin/caep-sessions/session' +
+      queryWith(pageParamsOf(req.query), { format: 'json' })) +
+    '">this page as JSON</a>');
+
+  respond(req, res, { installed: json.installed, id: asked, session: row,
+                      eventTypes: json.eventTypes || [],
+                      // WHAT THE BROWSER WAS SHOWN, beside the whole list
+                      // rather than instead of it: `session.events` is entire,
+                      // and this is the slice the markup drew. The rule the
+                      // list page follows one level up.
+                      events: eventPage.shown,
+                      paging: { events: pagingJson(eventPage.paging) } },
+          'CAEP sessions — ' + (row.username || row.sub || asked),
+          '/admin/caep-sessions', inner, up);
+  log.debug("Leaving the admin CAEP one-session page. " +
+            (row.events || []).length + " event(s).");
 });
 
 // ONE ROW OF THE INDEX: a group, its size, what is overridden in it, and the
@@ -25823,7 +26962,17 @@ module.exports = {
   // The CAEP view and its three actions, for admin_api.js. Rule 7: the API
   // calls exactly these. `caepAction` RESOLVES, like `ssfAction` and for the
   // same reason — emitting a CAEP event signs a JWS and POSTs it.
+  // EVERY LIVE SESSION, for admin_api.js — the same function the page draws
+  // from, so the console and the management API cannot come to disagree about
+  // who is signed in. It takes the whole request because the filter and the
+  // paging are query parameters, which is the shape every list view here has.
+  sessionsView: function (req) { return sessionsView(req).json; },
+  sessionsAction: sessionsAction,
   caepView: caepJson,
+  // The sessions register as /admin/caep-sessions draws it — the list, or one
+  // session with `?session=`. Rule 7: that page is a page of this console and
+  // owed an operation of its own.
+  caepSessionsView: caepSessionsJson,
   caepAction: caepAction,
   caepActionNames: function () {
     return caepReporter ? caepReporter.actions.slice() : [];

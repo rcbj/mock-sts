@@ -600,3 +600,73 @@ mechanics:
 `sessq`, `sessfrom` and `session` are in `LIST_PARAMS` for `/admin/caep`, so a
 reader who searched a username, paged to the second twenty and picked a session
 keeps all three across the reload that pressing **Emit** causes.
+
+---
+
+## `initiating_entity` IS NOT ALWAYS `admin` OR `user` (2026-09-04)
+
+`observe()` chose between those two on a `revoked` act — `admin` when an
+administrator did it, `user` otherwise. A SESSION THAT EXPIRED is neither: a
+lifetime this service configured ran out, nobody did anything, and the event
+would have gone out claiming the person signed themselves out. That is not
+vague, it is false, and a receiver acting on `reason_user` would have shown them
+a sentence about a sign-out that never happened.
+
+The notice's own `initiatingEntity` now wins where it has one, validated against
+CAEP section 2's four words, and `authn.js`'s expiry gives `policy` — the word
+for a policy evaluation, where `system` is a maintenance activity and the other
+two name a person. `reasonForUser()` takes the notice too, so an expiry says
+"Your session expired" rather than "You have been signed out".
+
+**IT IS ALSO THE FIRST TIME `session-revoked` FIRES WITH NO REQUEST BEHIND IT.**
+The expiry sweep in `authn.js` runs on a timer, inside each realm, so
+`issuerFor(null)` is what builds the subject — which is why that function must
+go on answering without one. `authn/CLAUDE.md` argues the sweep.
+
+**THE `admin` BRANCH WAS UNREACHABLE UNTIL THE SAME DAY, AND THAT IS THE OTHER
+HALF OF THIS.** `dropSession()` decides between `admin` and `user` by testing
+the `via` it is handed for `admin` or `console`, and every door went through
+`logout.js`'s session family, which passed one hard-coded string. So a support
+desk ending somebody's session from `/admin/logout`, the Revoke button on
+`/admin/sessions` and the management API all emitted an event saying **the
+person had signed themselves out** — the one distinction this member exists to
+draw, got wrong in the direction that matters, with no symptom anywhere: the
+event is conforming and the value is a legal one. `logout/logout.js` carries the
+caller's own words on the context now, and the same phrase reaches
+`reason_admin`, so the two cannot disagree about who ended a session.
+`tests/caep_initiating_entity.js` is the guard, mutation-tested against five
+mutants.
+
+## PER-RECEIVER STATISTICS, AND THE COUNTER THEY NEEDED (2026-09-04)
+
+`caepApplications()` answers what this transmitter has said to each RECEIVER
+across every session — the third table on `/admin/caep-sessions`, the
+`applications` member of the CAEP report, and therefore the same document
+`/admin/caep` and both management API reads answer with.
+
+**IT NEEDED A NEW COUNTER AND COULD NOT BORROW ONE.** The stream's `counters`
+are about the PIPE — queued, delivered, failed, acknowledged — and none of them
+knows an event TYPE. The register knows types and counts them PER SESSION,
+keeping only the last twenty-five events per row, so summing its rings would
+have been right until the first busy session and wrong afterwards. So
+`ssf_streams.js` gained `eventCounts` on the record, incremented by
+`countEvent()` from `transmit()` beside `caep.noteTransmitted()` — at the same
+moment and for that function's reason: the count is of what was SAID, so it
+moves when the SET is built and queued, and a poll stream nobody has polled yet
+still shows what is waiting for it.
+
+**THE JOIN IS `createdBy` AND NOT `aud`, AND THE OBVIOUS ONE IS WRONG.**
+`applications.js`'s `ssf` row says a receiver's identifier is "the `aud` those
+SETs carry", and that prose is loose: `normaliseAudience()` requires `aud` and
+deliberately never defaults it to the authenticated caller, while
+`applications.seen()` files the entry under the PRINCIPAL. They coincide for a
+receiver that sends its own name and diverge for one that does not — which is
+legitimate — so the table carries both and says "the same" where they agree.
+
+**TWO ROWS ARE THE POINT OF THE TABLE RATHER THAN EDGE CASES.** An application
+with NO STREAM is the commonest state a receiver under test is in, and a list
+that showed only receivers with streams would answer "where is my application"
+with silence. And a row for streams belonging to no application at all is what
+`ssf.authRequired` off produces — no principal, nothing recorded, and the events
+are real; dropping them would make this table's totals disagree with the two
+above it.

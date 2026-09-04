@@ -192,3 +192,67 @@ is a ban rather than a logout — a different claim, made at `/admin/spiffe`.
 carry no user. The Verifier does not know who will present until a presentation
 arrives, so a transaction cannot appear in a per-person inventory without
 inventing a link that is not there.
+
+---
+
+## `liveSessions()` — the same question asked across everybody (2026-09-04)
+
+`inventoryFor()` answers *what is alice still signed into*. `liveSessions()`
+answers the other half — *who is signed in at all* — and it is what
+`/admin/sessions` and `GET /admin-api/sessions` draw.
+
+**It is HERE and not in `admin-ui/admin.js` because this module is the one model
+of what a live session is.** That is this directory's whole reason to exist, and
+a console page that walked `authn.sessions`, `ldap_server.boundConnections()`
+and the ticket register itself would be a SECOND answer to *is this still live* —
+the thing rule 3m forbids. It matters more on that page than on `/admin/logout`
+because of the button: a Revoke drawn from one reading and performed by another
+acts on something other than the row it sits beside. The button therefore calls
+`terminate(key, [id])`, the same function a global logout goes through, with a
+selection of one — same audit row, same settings honoured, same refusals.
+
+**THREE OF THE TEN FAMILIES HAVE A SESSION AND THE OTHER SEVEN DO NOT**, and the
+distinction is the page's whole subject rather than a simplification. A session
+is state THIS SERVICE holds that makes somebody currently authenticated; a
+token, an assertion, a code and an SVID are things it has HANDED OUT, they
+outlive every session here, and they are `/admin/tokens`. The three:
+
+| Family | Why it is a session | How its expiry is worked out |
+|---|---|---|
+| `session` | the cookie from `/authn/login`, which every browser family here shares | ABSOLUTE, fixed when it was created, and **not extended by use** — there is no idle timeout in this service |
+| `krb5` | a TGT IS the Kerberos session; a service ticket is one use of it (`recordTicket()` says so in as many words) | the `endtime` the KDC sealed INTO the ticket, which nothing here can move |
+| `ldap` | RFC 4511 section 4.2 makes a Bind the authorization state of a CONNECTION | **none** — it lasts until the next Bind, an Unbind, or the socket closing |
+
+`SESSION_EXPIRY_RULES` carries those three sentences and they travel on the row
+and in the API reply, because `expiresAt: 0` means *no expiry* and not *the
+epoch*, and a column of bare timestamps would be read as one rule with three
+values.
+
+**A KERBEROS ROW'S `id` IS THE PRINCIPAL'S AND NOT THE TICKET'S**, so several
+rows can share one. That is Kerberos rather than an approximation: this KDC can
+stamp a sign-out instant on a principal and nothing finer exists, so ending
+"this TGT" refuses every TGT that principal authenticated before now and still
+reaches no service ticket already in a cache. Every row's `why` says which of
+the three acts its button performs, on rows that CAN be ended as well as on
+rows that cannot — the Kerberos one is the case where the button does MORE than
+the row it is on, and a control that quietly did that would be worse than no
+control.
+
+An anonymous LDAP bind has no identity key and is left off: it is not somebody's
+session. `/admin/ldap/service` counts every connection.
+
+## The `via` a termination passes is the caller's own words (2026-09-04)
+
+`contextFor()` carries `by` and the SESSION family spends it as the `via` it
+hands `endSessionById()`. It was a constant — `the protocol-independent logout`
+— for every door, and that string is what `authn.js`'s `dropSession()` tests for
+`admin` or `console` to decide CAEP's `initiating_entity`. So the branch meaning
+*an administrator revoked this* was unreachable: `/admin/logout`,
+`/admin/sessions` and the management API all emitted an event saying the person
+had signed themselves out.
+
+It is worth knowing beyond the one bug, because it makes `by` **load-bearing
+rather than decorative**: a door that names itself vaguely now produces a vague
+event. `/admin-api/sessions` passes *the management API at /admin-api/sessions*
+for exactly that reason — *the management API* alone contains neither word and
+reported `user`.

@@ -351,6 +351,11 @@ function transmit(record, options) {
     // stream's own counters, three lines down, and conflating the two would
     // make a poll stream look like a transmitter that never says anything.
     caep.noteTransmitted(record, claims);
+    // AND ON THE STREAM, per type. The line above counts what was said about a
+    // SESSION; this counts what was said to a RECEIVER, and neither can be
+    // derived from the other — the register keeps the last twenty-five events
+    // per session and the stream keeps a total per type. See countEvent().
+    streams.countEvent(record, asked.uri);
     const entry = { jti: claims.jti, token: token, claims: claims,
       queuedAt: iso(), deliveredAt: '', counted: false };
     const queued = streams.enqueue(record, entry);
@@ -1833,6 +1838,163 @@ authn.setSessionObserver(caepAutoEmit);
 // emitting an event signs a JWS — possibly on the worker pool — and then POSTs
 // it to somebody else's endpoint.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// WHAT THIS TRANSMITTER HAS SAID TO EACH RECEIVER, ACROSS EVERY SESSION.
+//
+// The register answers "what has been said about this SESSION" and the streams
+// table answers "what would this stream take". Neither answers the question an
+// operator actually arrives with once more than one receiver exists: **is the
+// receiver I am testing getting anything, and what.**
+//
+// **THE JOIN IS `createdBy` AND NOT `aud`, AND THAT IS WORTH KNOWING BECAUSE
+// THE OBVIOUS ONE IS WRONG.** A stream's `aud` is what the RECEIVER asked its
+// SETs to be addressed to — required, never defaulted, and deliberately not
+// taken from whoever authenticated (see `normaliseAudience()`). The
+// application entry is created from the principal that CREATED the stream, so
+// `createdBy` is the field that names the same thing the registry does. They
+// are usually the same string, and a receiver that sends a different `aud` is
+// doing something legitimate that this table then shows: the row carries both.
+//
+// **AN APPLICATION WITH NO STREAM IS A ROW AND NOT AN OMISSION.** It is the
+// commonest state a receiver under test is in — declared here, nothing agreed
+// yet — and a table that showed only receivers with streams would answer
+// "where is my application" with silence. Every count is zero and the row says
+// which of the two states it is in.
+//
+// **A STREAM WITH NO APPLICATION IS COUNTED TOO**, under one row for all of
+// them. That happens when `ssf.authRequired` is off: there is no principal, so
+// nothing was recorded in the registry, and the events are real. Dropping them
+// would make the totals here disagree with the totals two tables up.
+// ---------------------------------------------------------------------------
+function caepApplications() {
+  log.debug('Entering caepApplications().');
+  const caepUris = events.CAEP_EVENT_URIS;
+  const all = streams.listStreams();
+
+  // sessionId -> the streams anything went out on, so a receiver's session
+  // count is the register's own answer rather than a second tally that could
+  // drift from it.
+  const sessionsByStream = {};
+  caep.list().forEach(function (row) {
+    (row.streams || []).forEach(function (id) {
+      if (!sessionsByStream[id]) {
+        sessionsByStream[id] = {};
+      }
+      sessionsByStream[id][row.sessionId] = true;
+    });
+  });
+
+  function blank(identifier, name, registered) {
+    const counts = {};
+    caepUris.forEach(function (uri) { counts[uri] = 0; });
+    return { identifier: identifier, name: name, registered: registered,
+      dn: '', declared: false, streams: [], streamCount: 0, enabled: 0,
+      deliveries: [], audiences: [], takes: [], counts: counts, total: 0,
+      sessions: 0, queued: 0, delivered: 0, failed: 0, acknowledged: 0,
+      receiverErrors: 0, lastPushAt: '', lastPushError: '' };
+  }
+
+  const rows = {};
+  const order = [];
+  function rowFor(identifier, name, registered) {
+    if (!rows[identifier]) {
+      rows[identifier] = blank(identifier, name, registered);
+      order.push(identifier);
+    }
+    return rows[identifier];
+  }
+
+  // EVERY APPLICATION THAT SUPPORTS CAEP, whether or not it has a stream. It
+  // is the Shared Signals family in the registry: declared with the `ssf`
+  // checkbox, seen when a stream was created, or holding an `ssfReceiverId`
+  // somebody wrote by hand.
+  applications.list().forEach(function (entry) {
+    const declared = (entry.allowedProtocols || []).indexOf('ssf') >= 0;
+    const seen = (entry.recordedProtocols || []).indexOf('ssf') >= 0;
+    const receiverId = ((entry.attributes || {}).ssfReceiverId || [])[0] || '';
+    if (!declared && !seen && !receiverId) {
+      return;
+    }
+    const row = rowFor(receiverId || entry.identifier,
+                       entry.name || entry.identifier, true);
+    row.dn = entry.dn || '';
+    row.declared = declared;
+    row.endpoints = ((entry.attributes || {}).ssfDeliveryEndpoint || []).slice();
+  });
+
+  const NOBODY = '(no application — ssf.authRequired is off)';
+  all.forEach(function (record) {
+    const who = String(record.createdBy || '');
+    const known = who && who !== '(unauthenticated)';
+    const row = rowFor(known ? who : NOBODY, known ? who : NOBODY, false);
+    row.streams.push(record.stream_id);
+    row.streamCount += 1;
+    if (record.status === 'enabled') {
+      row.enabled += 1;
+    }
+    const delivery = streams.deliveryName(record.delivery.method);
+    if (row.deliveries.indexOf(delivery) < 0) {
+      row.deliveries.push(delivery);
+    }
+    const aud = Array.isArray(record.aud) ? record.aud.join(' ')
+                                          : String(record.aud || '');
+    if (aud && row.audiences.indexOf(aud) < 0) {
+      row.audiences.push(aud);
+    }
+    caepUris.forEach(function (uri) {
+      if (record.events_delivered.indexOf(uri) >= 0) {
+        const short = uri.slice(events.CAEP_PREFIX.length);
+        if (row.takes.indexOf(short) < 0) {
+          row.takes.push(short);
+        }
+      }
+      const n = (record.eventCounts || {})[uri] || 0;
+      row.counts[uri] += n;
+      row.total += n;
+    });
+    row.queued += record.counters.queued;
+    row.delivered += record.counters.delivered;
+    row.failed += record.counters.failed;
+    row.acknowledged += record.counters.acknowledged;
+    row.receiverErrors += record.counters.receiverErrors;
+    if (record.lastPushAt > row.lastPushAt) {
+      row.lastPushAt = record.lastPushAt;
+    }
+    if (record.lastPushError) {
+      row.lastPushError = record.lastPushError;
+    }
+  });
+
+  // DISTINCT SESSIONS, counted across the receiver's streams together — a
+  // session an application was told about on two of its streams is one
+  // session, and adding per-stream counts would say two.
+  order.forEach(function (identifier) {
+    const row = rows[identifier];
+    const seen = {};
+    row.streams.forEach(function (id) {
+      Object.keys(sessionsByStream[id] || {}).forEach(function (sessionId) {
+        seen[sessionId] = true;
+      });
+    });
+    row.sessions = Object.keys(seen).length;
+  });
+
+  // Busiest first, then by name, so the receiver something is happening to is
+  // at the top and the order is stable when nothing is happening at all.
+  const out = order.map(function (identifier) { return rows[identifier]; });
+  out.sort(function (a, b) {
+    if (b.total !== a.total) {
+      return b.total - a.total;
+    }
+    if (b.streamCount !== a.streamCount) {
+      return b.streamCount - a.streamCount;
+    }
+    return String(a.identifier).localeCompare(String(b.identifier));
+  });
+  log.debug('Leaving caepApplications(). ' + out.length + ' receiver(s).');
+  return out;
+}
+
 function caepReport(req) {
   log.debug('Entering caepReport().');
   const report = caep.report();
@@ -1842,6 +2004,9 @@ function caepReport(req) {
   // configured, because it is the question the page exists to answer second:
   // a reader who has seen a session with a count of zero wants to know
   // whether ANY stream would have taken one.
+  // PER RECEIVER, ACROSS EVERY SESSION — the section /admin/caep-sessions
+  // draws under the streams table. See caepApplications().
+  report.applications = caepApplications();
   report.streams = streams.listStreams().map(function (record) {
     const takes = events.CAEP_EVENT_URIS.filter(function (uri) {
       return record.events_delivered.indexOf(uri) >= 0;

@@ -1,6 +1,6 @@
 ---
 title: Parent project migration
-nav_order: 10
+nav_order: 12
 ---
 
 # What `../id-proto-debugger` needs when the `sts/` pin is bumped
