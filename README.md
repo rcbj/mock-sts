@@ -515,7 +515,7 @@ and `GET /admin-api/config` answers, so this list cannot describe a setting this
 service does not have or miss one it does. The **Group** each setting belongs to
 is also the console page that draws it: the *Kerberos* rows are on
 `/admin/kerberos`, the *SCIM* rows on `/admin/scim`, and `/admin/config` lists
-the mapping for all twenty-two.
+the mapping for all thirty-two.
 
 How to read it. **The appconfig key is the dot path in the file**, so
 `oid4vci.batchSize` is `oid4vci: { batchSize: … }`; `logLevel` is the one key
@@ -796,6 +796,22 @@ ordinary case, and one `entityId` between them would make that unexpressible.
 | `scim.hobaMaxAgeSeconds` | `SCIM_HOBA_MAX_AGE_SECONDS` | `600` | yes | The max-age published in the HOBA challenge and enforced on the signature. |
 | `scim.authCookie` | `SCIM_AUTH_COOKIE` | `true` | yes | Whether the browser sign-on session this service already has — the one /authn/login creates and WS-Federation shares — authenticates a SCIM request. RFC 7644 section 2 names cookies explicitly. |
 | `scim.authClientCert` | `SCIM_AUTH_CLIENT_CERT` | `true` | yes | Mutual TLS, the first scheme RFC 7644 section 2 names. It applies only where the request arrived over TLS with a certificate that VERIFIED against an anchor POSTed to /tls/trust, so on the main port only when global.https is on. |
+
+#### Roles
+
+Who holds a role, and what requires one. **A role is not a group**: a group here
+grants nothing, and holding a role is what an ISSUANCE is decided on. It is also
+not the two *Admin console* roles, which are directory groups granting `/admin`
+and nothing else. Both halves of a role — who holds one, and which roles an
+application demands — are edited on `/admin/roles` and on the application's own
+page rather than in a setting.
+
+| Setting | Environment | Default | Change while running | What it does |
+|---|---|---|---|---|
+| `roles.claim` | `STS_ROLES_CLAIM` | `true` | yes | When on, every OAuth 2.0 access token, OIDC ID Token, SAML 2.0 assertion and SAML 1.1 assertion names the roles its subject holds. The six BUILT-IN roles are never carried: `EVERYBODY` and `ALL_AUTHENTICATED_USERS` are true of almost every token this service issues, so carrying them would tell a relying party nothing it did not know from holding the token. |
+| `roles.claimName` | `STS_ROLES_CLAIM_NAME` | `roles` | yes | What the claim is called: the JWT member name, the SAML 2.0 Attribute Name and the SAML 1.1 AttributeName. |
+| `roles.enforceIssuance` | `STS_ROLES_ENFORCE_ISSUANCE` | `true` | yes | Whether this service ASKS before it issues anything. On, each of the nine kinds of issuance is a XACML request decided by the embedded PEP against a policy; off, nothing is asked and everything is allowed. **On by default costs nothing until an application is narrowed**: one that names no required role requires `EVERYBODY`, everybody holds `EVERYBODY`, and the answer is Permit — so the machinery is always running and always visible, and turning enforcement on for an application is narrowing a list rather than switching on a subsystem that has never run. Off is the way back if a policy edit locks something out. |
+| `roles.maxRoles` | `STS_ROLES_MAX` | `200` | yes | How many role entries `ou=roles` will hold, per trust realm. |
 
 #### Group claim
 

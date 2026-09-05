@@ -241,6 +241,10 @@ const vcClaims = require('../oid4vc/vc_claims');
 // admin_stats.js's resolver, which every issuance site reaches long before the
 // directory's routes should exist.
 const groupClaims = require('../common/group_claims');
+// The ROLE REGISTER. `ou=roles` is its store the way ou=policies is the policy
+// repository's, and this file fills its directory slot below — a require in
+// the other direction would drag every /ldap route to the front of the router.
+const roles = require('../common/roles');
 // The admin console's two roles, which are two groups in THIS directory. Required
 // outright rather than through a slot in the other direction because it registers
 // no route (rule 3), so nothing about the require order changes by naming it here;
@@ -397,6 +401,18 @@ function policiesDn() {
   return 'ou=policies,' + baseDn();
 }
 
+// ou=roles IS the role register. A container of its own rather than a corner
+// of ou=groups, and the difference is not filing: a GROUP is a set of PEOPLE,
+// and a role is a name that a person, a group OR AN APPLICATION may hold. The
+// third one is what makes them different kinds of thing — `client_credentials`
+// has no person in it, and an application holding a role is the only way there
+// is anything to decide about that grant. Folding roles into ou=groups would
+// mean every reader of ou=groups had to filter out the entries that are not
+// sets of people. `common/roles.js` holds the schema; /admin/roles publishes it.
+function rolesDn() {
+  return 'ou=roles,' + baseDn();
+}
+
 // ou=peps is the register of REMOTE Policy Enforcement Points — the processes
 // that pull this repository and enforce it somewhere else. A container of its
 // own rather than a corner of ou=policies, and the reason is the one that
@@ -473,6 +489,10 @@ function maxFederations() {
 
 function maxPolicies() {
   return config.value('xacml.maxPolicies');
+}
+
+function maxRoles() {
+  return config.value('roles.maxRoles');
 }
 
 function maxPeps() {
@@ -1009,6 +1029,51 @@ applications.SCHEMA.attributes.forEach(function (row) {
   learnName(row.name, 'the applications schema');
 });
 
+// AND THE FEDERATION REGISTER'S, which is the OLDEST instance of this and was
+// the last to be fixed. It never showed, because `/admin/ldap/federations`
+// draws its columns from `federation.list()` records and that module reads an
+// attribute case-insensitively (`valueOf()` walks the keys), so the only place
+// the lower-cased spellings surfaced was the raw entry dump beside a published
+// schema saying `fedSigningCertificate`. That is precisely the symptom the
+// applications merge below was written for — a page that reads as though IT
+// were wrong, when what is wrong is that the store lower-cases a name because
+// @ldapjs/attribute does.
+//
+// It is merged here rather than left alone because the defence is in the wrong
+// place: `federation.js` being careful protects `federation.js`, and the next
+// reader of one of these entries — a console page, an `/admin-api` operation,
+// something that has not been written yet — gets `undefined` from
+// `fedEnabled` and reports something plausible. The three merges below found
+// exactly that bug twice on the day they were written.
+federation.SCHEMA.attributes.forEach(function (row) {
+  learnName(row.name, 'the federation schema');
+});
+
+// AND THE THREE CONTAINERS WHOSE PAGES LANDED ON 2026-09-05, for exactly the
+// reason the applications merge above gives, found exactly the way that one
+// was: `/admin/ldap/roles` counted a role's members by reading
+// `roleMemberUser` off the entry and reported `0 user(s)` for a role somebody
+// plainly held, because the store had `rolememberuser` — and
+// `/admin/ldap/policies` showed every policy's kind as `(unstated)` and, worse,
+// showed a DISABLED policy as enabled, since a missing `xacmlEnabled` is not
+// the string `false`. That last one is why these are merged rather than read
+// case-insensitively at each site: a lookup that silently misses answers
+// something plausible, and the three pages are not the only readers of these
+// entries.
+//
+// Same source of truth in all three cases — the module that owns the container
+// owns the spelling, and `learnName()` reports a disagreement rather than
+// resolving it by merge order.
+roles.SCHEMA.attributes.forEach(function (row) {
+  learnName(row.name, 'the roles schema');
+});
+xacmlStore.SCHEMA.attributes.forEach(function (row) {
+  learnName(row.name, 'the XACML policy schema');
+});
+xacmlPepRegistry.SCHEMA.attributes.forEach(function (row) {
+  learnName(row.name, 'the XACML PEP registry schema');
+});
+
 // And the SCIM mapping's two inventions, `scimActive` and `scimExternalId`, for
 // the same reason and from the same kind of source. They are a FIFTH list, which
 // is one more than the comment above learnName() named — and the check is what
@@ -1319,6 +1384,21 @@ function seed() {
       'The entry holds the XACML XML AS AUTHORED and everything else on it ' +
       'is derived from that document at write time, so where the two ' +
       'disagree the document wins. xacml/xacml_store.js holds the schema.'
+  }, { origin: 'seed' });
+  putEntry(rolesDn(), {
+    objectClass: ['top', 'organizationalUnit'],
+    ou: 'roles',
+    description: 'ROLES: the one thing here a user, a group AND an ' +
+      'application can all be mapped into. An entry is named by the role and ' +
+      'everything on it is MEMBERSHIP — who holds it. What a role is ' +
+      'REQUIRED for is NOT here: that lives in appRequiredRole on the ' +
+      'application entry that requires it, because it is a fact about the ' +
+      'application. Six more roles exist and are in no container at all — ' +
+      'EVERYBODY, ALL_AUTHENTICATED_USERS, ALL_UNAUTHENTICATED_USERS, ' +
+      'ALL_APPLICATIONS, ALL_AUTHENTICATED_APPLICATIONS and ' +
+      'ALL_UNAUTHENTICATED_APPLICATIONS are COMPUTED from the security ' +
+      'context of the decision being made. common/roles.js holds the schema; ' +
+      'GET /admin/roles publishes it.'
   }, { origin: 'seed' });
   putEntry(pepsDn(), {
     objectClass: ['top', 'organizationalUnit'],
@@ -4357,6 +4437,36 @@ if (typeof groupClaims.setDirectory === 'function') {
 //
 // Guarded like every other install here: an older copy of either module
 // without the slot costs a warning rather than a service that will not start.
+// THE ROLE REGISTER'S CONTAINER, AND ITS GROUP LOOKUP.
+//
+// Two functions rather than one slot's worth, because resolving a role needs
+// both halves and only this module has either: `ou=roles` says which groups
+// hold a role, and `groupsOfUser()` says which groups a person is in. Handing
+// over the container alone would leave `roles.js` able to list roles and
+// unable to answer whether anybody holds one.
+//
+// The group names are FLATTENED to their common names here. `groupsOfUser()`
+// answers rows carrying a DN, a cn and how the membership was established,
+// which is what /admin/groups draws; a role only ever compares names, and
+// passing the rows would put the shape of a console page into the resolver.
+if (typeof roles.setDirectory === 'function') {
+  roles.setDirectory({
+    allRoles: allRoles,
+    writeRole: writeRole,
+    deleteRole: deleteRole,
+    groupsOfUser: function (name) {
+      return (groupsOfUser(name).groups || []).map(function (one) {
+        return one.cn;
+      });
+    }
+  });
+} else {
+  log.warn('ldap: common/roles.js offers no setDirectory(), so ou=roles is ' +
+           'unreachable and only the six built-in roles answer. An ' +
+           'application requiring EVERYBODY still admits everybody, so ' +
+           'nothing is refused that was not refused before.');
+}
+
 if (typeof xacmlStore.setDirectory === 'function') {
   xacmlStore.setDirectory({ allPolicies: allPolicies,
                             writePolicy: writePolicy,
@@ -6870,6 +6980,102 @@ function deletePolicy(name) {
 }
 
 // ---------------------------------------------------------------------------
+// ou=roles AS A STORE.
+//
+// The same three functions again. One thing about them is worth saying: a role
+// entry is named by the ROLE NAME itself and there is no second identifier —
+// unlike a policy, whose entry name and PolicyId are deliberately different
+// things. A role IS its name: it is what a token claim carries, what an
+// application's requirement list names, and what a XACML policy matches on, so
+// a role with a handle and a separate display name would be three places for
+// one string to disagree with itself.
+// ---------------------------------------------------------------------------
+function roleDn(name) {
+  return 'cn=' + escapeDnValue(String(name)) + ',' + rolesDn();
+}
+
+function roleEntry(name) {
+  log.debug('Entering roleEntry(). name=' + name);
+  const direct = getEntry(roleDn(name));
+  log.debug('Leaving roleEntry(). ' + (direct ? 'Found.' : 'Not here.'));
+  return direct || null;
+}
+
+function roleCount() {
+  let n = 0;
+  eachEntryInRealm(function (stored) {
+    if (isUnder(stored.dn, rolesDn()) &&
+        normalizeDn(stored.dn) !== normalizeDn(rolesDn())) {
+      n++;
+    }
+  });
+  return n;
+}
+
+function allRoles() {
+  log.debug('Entering allRoles().');
+  const rows = [];
+  eachEntryInRealm(function (stored) {
+    if (isUnder(stored.dn, rolesDn()) &&
+        normalizeDn(stored.dn) !== normalizeDn(rolesDn())) {
+      const object = entryObject(stored);
+      object.name = (stored.attributes.cn || [])[0] ||
+                    stored.dn.split(',')[0].replace(/^cn=/i, '');
+      rows.push(object);
+    }
+  });
+  log.debug('Leaving allRoles(). ' + rows.length + ' role(s).');
+  return rows;
+}
+
+// Create or REPLACE, for writePolicy()'s reason: the record being written was
+// read from this entry a moment ago and changed, so merging would make it
+// impossible to REMOVE a member — and removing a member from a role is the
+// half of this register that has a security consequence.
+function writeRole(name, attributes) {
+  log.debug('Entering writeRole(). name=' + name);
+  const existing = roleEntry(name);
+  const dn = existing ? existing.dn : roleDn(name);
+  if (!existing && roleCount() >= maxRoles()) {
+    log.warn('ldap: not creating ' + dn + '; ou=roles holds its maximum of ' +
+             maxRoles() + ' entry/entries (roles.maxRoles).');
+    log.debug('Leaving writeRole(). The container is full.');
+    return false;
+  }
+  if (totalEntries() >= maxEntries() && !existing) {
+    log.warn('ldap: not creating ' + dn + '; the directory holds its ' +
+             'maximum of ' + maxEntries() + ' entries.');
+    log.debug('Leaving writeRole(). The directory is full.');
+    return false;
+  }
+  const created = existing ? existing.createdAt : generalizedTime();
+  const stored = putEntry(dn, Object.assign({ cn: String(name) }, attributes),
+                          { origin: existing ? existing.origin : 'roles' });
+  stored.createdAt = created;
+  stored.attributes.createtimestamp = [created];
+  stored.attributes.modifytimestamp = [generalizedTime()];
+  auditPolicyDirectory(existing ? 'entry.update' : 'entry.create', dn,
+                       stored.attributes, !existing);
+  log.debug('Leaving writeRole(). The entry was ' +
+            (existing ? 'updated.' : 'created.'));
+  return true;
+}
+
+function deleteRole(name) {
+  log.debug('Entering deleteRole(). name=' + name);
+  const stored = roleEntry(name);
+  if (!stored) {
+    log.debug('Leaving deleteRole(). It was not here.');
+    return false;
+  }
+  entries.delete(normalizeDn(stored.dn));
+  touchDirectory();
+  auditPolicyDirectory('entry.delete', stored.dn, stored.attributes, false);
+  log.debug('Leaving deleteRole(). ' + entries.size + ' entry/entries left.');
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // ou=peps AS A STORE.
 //
 // The same three functions again, and one difference from ou=policies worth
@@ -8174,12 +8380,569 @@ app.get('/admin/ldap/federations', function (req, res) {
 });
 
 // ---------------------------------------------------------------------------
+// GET /admin/ldap/roles — the role register as the directory sees it.
+//
+// The fourth container page, and the three above it establish the shape: a
+// container of entries carrying invented attribute names needs somewhere to
+// say what they mean, because this directory is schemaless and a client
+// reading one back is otherwise guessing.
+//
+// IT SAYS TWO THINGS `/admin/roles` DOES NOT HAVE TO, and both are properties
+// of the CONTAINER rather than of the feature:
+//
+//   * **HALF THE FEATURE IS NOT IN HERE.** A role has two relations —
+//     MEMBERSHIP, which is on the role entry and is what this container
+//     holds, and REQUIREMENT, which is `appRequiredRole` on an APPLICATION
+//     entry under `ou=applications`. A reader looking at `ou=roles` for the
+//     reason somebody was refused would find nothing that refuses anybody,
+//     and would be looking at the wrong container rather than at a broken
+//     one. `common/roles.js` argues why they are kept apart.
+//   * **THE SIX BUILT-IN ROLES ARE IN NO CONTAINER AT ALL.** They are
+//     computed from the context of the decision being made, so `EVERYBODY`
+//     has no entry here and never will. An empty `ou=roles` is therefore the
+//     ordinary state of a service that is deciding every issuance against
+//     `EVERYBODY` and refusing nobody — which is what this service does
+//     before anybody configures anything, and is exactly the state that looks
+//     like the feature not being loaded.
+//
+// AN ldapmodify HERE GRANTS A ROLE. The entries are the register and nothing
+// caches them, so adding a value to `roleMemberUser` is answered by the very
+// next issuance decision. That is one of the two halves of a refusal; the
+// other is on the application entry.
+// ---------------------------------------------------------------------------
+function ldapRolesView(req) {
+  log.debug('Entering ldapRolesView().');
+  const all = allRoles();
+  const wantedText = String(req.query.q || '').trim();
+  const needle = wantedText.toLowerCase();
+  const filtered = all.filter(function (row) {
+    if (!needle) {
+      return true;
+    }
+    if (String(row.name).toLowerCase().indexOf(needle) >= 0 ||
+        String(row.dn || '').toLowerCase().indexOf(needle) >= 0) {
+      return true;
+    }
+    // The VALUES too, for the reason the applications page searches them:
+    // somebody asking "which role is alice in" has the member's name and not
+    // the role's.
+    return Object.keys(row.attributes || {}).some(function (name) {
+      const value = row.attributes[name];
+      const values = Array.isArray(value) ? value : [value];
+      return values.some(function (one) {
+        return String(one).toLowerCase().indexOf(needle) >= 0;
+      });
+    });
+  });
+  const paged = directoryPaging(req, filtered, 'roles');
+  const paging = paged.paging;
+  const filterParams = { q: wantedText || '', per: perOf(req, paging) };
+  const nav = admin.pageNavPair('/admin/ldap/roles', filterParams, paging);
+
+  const payload = {
+    baseDn: baseDn(),
+    container: rolesDn(),
+    count: all.length,
+    matched: filtered.length,
+    shown: paged.shown.length,
+    max: maxRoles(),
+    filter: { q: wantedText || null },
+    page: paging.page, pages: paging.pages, perPage: paging.perPage,
+    firstRow: paging.firstRow, lastRow: paging.lastRow,
+    sourceOfTruth: 'These entries ARE the membership half of the role register. An ' +
+      'ldapmodify adding a value to roleMemberUser grants that role, and the next ' +
+      'issuance decision is made against it. What REQUIRES a role is appRequiredRole ' +
+      'on an application entry under ou=applications, which is a different container.',
+    builtIn: roles.BUILT_IN_NAMES,
+    schema: roles.SCHEMA,
+    roles: paged.shown
+  };
+
+  const roleRows = paged.shown.map(function (row) {
+    const attrs = Object.keys(row.attributes).sort().map(function (name) {
+      return '<div><code>' + xmlEscape(name) + '</code>: ' +
+        admin.clippedValues(row.attributes[name]) + '</div>';
+    }).join('');
+    const held = function (name) {
+      const value = row.attributes[name];
+      if (!value) {
+        return 0;
+      }
+      return Array.isArray(value) ? value.length : 1;
+    };
+    return '<tr><td>' + admin.clipped(row.name, 40) +
+      (row.dn ? '<div class="sub">' + admin.clipped(row.dn, 40) + '</div>' : '') +
+      '</td><td class="counts">' + held('roleMemberUser') + ' user(s)<br>' +
+      held('roleMemberGroup') + ' group(s)<br>' +
+      held('roleMemberApplication') + ' application(s)</td>' +
+      '<td class="attrs">' + attrs + '</td></tr>';
+  }).join('');
+  const classRows = roles.SCHEMA.objectClasses.map(function (one) {
+    return '<tr><td><code>' + xmlEscape(one.name) + '</code></td><td>' +
+      xmlEscape(one.what) + '</td></tr>';
+  }).join('');
+  const attrRows = roles.SCHEMA.attributes.map(function (row) {
+    return '<tr><td><code>' + xmlEscape(row.name) + '</code></td><td>' +
+      xmlEscape(row.what) + '</td></tr>';
+  }).join('');
+  const builtInRows = roles.builtInCatalogue().map(function (one) {
+    return '<tr><td><code>' + xmlEscape(one.name) + '</code></td><td>' +
+      xmlEscape(one.what || one.description || '') + '</td></tr>';
+  }).join('');
+
+  const inner = '<p class="sub">' + all.length + ' of a maximum ' +
+    maxRoles() + ' under <code>' + xmlEscape(rolesDn()) +
+    '</code>: one entry per role, and everything on it is MEMBERSHIP — who ' +
+    'holds it. A person, a group and an application are all first-class ' +
+    'members, which is what lets a client_credentials grant with no person in ' +
+    'it be decided at all.</p>' +
+    '<div class="tiles">' +
+    admin.tile(all.length, 'Role entries') +
+    admin.tile(roles.BUILT_IN_NAMES.length, 'Built in, in no container') +
+    admin.tile(maxRoles(), 'Maximum held') +
+    '</div>' +
+    admin.note('<strong>Half the feature is not in this container.</strong> A ' +
+    'role has two relations and they live apart on purpose: MEMBERSHIP is ' +
+    'here, and the REQUIREMENT — which roles an application demands before ' +
+    'anything is issued for it — is <code>appRequiredRole</code> on the ' +
+    'application\'s own entry under <code>ou=applications</code>. So nothing ' +
+    'in this container refuses anybody by itself, and a reader looking here ' +
+    'for the reason somebody was turned away is one container across from it. ' +
+    '<a href="/admin/roles">Roles</a> is the page with both halves and the ' +
+    'controls on it; <a href="/admin/ldap/applications">Application entries</a> ' +
+    'is where the other half is stored.') +
+    '<form method="get" action="/admin/ldap/roles"><div class="formrow">' +
+    '<label for="q">Anywhere in the entry</label>' +
+    '<input type="text" id="q" name="q" value="' + xmlEscape(wantedText) +
+    '" size="30" placeholder="a role name, a DN, or a member">' +
+    '<label for="per">Show</label>' +
+    '<select id="per" name="per">' +
+    admin.perPageOptions(paging.perPage) + '</select>' +
+    '<button type="submit">Filter</button>' +
+    (wantedText ? ' <a href="/admin/ldap/roles">clear</a>' : '') +
+    '</div></form>' +
+    nav.head +
+    '<table><tr><th>Role</th><th>Who holds it</th>' +
+    '<th>Every attribute</th></tr>' +
+    (roleRows || '<tr><td colspan="3">' +
+      (wantedText
+        ? 'No role matches. The filter above may be hiding some.'
+        : 'Nothing yet, which is the ORDINARY state rather than an empty ' +
+          'one: an application that names no required role requires ' +
+          'EVERYBODY, everybody holds EVERYBODY, and nothing is refused. ' +
+          'A role is made on the Roles page or through POST ' +
+          '/admin-api/roles/create-role.') +
+      '</td></tr>') +
+    '</table>' +
+    nav.foot +
+    '<h2>The six that are in no container</h2>' +
+    admin.note('These are COMPUTED from the context of the decision being ' +
+    'made rather than stored, so they have no entry here, no members to ' +
+    'list, and cannot be created, edited or deleted. They are the reason an ' +
+    'empty container above is not the feature being switched off: ' +
+    '<code>EVERYBODY</code> is what an application requires when its entry ' +
+    'names nothing, and everybody holds it.') +
+    '<table><tr><th>Role</th><th>Who holds it</th></tr>' +
+    builtInRows + '</table>' +
+    '<h2>The object classes</h2>' +
+    admin.note('node-ldapjs has no schema subsystem and this directory is ' +
+    'schemaless on purpose, so this is a VOCABULARY rather than a ' +
+    'constraint: nothing rejects an entry for disobeying it.') +
+    '<table><tr><th>Class</th><th>What it brings</th></tr>' +
+    classRows + '</table>' +
+    '<h2>The attributes</h2>' +
+    '<table><tr><th>Attribute</th><th>What it is</th></tr>' + attrRows +
+    '</table>' +
+    '<p class="sub"><a href="/admin/ldap/roles?format=json">This page as ' +
+    'JSON</a> &middot; <a href="/admin/roles">the same register with the ' +
+    'controls on it</a> &middot; <a href="/admin/ldap/directory">every entry ' +
+    'in the directory</a> &middot; <a href="/admin/ldap/service">what this ' +
+    'directory is</a></p>';
+
+  log.debug('Leaving ldapRolesView(). ' + paged.shown.length +
+            ' row(s) of ' + filtered.length + ' matched.');
+  return { title: 'Role entries', inner: inner, json: payload };
+}
+
+app.get('/admin/ldap/roles', function (req, res) {
+  log.debug('Entering GET /admin/ldap/roles.');
+  const view = ldapRolesView(req);
+  admin.respond(req, res, view.json, view.title, '/admin/ldap/roles',
+                view.inner);
+  log.debug('Leaving GET /admin/ldap/roles.');
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/ldap/policies — the XACML policy repository as the directory
+// sees it.
+//
+// `ou=policies` IS the repository, the way `ou=federations` is the federation
+// register, and this page is the one place that says so in the directory's own
+// terms.
+//
+// **AN ldapmodify HERE IS NOT VALIDATED, AND THAT IS THE SENTENCE THIS PAGE
+// EXISTS FOR.** Every write through `/admin/xacml` and `/admin-api/xacml`
+// goes through `xacml_store.js`, which parses the document and STATICALLY
+// TYPECHECKS it — a policy that does not typecheck is refused at write time
+// rather than going Indeterminate on every request, which is a decision this
+// family made on purpose and tests. A write over LDAP reaches the entry
+// directly and skips all of it. Nothing caches these entries, so the very next
+// request is decided against whatever was written, and a document that no
+// longer typechecks answers Indeterminate — which a PEP with a deny bias turns
+// into a refusal of everybody and a PEP with a permit bias turns into the
+// opposite.
+// ---------------------------------------------------------------------------
+function ldapPoliciesView(req) {
+  log.debug('Entering ldapPoliciesView().');
+  const all = allPolicies();
+  const wantedText = String(req.query.q || '').trim();
+  const needle = wantedText.toLowerCase();
+  const filtered = all.filter(function (row) {
+    if (!needle) {
+      return true;
+    }
+    if (String(row.name).toLowerCase().indexOf(needle) >= 0 ||
+        String(row.dn || '').toLowerCase().indexOf(needle) >= 0) {
+      return true;
+    }
+    // Including the DOCUMENT, which is where a rule's own identifier lives:
+    // somebody looking for the policy that names a particular resource has
+    // the resource and not the policy's name.
+    return Object.keys(row.attributes || {}).some(function (name) {
+      const value = row.attributes[name];
+      const values = Array.isArray(value) ? value : [value];
+      return values.some(function (one) {
+        return String(one).toLowerCase().indexOf(needle) >= 0;
+      });
+    });
+  });
+  const paged = directoryPaging(req, filtered, 'policies');
+  const paging = paged.paging;
+  const filterParams = { q: wantedText || '', per: perOf(req, paging) };
+  const nav = admin.pageNavPair('/admin/ldap/policies', filterParams, paging);
+
+  const first = function (row, name) {
+    const value = (row.attributes || {})[name];
+    if (!value) {
+      return '';
+    }
+    return String(Array.isArray(value) ? value[0] : value);
+  };
+
+  const payload = {
+    baseDn: baseDn(),
+    container: policiesDn(),
+    count: all.length,
+    matched: filtered.length,
+    shown: paged.shown.length,
+    max: maxPolicies(),
+    filter: { q: wantedText || null },
+    page: paging.page, pages: paging.pages, perPage: paging.perPage,
+    firstRow: paging.firstRow, lastRow: paging.lastRow,
+    sourceOfTruth: 'These entries ARE the policy repository. An ldapmodify of ' +
+      'xacmlPolicyDocument changes what the PDP decides on the very next request and ' +
+      'is NOT statically validated on the way in, unlike every write through ' +
+      '/admin/xacml — so a document that stops typechecking answers Indeterminate ' +
+      'rather than being refused.',
+    schema: xacmlStore.SCHEMA,
+    policies: paged.shown
+  };
+
+  const policyRows = paged.shown.map(function (row) {
+    const attrs = Object.keys(row.attributes).sort().map(function (name) {
+      return '<div><code>' + xmlEscape(name) + '</code>: ' +
+        admin.clippedValues(row.attributes[name]) + '</div>';
+    }).join('');
+    // 'FALSE' AND 'TRUE', not 'false' and 'true'. RFC 4517's Boolean syntax
+    // is upper case and `xacml_store.js` writes it that way, so this reads it
+    // the way that module reads it — `at('xacmlEnabled') !== 'FALSE'` — rather
+    // than inventing a third spelling. The lower-case comparison this replaced
+    // drew every DISABLED policy as enabled, which is the direction that
+    // matters: a page that overstates what is switched on.
+    const enabled = first(row, 'xacmlEnabled') !== 'FALSE';
+    const isRoot = first(row, 'xacmlIsRoot') === 'TRUE';
+    return '<tr><td>' + admin.clipped(row.name, 40) +
+      (row.dn ? '<div class="sub">' + admin.clipped(row.dn, 40) + '</div>' : '') +
+      '</td><td>' + xmlEscape(first(row, 'xacmlKind') || '(unstated)') +
+      '<div class="sub">' + admin.clipped(first(row, 'xacmlPolicyId'), 40) +
+      '</div></td><td>' +
+      (enabled ? '<span class="state-valid">enabled</span>'
+               : '<span class="state-none">disabled</span>') +
+      (isRoot ? '<div class="sub">the root</div>' : '') +
+      '</td><td class="attrs">' + attrs + '</td></tr>';
+  }).join('');
+  const classRows = xacmlStore.SCHEMA.objectClasses.map(function (one) {
+    return '<tr><td><code>' + xmlEscape(one.name) + '</code></td><td>' +
+      xmlEscape(one.what) + '</td></tr>';
+  }).join('');
+  const attrRows = xacmlStore.SCHEMA.attributes.map(function (row) {
+    return '<tr><td><code>' + xmlEscape(row.name) + '</code></td><td>' +
+      xmlEscape(row.what) + '</td></tr>';
+  }).join('');
+
+  const inner = '<p class="sub">' + all.length + ' of a maximum ' +
+    maxPolicies() + ' under <code>' + xmlEscape(policiesDn()) +
+    '</code>: one entry per policy or policy set, holding the XACML document ' +
+    'itself. Exactly one of them is the ROOT — a PDP evaluates one document ' +
+    'and reaches the rest through PolicyIdReference.</p>' +
+    '<div class="tiles">' +
+    admin.tile(all.length, 'Policy entries') +
+    admin.tile(all.filter(function (row) {
+      return first(row, 'xacmlEnabled') !== 'FALSE';
+    }).length, 'Enabled') +
+    admin.tile(maxPolicies(), 'Maximum held') +
+    '</div>' +
+    admin.warn('<strong>A write here skips the typechecker, which is not true ' +
+    'of any other door into this repository.</strong> Every write through ' +
+    '<a href="/admin/xacml">XACML</a> and <code>/admin-api/xacml</code> ' +
+    'parses the document and statically typechecks it, so a policy that does ' +
+    'not typecheck is refused at WRITE time instead of going Indeterminate on ' +
+    'every request. An <code>ldapmodify</code> of ' +
+    '<code>xacmlPolicyDocument</code> reaches the entry directly and skips ' +
+    'that, and nothing caches these entries — so the next request is decided ' +
+    'against whatever was written.') +
+    '<form method="get" action="/admin/ldap/policies"><div class="formrow">' +
+    '<label for="q">Anywhere in the entry</label>' +
+    '<input type="text" id="q" name="q" value="' + xmlEscape(wantedText) +
+    '" size="30" placeholder="a name, a DN, a PolicyId or anything in the document">' +
+    '<label for="per">Show</label>' +
+    '<select id="per" name="per">' +
+    admin.perPageOptions(paging.perPage) + '</select>' +
+    '<button type="submit">Filter</button>' +
+    (wantedText ? ' <a href="/admin/ldap/policies">clear</a>' : '') +
+    '</div></form>' +
+    nav.head +
+    '<table><tr><th>Policy</th><th>Kind</th><th>State</th>' +
+    '<th>Every attribute</th></tr>' +
+    (policyRows || '<tr><td colspan="4">' +
+      (wantedText
+        ? 'No policy matches. The filter above may be hiding some.'
+        : 'Nothing yet. A repository with no policies in it answers ' +
+          'NotApplicable to every request, which a PEP turns into a refusal ' +
+          'or an allow according to its bias.') +
+      '</td></tr>') +
+    '</table>' +
+    nav.foot +
+    '<h2>The object classes</h2>' +
+    admin.note('node-ldapjs has no schema subsystem and this directory is ' +
+    'schemaless on purpose, so this is a VOCABULARY rather than a ' +
+    'constraint: nothing rejects an entry for disobeying it.') +
+    '<table><tr><th>Class</th><th>What it brings</th></tr>' +
+    classRows + '</table>' +
+    '<h2>The attributes</h2>' +
+    '<table><tr><th>Attribute</th><th>What it is</th></tr>' + attrRows +
+    '</table>' +
+    '<p class="sub"><a href="/admin/ldap/policies?format=json">This page as ' +
+    'JSON</a> &middot; <a href="/admin/xacml">the same repository with the ' +
+    'controls on it</a> &middot; <a href="/admin/ldap/peps">the PEPs that ' +
+    'pull it</a> &middot; <a href="/admin/ldap/directory">every entry in the ' +
+    'directory</a></p>';
+
+  log.debug('Leaving ldapPoliciesView(). ' + paged.shown.length +
+            ' row(s) of ' + filtered.length + ' matched.');
+  return { title: 'Policy entries', inner: inner, json: payload };
+}
+
+app.get('/admin/ldap/policies', function (req, res) {
+  log.debug('Entering GET /admin/ldap/policies.');
+  const view = ldapPoliciesView(req);
+  admin.respond(req, res, view.json, view.title, '/admin/ldap/policies',
+                view.inner);
+  log.debug('Leaving GET /admin/ldap/policies.');
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/ldap/peps — the registered remote Policy Enforcement Points.
+//
+// The SPIFFE page's closest relative in this directory, and for the same
+// reason: **almost everything in this container is a RECORD of what happened
+// rather than configuration somebody typed.** A PEP registers itself, and its
+// identity is taken from the CLIENT CERTIFICATE it presented and never from
+// the body it sent — which is the one defect in that family that would have
+// been a security bug, and is why `xacmlPepCertificateSubject` and
+// `xacmlPepThumbprint` are on the entry at all.
+//
+// TWO ATTRIBUTES ARE NOT A RECORD AND AN ldapmodify OF EITHER IS A REAL
+// CHANGE: `xacmlPepEnabled` is an administrator's decision and a PEP that
+// reconnects does NOT clear it, and `xacmlPepNotifyUrl` is one of the three
+// addresses this service will dial. Everything else — the counters, the last
+// seen, the sync token — is written by this service as PEPs come and go.
+//
+// **AN EMPTY CONTAINER IS NOT A FEATURE THAT IS OFF.** A remote PEP pulls
+// `GET /xacml/pep/policies` and converges without registering at all;
+// registering is what buys it the nudge and a row on the console. So policy
+// distribution can be working perfectly with nothing in here.
+// ---------------------------------------------------------------------------
+function ldapPepsView(req) {
+  log.debug('Entering ldapPepsView().');
+  const all = allPeps();
+  const wantedText = String(req.query.q || '').trim();
+  const needle = wantedText.toLowerCase();
+  const filtered = all.filter(function (row) {
+    if (!needle) {
+      return true;
+    }
+    if (String(row.name).toLowerCase().indexOf(needle) >= 0 ||
+        String(row.dn || '').toLowerCase().indexOf(needle) >= 0) {
+      return true;
+    }
+    return Object.keys(row.attributes || {}).some(function (name) {
+      const value = row.attributes[name];
+      const values = Array.isArray(value) ? value : [value];
+      return values.some(function (one) {
+        return String(one).toLowerCase().indexOf(needle) >= 0;
+      });
+    });
+  });
+  const paged = directoryPaging(req, filtered, 'peps');
+  const paging = paged.paging;
+  const filterParams = { q: wantedText || '', per: perOf(req, paging) };
+  const nav = admin.pageNavPair('/admin/ldap/peps', filterParams, paging);
+
+  const first = function (row, name) {
+    const value = (row.attributes || {})[name];
+    if (!value) {
+      return '';
+    }
+    return String(Array.isArray(value) ? value[0] : value);
+  };
+
+  const payload = {
+    baseDn: baseDn(),
+    container: pepsDn(),
+    count: all.length,
+    matched: filtered.length,
+    shown: paged.shown.length,
+    max: maxPeps(),
+    filter: { q: wantedText || null },
+    page: paging.page, pages: paging.pages, perPage: paging.perPage,
+    firstRow: paging.firstRow, lastRow: paging.lastRow,
+    sourceOfTruth: 'Almost every attribute here is a RECORD this service wrote as a ' +
+      'PEP registered, pulled or reported. The two that are not are xacmlPepEnabled, ' +
+      'which an administrator sets and a reconnecting PEP does not clear, and ' +
+      'xacmlPepNotifyUrl, which is one of the three addresses this service dials.',
+    schema: xacmlPepRegistry.SCHEMA,
+    peps: paged.shown
+  };
+
+  const pepRows = paged.shown.map(function (row) {
+    const attrs = Object.keys(row.attributes).sort().map(function (name) {
+      return '<div><code>' + xmlEscape(name) + '</code>: ' +
+        admin.clippedValues(row.attributes[name]) + '</div>';
+    }).join('');
+    // 'FALSE', for the reason the policies page above states.
+    const enabled = first(row, 'xacmlPepEnabled') !== 'FALSE';
+    return '<tr><td>' + admin.clipped(row.name, 40) +
+      (row.dn ? '<div class="sub">' + admin.clipped(row.dn, 40) + '</div>' : '') +
+      '</td><td>' + admin.clipped(first(row, 'xacmlPepCertificateSubject') ||
+        '(no client certificate)', 40) +
+      '<div class="sub">' + admin.clipped(first(row, 'xacmlPepThumbprint'), 24) +
+      '</div></td><td>' +
+      (enabled ? '<span class="state-valid">enabled</span>'
+               : '<span class="state-none">disabled by an administrator</span>') +
+      '<div class="sub">' + xmlEscape(first(row, 'xacmlPepLastSeen') ||
+        'never seen') + '</div></td>' +
+      '<td class="counts">' + xmlEscape(first(row, 'xacmlPepDecisions') || '0') +
+      ' decision(s)<br>' + xmlEscape(first(row, 'xacmlPepAllowed') || '0') +
+      ' allowed<br>' + xmlEscape(first(row, 'xacmlPepRefused') || '0') +
+      ' refused</td>' +
+      '<td class="attrs">' + attrs + '</td></tr>';
+  }).join('');
+  const classRows = xacmlPepRegistry.SCHEMA.objectClasses.map(function (one) {
+    return '<tr><td><code>' + xmlEscape(one.name) + '</code></td><td>' +
+      xmlEscape(one.what) + '</td></tr>';
+  }).join('');
+  const attrRows = xacmlPepRegistry.SCHEMA.attributes.map(function (row) {
+    return '<tr><td><code>' + xmlEscape(row.name) + '</code></td><td>' +
+      xmlEscape(row.what) + '</td></tr>';
+  }).join('');
+
+  const inner = '<p class="sub">' + all.length + ' of a maximum ' +
+    maxPeps() + ' under <code>' + xmlEscape(pepsDn()) +
+    '</code>: the remote Policy Enforcement Points that have registered with ' +
+    'this PDP. Each holds its own copy of the engine, pulls the policy ' +
+    'repository, and decides in its own process.</p>' +
+    '<div class="tiles">' +
+    admin.tile(all.length, 'Registered PEPs') +
+    admin.tile(all.filter(function (row) {
+      return first(row, 'xacmlPepEnabled') !== 'FALSE';
+    }).length, 'Enabled') +
+    admin.tile(maxPeps(), 'Maximum held') +
+    '</div>' +
+    admin.note('<strong>An empty container is not a feature that is off.</strong> ' +
+    'A remote PEP pulls <code>GET /xacml/pep/policies</code> and converges ' +
+    'whether or not it ever registers; registering is what buys it the change ' +
+    'nudge and a row here. And an identity in this container was taken from ' +
+    'the CLIENT CERTIFICATE the PEP presented, never from the body it sent — ' +
+    'so a PEP cannot name itself anything it cannot prove. ' +
+    '<a href="/admin/xacml/peps">XACML PEPs</a> is the page with the controls ' +
+    'on it.') +
+    '<form method="get" action="/admin/ldap/peps"><div class="formrow">' +
+    '<label for="q">Anywhere in the entry</label>' +
+    '<input type="text" id="q" name="q" value="' + xmlEscape(wantedText) +
+    '" size="30" placeholder="a name, a DN, a certificate subject or a URL">' +
+    '<label for="per">Show</label>' +
+    '<select id="per" name="per">' +
+    admin.perPageOptions(paging.perPage) + '</select>' +
+    '<button type="submit">Filter</button>' +
+    (wantedText ? ' <a href="/admin/ldap/peps">clear</a>' : '') +
+    '</div></form>' +
+    nav.head +
+    '<table><tr><th>PEP</th><th>What it proved</th><th>State</th>' +
+    '<th>What it has decided</th><th>Every attribute</th></tr>' +
+    (pepRows || '<tr><td colspan="5">' +
+      (wantedText
+        ? 'No PEP matches. The filter above may be hiding some.'
+        : 'Nothing has registered. Policy distribution is unaffected: a PEP ' +
+          'that pulls GET /xacml/pep/policies without registering converges ' +
+          'on the same repository and appears nowhere.') +
+      '</td></tr>') +
+    '</table>' +
+    nav.foot +
+    '<h2>The object classes</h2>' +
+    admin.note('node-ldapjs has no schema subsystem and this directory is ' +
+    'schemaless on purpose, so this is a VOCABULARY rather than a ' +
+    'constraint: nothing rejects an entry for disobeying it.') +
+    '<table><tr><th>Class</th><th>What it brings</th></tr>' +
+    classRows + '</table>' +
+    '<h2>The attributes</h2>' +
+    '<table><tr><th>Attribute</th><th>What it is</th></tr>' + attrRows +
+    '</table>' +
+    '<p class="sub"><a href="/admin/ldap/peps?format=json">This page as ' +
+    'JSON</a> &middot; <a href="/admin/xacml/peps">the same registry with the ' +
+    'controls on it</a> &middot; <a href="/admin/ldap/policies">what they ' +
+    'pull</a> &middot; <a href="/admin/ldap/directory">every entry in the ' +
+    'directory</a></p>';
+
+  log.debug('Leaving ldapPepsView(). ' + paged.shown.length +
+            ' row(s) of ' + filtered.length + ' matched.');
+  return { title: 'PEP entries', inner: inner, json: payload };
+}
+
+app.get('/admin/ldap/peps', function (req, res) {
+  log.debug('Entering GET /admin/ldap/peps.');
+  const view = ldapPepsView(req);
+  admin.respond(req, res, view.json, view.title, '/admin/ldap/peps',
+                view.inner);
+  log.debug('Leaving GET /admin/ldap/peps.');
+});
+
+// ---------------------------------------------------------------------------
 // THE NINTH SLOT ON admin.js, FILLED HERE.
 //
 // `mgmt-api/admin_api.js` mirrors every page of the console (rule 7) and sits
 // two positions ABOVE this module in the require order, so it cannot require
-// this file to reach these five views without dragging every route registered
-// here ahead of its own. The slot is the way across; see the block above
+// this file to reach these eight views without dragging every route registered
+// here ahead of its own.
+//
+// THREE OF THE EIGHT ARRIVED ON 2026-09-05 and they are the reason to read
+// this block rather than assume it. `ou=roles`, `ou=policies` and `ou=peps`
+// each had a published SCHEMA in its owning module and no page publishing it —
+// three copies of a comment claiming a page that did not exist, from three
+// different weeks. They are drawn HERE, beside the other five, because this
+// module already requires all three of those modules to fill their own
+// `setDirectory()` slots: the schemas are already in scope, so the pages cost
+// no new require, close no cycle and move no route. The slot is the way across; see the block above
 // `setDirectoryPages()` in `admin.js` for the argument, and the guard below is
 // the one every other install in this file uses — an older copy of `admin.js`
 // (the parent project's) costs a warning rather than a crash at require time.
@@ -8190,11 +8953,14 @@ if (typeof admin.setDirectoryPages === 'function') {
     directory: ldapDirectoryView,
     applications: ldapApplicationsView,
     federations: ldapFederationsView,
-    spiffe: ldapSpiffeView
+    spiffe: ldapSpiffeView,
+    roles: ldapRolesView,
+    policies: ldapPoliciesView,
+    peps: ldapPepsView
   });
 } else {
   log.warn('ldap: this copy of admin-ui/admin.js offers no ' +
-           'setDirectoryPages() slot, so /admin-api will not mirror the five ' +
+           'setDirectoryPages() slot, so /admin-api will not mirror the eight ' +
            'directory pages. The pages themselves are unaffected.');
 }
 

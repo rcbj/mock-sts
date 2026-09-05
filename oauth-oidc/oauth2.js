@@ -162,6 +162,14 @@ const consentScreen = require('./consent_screen');
 // because the slot answers "what did an administrator TICK" and this is the
 // other question: "what did the CLIENT ask for".
 const claimAttributes = require('../common/claim_attributes');
+// THE ROLE GATE. A LEAF (rule 3): it registers nothing, requires `helpers` and
+// `config` and nothing else here, and answers "allowed" in any process that
+// never loaded the XACML family — so this require cannot move a route, cannot
+// close a cycle and cannot change what this module does on its own. What fills
+// its decider is `xacml/xacml_role_pep.js` at 23c, fourteen positions below
+// this line, which is exactly why the gate exists rather than this file
+// requiring the PEP. See `common/issuance_gate.js`.
+const gate = require('../common/issuance_gate');
 // ---------------------------------------------------------------------------
 // RFC 8414 — OAuth 2.0 Authorization Server Metadata
 //
@@ -1464,6 +1472,94 @@ async function idToken(base, opts) {
 
 // ASYNCHRONOUS BECAUSE idToken() IS, and for no other reason: everything else
 // it mints is RS256 and stays in this process.
+// ---------------------------------------------------------------------------
+// THE ROLE GATE, ASKED ONCE PER KIND OF THING A TOKEN RESPONSE CARRIES.
+//
+// `common/issuance_gate.js` names nine kinds of issuance and they are a
+// VOCABULARY policies are written against — so a token response that mints an
+// access token, an ID Token and a refresh token asks about all three rather
+// than about "a token". A policy may then permit an access token to a client
+// and refuse it a refresh token, which is a distinction somebody will want and
+// which asking once could not express.
+//
+// THE FIRST REFUSAL WINS AND THE WHOLE REQUEST IS REFUSED. There is no partial
+// answer: a token response missing its `id_token` because a policy refused
+// that one alone would be an OIDC client with no way to discover why, and
+// section 5.1's `id_token` is not optional in a response to an `openid`
+// request. So the response is `access_denied` naming the kind that was
+// refused.
+//
+// A THROW RATHER THAN A RETURN, and it is thrown from inside `issue()` on
+// purpose. Six grants mint through that one closure precisely so that a
+// seventh added later cannot forget something — the comment above it makes
+// that argument about the client certificate — and a check that returned a
+// value would have to be read at six call sites, which is five that would and
+// a sixth that would not. `tokenEndpoint()` catches it below and turns it into
+// an OAuth error; the wrapper at the route catches anything that gets past
+// that.
+// ---------------------------------------------------------------------------
+function IssuanceRefused(answer, kind) {
+  this.name = 'IssuanceRefused';
+  this.issuance = answer;
+  this.kind = kind;
+  this.message = answer.why;
+}
+IssuanceRefused.prototype = Object.create(Error.prototype);
+
+// What a token response is about to mint, in the gate's own words. Derived
+// from the SAME expressions `tokenSet()` uses to decide — `withRefresh` and
+// the `openid` scope — rather than from a list kept beside them, because two
+// lists that had to agree would eventually not.
+function issuanceKindsOf(opts) {
+  const kinds = [gate.ISSUANCE.ACCESS_TOKEN];
+  if (opts.withRefresh !== false) {
+    kinds.push(gate.ISSUANCE.REFRESH_TOKEN);
+  }
+  if (hasScope(opts.scope, 'openid')) {
+    kinds.push(gate.ISSUANCE.ID_TOKEN);
+  }
+  return kinds;
+}
+
+// The party the requirement is about. In every browser grant it is the PERSON;
+// in `client_credentials` there is no person at all and it is the CLIENT — see
+// `common/roles.js`, where an application being a first-class member of a role
+// exists for exactly this request. `authenticated` is true either way at this
+// point: a person reached here through a session or a grant that stands in for
+// one, and a client reached here through `checkClientAuthentication()`.
+function issuanceSubjectOf(opts) {
+  const username = String((opts.user && opts.user.username) || opts.username ||
+                          '');
+  if (opts.grant === 'client_credentials') {
+    return { kind: 'application', name: String(opts.client_id || username),
+             authenticated: true };
+  }
+  return { kind: 'user', name: username, authenticated: true };
+}
+
+function checkIssuance(opts) {
+  log.debug("Entering checkIssuance(). client_id=" + opts.client_id);
+  const subject = issuanceSubjectOf(opts);
+  const kinds = issuanceKindsOf(opts);
+  for (let i = 0; i < kinds.length; i += 1) {
+    const answer = gate.check({
+      application: String(opts.client_id || ''),
+      kind: kinds[i],
+      subject: subject,
+      // The claims of a token the caller PRESENTED, where this grant is built
+      // on one. A refresh and a token exchange both are, and the roles claim
+      // in either is what the issuance policy's second arm reads.
+      claims: opts.presentedClaims || null
+    });
+    if (!answer.allowed) {
+      log.debug("Leaving checkIssuance(). Refused: " + kinds[i]);
+      throw new IssuanceRefused(answer, kinds[i]);
+    }
+  }
+  log.debug("Leaving checkIssuance(). Allowed.");
+  return null;
+}
+
 async function tokenSet(base, opts) {
   log.debug("Entering tokenSet(). scope=" + (opts.scope || '(none)'));
   // A SCOPE NAMING ANOTHER APPLICATION BECOMES THE AUDIENCE — see
@@ -2523,6 +2619,40 @@ async function issueAuthorizationResponse(req, res, query, user, authTime,
     log.debug("Leaving issueAuthorizationResponse(). An ungranted permission was asked for.");
     return redirectBack(res, base, redirectUri, query.state,
       { error: 'invalid_scope', error_description: permissionProblem },
+      types.length > 1 || types.indexOf('code') < 0, query.response_mode);
+  }
+
+  // THE ROLE GATE, and it is asked HERE for the same reason as the two blocks
+  // around it: this is the last point at which the client is still being talked
+  // to. A person who holds none of the roles this application requires is
+  // turned away with `access_denied` — RFC 6749 section 4.1.2.1's own code for
+  // a request the authorization server denied — sent back to the redirect_uri
+  // the client controls, so a relying party sees a refusal it can render rather
+  // than a page on this service that its user has to read.
+  //
+  // WHAT IS BEING ISSUED HERE IS THE AUTHORIZATION CODE, and that is the word
+  // the policy is asked about even where the response type is `token id_token`
+  // and no code is minted. The alternative — asking about whichever of the
+  // three this response type happens to carry — would make an implicit flow
+  // decidable by a rule an authorization-code flow was not, on a distinction no
+  // policy author is thinking about. The TOKEN endpoint asks about the tokens,
+  // which is where they are actually made, and this asks about the interaction.
+  //
+  // ALSO ASKED AFTER THE CONSENT SCREEN AND NOT BEFORE IT, which falls out of
+  // where this function is reached from rather than being arranged: a person is
+  // asked what they agree to and then told whether they may. The other order
+  // would ask somebody to consent to something they were about to be refused.
+  const roleAnswer = gate.check({
+    application: String(query.client_id || ''),
+    kind: gate.ISSUANCE.AUTHORIZATION_CODE,
+    subject: { kind: 'user', name: String(user.username || ''),
+               authenticated: true },
+    claims: null
+  });
+  if (!roleAnswer.allowed) {
+    log.debug("Leaving issueAuthorizationResponse(). The issuance policy refused it.");
+    return redirectBack(res, base, redirectUri, query.state,
+      { error: 'access_denied', error_description: roleAnswer.why },
       types.length > 1 || types.indexOf('code') < 0, query.response_mode);
   }
 
@@ -4346,7 +4476,39 @@ function replayOrRefuseRedemption(res, code, fingerprint, respond) {
 // an `async` handler's throw is a rejected promise, which express 4 does not
 // see, so without one a defect here would be a request that hangs where it used
 // to be a 500.
+// THE ROLE GATE'S REFUSAL, TURNED INTO AN OAUTH ERROR, and it is done HERE
+// rather than in the route wrapper below because there are TWO registrations of
+// this handler — `/oauth2/token` and `/{as}/oauth2/token` — and only one of
+// them has that wrapper. A refusal that reached the wrapper would be a 500 with
+// `server_error` in it, which is the one answer a client must not get for a
+// decision the service made on purpose.
+//
+// `access_denied` is RFC 6749 section 4.1.2.1's own code for "the resource
+// owner or authorization server denied the request", which is exactly what a
+// policy refusing an issuance is, and 400 is what section 5.2 gives every token
+// endpoint error but `invalid_client`. The `error_description` is the PEP's
+// sentence — it names the application, the roles required and the roles held —
+// because a client that cannot see why is a client whose operator files a bug
+// against this service.
 async function tokenEndpoint(req, res) {
+  log.debug("Entering the token endpoint's refusal wrapper.");
+  try {
+    const answered = await tokenGrant(req, res);
+    log.debug("Leaving the token endpoint's refusal wrapper. Nothing to " +
+              "translate.");
+    return answered;
+  } catch (e) {
+    if (e && e.name === 'IssuanceRefused') {
+      log.debug("Leaving the token endpoint's refusal wrapper. The issuance " +
+                "policy refused " + e.kind + ".");
+      return oauthError(res, 400, 'access_denied', e.message);
+    }
+    log.debug("Leaving the token endpoint's refusal wrapper. Rethrowing.");
+    throw e;
+  }
+}
+
+async function tokenGrant(req, res) {
   log.debug("Entering the token endpoint.");
   const base = asBaseOf(req);
   const body = parseBody(req);
@@ -4585,6 +4747,12 @@ async function tokenEndpoint(req, res) {
   // later that will not, which is the reasoning that keeps signJwt() the single
   // counter and refreshToken() the single minter.
   const issue = function (opts) {
+    // THE ROLE GATE, HERE FOR THE REASON THE PARAGRAPH ABOVE GIVES ABOUT THE
+    // CLIENT CERTIFICATE. Every grant mints through this closure, so every
+    // grant is decided, and a seventh added below inherits the decision
+    // without its author having to know it exists. It THROWS on a refusal —
+    // see checkIssuance() — which is caught at the foot of this function.
+    checkIssuance(opts);
     return tokenSet(base, Object.assign({ request: req }, opts));
   };
 

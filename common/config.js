@@ -3395,6 +3395,78 @@ const SETTINGS = [
                  'has to EXIST here — a memberOf naming nothing does not ' +
                  'invent a group to put in a token.' },
 
+  // --- Roles ---------------------------------------------------------------
+  //
+  // A role is the one thing here a user, a group AND an application can all be
+  // mapped into, and it has two halves that are configured in different
+  // places: MEMBERSHIP lives on the role entry (/admin/roles) and the
+  // REQUIREMENT lives on the application entry (its own page). These four
+  // settings are about the halves that belong to neither — the claim, and
+  // whether the decision is asked for at all.
+  { key: 'roles.claim', group: 'Roles', label: 'Carry a roles claim',
+    env: 'STS_ROLES_CLAIM', type: 'bool', dflt: true, runtime: true,
+    description: 'When on, every access token, ID Token, SAML 2.0 assertion ' +
+                 'and SAML 1.1 assertion names the roles its subject holds. ' +
+                 'ON by default and it still changes nothing for most ' +
+                 'callers, for the reason the groups claim is on by default: ' +
+                 'the claim is OMITTED ENTIRELY for anybody holding no ' +
+                 'CONFIGURED role, and the six built-in roles are never in ' +
+                 'it — EVERYBODY and ALL_AUTHENTICATED_USERS are true of ' +
+                 'almost every token here, so carrying them would add two ' +
+                 'meaningless members to every token every existing client ' +
+                 'parses and tell a relying party nothing it did not know ' +
+                 'from holding the token. They exist to be REQUIRED, not to ' +
+                 'be carried.' },
+
+  { key: 'roles.claimName', group: 'Roles', label: 'Role claim name',
+    env: 'STS_ROLES_CLAIM_NAME', type: 'string', dflt: 'roles', runtime: true,
+    description: 'What the claim is called, and ALSO what is looked for on ' +
+                 'the way IN: the embedded PEP reads this member out of a ' +
+                 'token a caller presented and unions what it finds with the ' +
+                 'register\'s own answer. So changing it changes both ' +
+                 'directions at once, which is the point — a deployment that ' +
+                 'calls them `groups` or `http://schemas.../role` should be ' +
+                 'able to say so once.' },
+
+  { key: 'roles.enforceIssuance', group: 'Roles',
+    label: 'Decide issuance on roles',
+    env: 'STS_ROLES_ENFORCE_ISSUANCE', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'Whether an issuance asks the PDP whether the party being ' +
+                 'authenticated holds a role the application requires. ON by ' +
+                 'default AND OFF PER APPLICATION, which is not a ' +
+                 'contradiction: an application that names no required role ' +
+                 'requires EVERYBODY, everybody holds EVERYBODY, and the ' +
+                 'answer is Permit — exactly what this service did before ' +
+                 'roles existed. Turning THIS off stops the question being ' +
+                 'asked at all, which is the way back if a policy edit ' +
+                 'locks something out. What is refused is refused in the ' +
+                 'protocol\'s own words: access_denied at an OAuth endpoint, ' +
+                 'a page at a browser one.' },
+
+  { key: 'roles.maxRoles', group: 'Roles', label: 'Maximum roles',
+    env: 'STS_ROLES_MAX', type: 'int', dflt: 200, runtime: true,
+    description: 'How many entries ou=roles may hold. The same cap every ' +
+                 'other container here carries and for the same reason: this ' +
+                 'directory is a Map in one process, and an unbounded ' +
+                 'register reachable from an ungated /admin-api is a way to ' +
+                 'exhaust it.' },
+
+  { key: 'xacml.issuancePolicy', group: 'XACML',
+    label: 'The policy issuance decisions are made with',
+    env: 'STS_XACML_ISSUANCE_POLICY', type: 'string', dflt: 'role-issuance',
+    runtime: true,
+    description: 'The directory entry name of the policy the EMBEDDED PEP ' +
+                 'evaluates for this service\'s own issuance decisions. It ' +
+                 'is deliberately NOT the repository root: the root answers ' +
+                 'questions about somebody else\'s boundary — that is what a ' +
+                 'PDP is for and what /xacml/pdp and every remote PEP ask it ' +
+                 '— and this one answers a question about THIS service. Two ' +
+                 'questions, two documents, so that editing the demo policy ' +
+                 'cannot change who may sign in and narrowing a role cannot ' +
+                 'change what /xacml/pdp answers. It is created from the ' +
+                 '`role-issuance` template and seeded on first start.' },
+
   // --- Audit log -----------------------------------------------------------
   //
   // Both are runtime and both are honestly so: audit.js reads them per event

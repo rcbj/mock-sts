@@ -2349,3 +2349,99 @@ is a subtree per realm, and `applications.js`'s registry is that subtree's
 `ou=applications`. So a consent agreed in `acme` is invisible in the default
 realm without one line in this file mentioning a realm — which is the property
 to check a new store against, answered here by having no store.
+
+## `roles.js` and `issuance_gate.js`: the fourth register, and the leaf that asks about it
+
+Rules 3u and 3v. They arrived together on 2026-09-05 and they are two files
+rather than one for a reason worth stating before anything else: **one of them
+holds the answer and the other one holds nothing at all.**
+
+`roles.js` is the register — who HOLDS a role. `issuance_gate.js` is an empty
+shell that nine issuance sites ask before this service issues anything, and
+whose decider is filled by `xacml/xacml_role_pep.js` at 23c. A process that
+never loaded the XACML family has no decider installed and every call answers
+`allowed`, which is what keeps `npm test`, the parent project's in-process
+Kerberos jobs and the remote PEP container a SMALLER service rather than a
+broken one.
+
+### It is the one register a USER, a GROUP and an APPLICATION are all in
+
+`delegation.js` records what an application DID; `app_permissions.js` configures
+what one MAY do; `consent.js` holds what a PERSON agreed to. This is the fourth,
+and what makes it different is that all three kinds of directory object are
+first-class members of one role.
+
+**The third one is the unusual one and it is the point.** A `client_credentials`
+grant has no person in it at all, so until an application could hold a role
+there was nothing to decide about one — the subject of that decision is the
+CLIENT, and a register that only knew about people could not have answered it.
+
+### The two relations are kept apart, and collapsing them is the mistake
+
+|  | Stored on | Edited at | Means |
+|---|---|---|---|
+| MEMBERSHIP | the ROLE entry, `ou=roles` | `/admin/roles` | who HOLDS the role |
+| REQUIREMENT | the APPLICATION entry, `appRequiredRole` | the application's own page | what it DEMANDS before anything is issued |
+
+An application appears in both and means opposite things in each: in the first
+it holds the role, in the second it demands it. That is why `ou=roles` is only
+half the feature and why `/admin/ldap/roles` says so at the top — a reader
+looking in that container for the reason somebody was refused is one container
+across from the answer.
+
+### `EVERYBODY` is what makes this off by default without being absent
+
+Six roles are BUILT IN, computed from the context of the decision, and in no
+container: `EVERYBODY`, `ALL_AUTHENTICATED_USERS`,
+`ALL_UNAUTHENTICATED_USERS`, `ALL_APPLICATIONS`,
+`ALL_AUTHENTICATED_APPLICATIONS`, `ALL_UNAUTHENTICATED_APPLICATIONS`.
+
+An application that names no required role requires `EVERYBODY`; everybody holds
+`EVERYBODY`; the decision is Permit and the service behaves exactly as it did
+before any of this existed. **That is a better default than "no roles configured
+means do not ask"**, because the machinery is then always running and always
+visible: the console shows the decision, the audit log records it, and turning
+enforcement on for an application is NARROWING A LIST rather than switching on a
+subsystem that has never run.
+
+The consequence for a reader is the sentence `/admin/ldap/roles` and
+`GET /admin-api/ldap/roles` both carry: **an empty `ou=roles` is the ordinary
+state of a service refusing nobody**, not a sign that the feature failed to
+load.
+
+### `roles.js` is a LEAF and must stay one
+
+It requires `helpers.js` and `config.js` and nothing else here, which is what
+lets `admin_stats.js` require it in the ORDINARY DIRECTION for the roles claim
+rather than being offered a fifth inverted hook. Rule 3e is explicit that a slot
+is what you reach for when a require would close a cycle or move a route, and
+that a fifth must not be added by analogy with the fourth: here a plain require
+works, so a plain require is what is used. **Do not make this file require
+`admin_stats.js`** — the moment it does, that argument is gone and a slot is the
+only way back.
+
+The DIRECTORY arrives through a slot pointing the other way, as
+`group_claims.js`, `applications.js` and `xacml_store.js` do it: only
+`ldap/ldap_server.js` can answer what is in `ou=roles`, and it is required at 21.
+
+### An empty decider means ISSUE, and the fail-closed case is not in this file
+
+`issuance_gate.js` is absent-safe on purpose, and the reason is about failure
+rather than about tests: this service exists to be exercised, and an
+authorization subsystem that could brick every protocol family by being
+half-loaded would be the worst possible thing to put in front of a mock.
+
+**Where enforcement must fail CLOSED it does so in the PEP**, which knows
+whether anybody actually asked for a restriction — an application that names no
+required role costs nothing when the policy is missing, and one whose entry
+names `staff` is refused, because somebody deliberately asked for that. Both
+halves are argued in `xacml/CLAUDE.md`. This file's job is to be absent-safe; it
+is not the file that decides what a restriction means.
+
+`ISSUANCE` is a VOCABULARY and not a list of call sites: its nine values become
+the XACML `action-id` of the request, so adding one is adding a word a policy
+author can match on, and RENAMING one silently stops every policy that named the
+old word from matching — which is a policy that permits nothing rather than an
+error. The nine are spread over eight `gate.check()` calls in seven modules,
+because the two SAML profiles both issue `issue-saml-assertion` and `oauth2.js`
+asks twice.

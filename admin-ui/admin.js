@@ -326,6 +326,15 @@ const appPermissions = require('../common/app_permissions');
 // per-person record and the per-application override — and why the second is
 // an override rather than a record.
 const consent = require('../common/consent');
+// THE ROLE REGISTER, a plain require in the ordinary direction and it can stay
+// one: `common/roles.js` is a LEAF that requires `helpers` and `config` and
+// nothing else here, so no slot is needed and rule 3e is explicit that a slot
+// is what you reach for when a require would close a cycle or move a route.
+const roles = require('../common/roles');
+// THE ISSUANCE VOCABULARY, for the preview's menu. A leaf too, and it is the
+// TABLE this page needs rather than the decision — what decides is reached
+// through setRolePreviewer() below, because that lives in `xacml/` at 23c.
+const issuanceGate = require('../common/issuance_gate');
 // THE PICTURE OF THAT REGISTER, at /admin/delegation/map. A library like
 // `./admin_rbac.js` — it registers no route, requires only helpers.js and
 // @dagrejs/dagre, and knows nothing about this console: it is HANDED a resolver
@@ -1031,6 +1040,20 @@ const SECTIONS = [
                '<code>groups.claim</code> — which is a different sentence. ' +
                'The two named on <a href="/admin/rbac">Admin roles</a> are ' +
                'the exception and grant exactly one thing: this console.' },
+      { path: '/admin/roles', label: 'Roles',
+        blurb: 'Who holds a role, and what requires one. A role is a name a ' +
+               'person, a GROUP or an APPLICATION can be mapped into, and ' +
+               'holding one is what this service decides an ISSUANCE on: an ' +
+               'application entry names the roles it requires, and nothing ' +
+               'is issued for it &mdash; no token, assertion, ticket or ' +
+               'session &mdash; to somebody who holds none of them. The ' +
+               'decision is made by the XACML PDP against a policy you can ' +
+               'read and edit, never by an <code>if</code> in an issuance ' +
+               'site. <strong>It is not <a href="/admin/rbac">Admin ' +
+               'roles</a></strong>, which is two directory groups that grant ' +
+               'this console and nothing else. An application that names no ' +
+               'required role requires <code>EVERYBODY</code>, which ' +
+               'everybody holds, so an unedited service refuses nobody.' },
       { path: '/admin/applications', label: 'Applications',
         blurb: 'Every relying party this service has been asked about — a ' +
                '<code>client_id</code> at the token endpoint, a ' +
@@ -1070,7 +1093,7 @@ const SECTIONS = [
       // is a `path` and a `label` whoever builds it, exactly as
       // `/admin/sts-metadata` is — and they answer in this shell now.
       //
-      // THEY ARE A GROUP AND NOT FIVE MORE ITEMS, and the test is the one
+      // THEY ARE A GROUP AND NOT EIGHT MORE ITEMS, and the test is the one
       // stated for SAML above: does the heading name more than the page under
       // it does? It does. The four pages above are each ONE KIND OF THING
       // this service has seen, drawn the way the console draws things; these
@@ -1080,6 +1103,16 @@ const SECTIONS = [
       // this section with rows that read as alternatives to Users and
       // Applications rather than as the layer beneath them.
       //
+      // THREE MORE JOINED THEM ON 2026-09-05 — `ou=roles`, `ou=policies` and
+      // `ou=peps`. Each of those containers' owning modules published a
+      // SCHEMA whose comment said it was drawn on a page under
+      // `/admin/ldap/*`, and for three of them no such page had ever been
+      // written: the export was dead in `common/roles.js` since that
+      // afternoon, in `xacml/xacml_store.js` since XACML phase two and in
+      // `xacml/xacml_pep_registry.js` since phase five. They are drawn by
+      // `ldap/ldap_server.js` like the other five, for the reason stated
+      // there.
+      //
       // WHAT MOVING THEM COST is that they are GATED now: they are `/admin`
       // pages, so `admin.authRequired` applies and a reader needs a session
       // and a role. That is a real change and it is the right one — a dump of
@@ -1087,9 +1120,9 @@ const SECTIONS = [
       // `fedClientSecret` in the clear, and it was the one surface in this
       // service printing those to anybody who could reach the port while the
       // console next door asked for a role to show far less. `/admin-api` is
-      // still ungated and mirrors all five, which is what a test drives.
+      // still ungated and mirrors all eight, which is what a test drives.
       { title: 'As the directory holds it',
-        what: 'The store underneath the four pages above: every entry, every ' +
+        what: 'The store underneath the five pages above: every entry, every ' +
               'attribute, and the vocabulary each container uses.',
         items: [
           { path: '/admin/ldap/directory', label: 'Every entry',
@@ -1122,6 +1155,41 @@ const SECTIONS = [
                    '<code>fedEnabled</code> turns a partner on. It publishes ' +
                    'the schema with a column the applications page has no ' +
                    'need of: which DIRECTION each attribute is for.' },
+          { path: '/admin/ldap/roles', label: 'Role entries',
+            blurb: 'The membership half of the role register, as the ' +
+                   'directory holds it: one entry per role under ' +
+                   '<code>ou=roles</code>, and a person, a GROUP and an ' +
+                   'APPLICATION are all first-class members of one. The ' +
+                   'other half is not in that container — which roles an ' +
+                   'application DEMANDS is <code>appRequiredRole</code> on ' +
+                   'the application\'s own entry — so nothing here refuses ' +
+                   'anybody by itself. It also lists the six BUILT-IN roles, ' +
+                   'which are computed and in no container at all: an empty ' +
+                   '<code>ou=roles</code> is the ordinary state of a service ' +
+                   'deciding every issuance against <code>EVERYBODY</code> ' +
+                   'and refusing nobody.' },
+          { path: '/admin/ldap/policies', label: 'Policy entries',
+            blurb: 'The XACML policy repository as the directory holds it: ' +
+                   'one entry per policy or policy set under ' +
+                   '<code>ou=policies</code>, holding the document itself, ' +
+                   'with exactly one of them the root. <strong>A write here ' +
+                   'skips the typechecker</strong>, which is not true of any ' +
+                   'other door into this repository \u2014 every write ' +
+                   'through <a href="/admin/xacml">XACML</a> is statically ' +
+                   'validated so that a policy which does not typecheck is ' +
+                   'refused rather than answering Indeterminate on every ' +
+                   'request, and an <code>ldapmodify</code> reaches the ' +
+                   'entry directly.' },
+          { path: '/admin/ldap/peps', label: 'PEP entries',
+            blurb: 'The remote Policy Enforcement Points that have ' +
+                   'registered with this PDP, under <code>ou=peps</code>. ' +
+                   'Almost every attribute is a RECORD this service wrote ' +
+                   'rather than configuration \u2014 an identity here was ' +
+                   'taken from the CLIENT CERTIFICATE the PEP presented and ' +
+                   'never from the body it sent. An empty container is not a ' +
+                   'feature that is off: a PEP pulls the repository and ' +
+                   'converges whether or not it ever registers, and ' +
+                   'registering is what buys it the change nudge.' },
           { path: '/admin/ldap/spiffe', label: 'SPIFFE entries',
             blurb: 'The two SPIFFE containers as the directory holds them. ' +
                    '<code>ou=entries</code> is CONFIGURATION — which SPIFFE ' +
@@ -1573,6 +1641,11 @@ const SETTING_HOMES = [
   // directory group and what decides whether somebody is in one is the Groups
   // page. Somebody asking "why is this group not in my token" is looking at
   // that page's membership table when the question occurs to them.
+  // Roles. Its own group and its own page: what these four settings configure
+  // is the claim and whether the decision is asked for at all, and both halves
+  // of a role — who holds one, and what requires one — are edited on that page
+  // and on an application's page respectively rather than in a setting.
+  { group: 'Roles', pages: ['/admin/roles'] },
   { group: 'Group claim', pages: ['/admin/groups'] },
   { group: 'Audit log', pages: ['/admin/audit'] },
   { group: 'Delegation', pages: ['/admin/delegation'] },
@@ -1690,6 +1763,12 @@ function codeList(names) {
 const LIST_PARAMS = {
   '/admin/users': ['q', 'protocol', 'per', 'page'],
   '/admin/groups': ['q', 'per', 'page'],
+  // `application`, `subject`, `subjectKind` and `kind` are the PREVIEW's own
+  // parameters and are deliberately NOT here: they are a question somebody
+  // asked once, not a view, so carrying them through a Remove button would
+  // re-ask it on every write and put a stale answer above the table. The same
+  // reasoning NOT_A_VIEW applies to `notice` and `error`.
+  '/admin/roles': ['q', 'per', 'page'],
   '/admin/applications': ['q', 'kind', 'per', 'page'],
   '/admin/saml2': ['q', 'per', 'page'],
   '/admin/saml11': ['q', 'per', 'page'],
@@ -2914,7 +2993,27 @@ function respondToAction(req, res, target, result) {
     return;
   }
   const key = result.ok ? 'notice' : 'error';
-  const message = result.ok ? result.message : (result.errors || []).join(' ');
+  // `why` IS READ AS WELL AS `errors`, AND THAT IS NOT A CONVENIENCE.
+  //
+  // This console's own handlers refuse with `errors: [...]`; the XACML family's
+  // three — `policyAction()`, `editorAction()` and `pepAction()` in
+  // `xacml/xacml_admin.js` — refuse with a single `why`, which is the shape
+  // `xacml_store.js` and `xacml_editor.js` hand up to them. `/admin-api` was
+  // already given that translation (`xacmlAction()` above puts `why` into
+  // `errors`), and the CONSOLE was not — so every refusal on the three
+  // /admin/xacml pages redirected back with `error=` and nothing in it. The
+  // person got the page they had just posted from, unchanged, with no
+  // explanation, which reads exactly like a control that does nothing.
+  //
+  // It matters most where the editor's whole design rests on it: an edit that
+  // would leave a policy invalid is refused and the stored document is
+  // untouched, and the sentence saying so — which names the type error the
+  // author has to fix — was the part being dropped. Fixed HERE rather than at
+  // the three handlers, so that a fourth handler written in that shape cannot
+  // reintroduce it, and so the console and /admin-api cannot disagree about
+  // what a refusal said. Caught by tests/vendored/sts_xacml_editor.js.
+  const message = result.ok ? result.message
+    : ((result.errors || []).join(' ') || String(result.why || ''));
   // `&` when the target already carries a query string, `?` when it does not. The
   // tokens page sends the reader back to the page and filter the button was on, so
   // this is no longer always a bare path — and a second `?` does not start a second
@@ -12626,8 +12725,17 @@ function xacmlActionNames() {
     ? xacmlPages.actionNames() : [];
 }
 
+// EIGHT SINCE 2026-09-05. The three added that day — `roles`, `policies` and
+// `peps` — are the containers whose owning modules published a SCHEMA that
+// nothing drew: `common/roles.js`, `xacml/xacml_store.js` and
+// `xacml/xacml_pep_registry.js` each carried the same comment claiming a page
+// under `/admin/ldap/*`, and none of the three had one. The list is checked
+// WHOLE below, so adding a name here without adding the view is a refused
+// install rather than one operation answering as though no directory were
+// loaded.
 const DIRECTORY_PAGE_NAMES = ['service', 'directory', 'applications',
-                              'federations', 'spiffe'];
+                              'federations', 'spiffe', 'roles', 'policies',
+                              'peps'];
 
 let directoryPages = null;
 
@@ -12638,15 +12746,15 @@ function setDirectoryPages(views) {
   if (!complete) {
     // A warning and not a throw, for the reason every other install here gives.
     log.warn('admin: a set of directory page views was offered that does not ' +
-             'carry all five of ' + DIRECTORY_PAGE_NAMES.join(', ') + '. It is ' +
+             'carry all eight of ' + DIRECTORY_PAGE_NAMES.join(', ') + '. It is ' +
              'refused whole — a partial set would leave some of /admin-api\'s ' +
              'directory operations answering as though no directory were ' +
              'loaded on a service that plainly has one.');
     return;
   }
   directoryPages = views;
-  log.debug('The five directory page views were installed; /admin-api mirrors ' +
-            'them.');
+  log.debug('The eight directory page views were installed; /admin-api ' +
+            'mirrors them.');
 }
 
 // What `mgmt-api/admin_api.js` calls. The `?format=json` half of each page,
@@ -18116,6 +18224,837 @@ app.post('/admin/consent', function (req, res) {
     (String(body.from || '') === 'recorded' ? '#recorded' : '#globals');
   respondToAction(req, res, back, result);
   log.debug("Leaving the admin consent action endpoint.");
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/roles, POST /admin/roles — WHO HOLDS A ROLE, AND WHO REQUIRES ONE.
+//
+// **IT IS NOT `/admin/rbac`, WHICH IS THE PAGE NEXT DOOR, AND THE TWO ARE ONE
+// KEYSTROKE APART IN THE SIDEBAR.** That one has two roles, they are ordinary
+// directory GROUPS, and they grant exactly one thing: this console. This one
+// has as many roles as somebody makes, they live in `ou=roles`, and what they
+// grant is being ISSUED something — a token, an assertion, a ticket, a
+// session. Both headings say so, because a reader who confused them would
+// grant somebody the console while meaning to let them sign in to an
+// application.
+//
+// **AND IT IS NOT `/admin/groups`.** A group here still grants nothing; that
+// sentence is written in six places and is still true. What changed is that a
+// role may NAME a group, so adding somebody to `cn=developers` can now give
+// them a role — through this register and only through it. The group is still
+// inert; the row on a role entry is what does the work.
+//
+// TWO RELATIONS, TWO TABLES, AND THEY ARE OPPOSITE:
+//
+//   * MEMBERSHIP — role -> the users, groups and applications that HOLD it.
+//     Stored on the ROLE entry, edited here.
+//   * REQUIREMENT — application -> the roles it DEMANDS before this service
+//     issues anything for it. Stored on the APPLICATION entry, in
+//     `appRequiredRole`, and edited THERE. It is drawn here read-only, which
+//     is the same arrangement `applicationPermissionsSection()` has in
+//     reverse: one store, one door that writes it, and a second surface that
+//     RESOLVES it — this page can say which role an application requires and
+//     whether anybody holds it, which the application page cannot.
+//
+// An application appears in both tables and means opposite things in each: in
+// the first it HOLDS the role (which is what a `client_credentials` grant is
+// decided on, where there is no person), and in the second it DEMANDS one.
+// `common/roles.js` argues that split at length and it is not repeated here.
+// ---------------------------------------------------------------------------
+
+// BUILT FROM THE SWITCH BELOW RATHER THAN TYPED, for CONSENT_ACTIONS' reason:
+// this repository's own tests/vendored/admin_api.js READS the refusal sentence
+// to check that every console action has an /admin-api operation, so a list
+// that is short by one turns the parity check off for that action.
+const ROLE_ACTIONS = ['create-role', 'delete-role', 'add-member',
+                      'remove-member', 'describe-role'];
+
+// The three kinds of thing that can hold a role, in one table because four
+// places have to agree about them — the two member actions, the console's
+// select, the management API's enum and the register's own attribute names.
+const ROLE_MEMBER_KINDS = [
+  { kind: 'user', label: 'a person', field: 'users',
+    what: 'A username. The person need not exist yet: this service creates a ' +
+          'directory entry for any name on first sight, so a role can be ' +
+          'granted before its holder has ever signed in.' },
+  { kind: 'group', label: 'a group', field: 'groups',
+    what: 'A group in ou=groups. Every member of it holds the role, resolved ' +
+          'at DECISION TIME rather than expanded on write — so an ldapmodify ' +
+          'adding somebody to the group changes the very next token.' },
+  { kind: 'application', label: 'an application', field: 'applications',
+    what: 'An application that holds the role AS ITSELF. This is what a ' +
+          'client_credentials grant is decided on, where there is no person ' +
+          'at all, and it is the reason an application is a first-class ' +
+          'member of a role here.' }
+];
+
+function roleMemberKindOf(kind) {
+  return ROLE_MEMBER_KINDS.filter(function (one) {
+    return one.kind === String(kind);
+  })[0] || null;
+}
+
+// ---------------------------------------------------------------------------
+// THE ELEVENTH SLOT ON THIS MODULE, AND IT PASSES RULE 3e'S TEST BOTH WAYS
+// ROUND.
+//
+// `/admin/roles` can answer "would alice be issued a token for this
+// application" without anybody having to try it, and the only thing that can
+// answer that is `xacml/xacml_role_pep.js` — the embedded PEP, which asks the
+// PDP against the issuance policy. A require from here to that module would
+// LOAD THE XACML ENGINE AT 18 and, worse, fill `issuance_gate.js`'s decider
+// from the console rather than from the family that owns it, so a process that
+// loaded this file and not `xacml/xacml.js` would gate issuance with half the
+// family present. A require the other way — the PEP reaching this module — is
+// not a candidate either: it would close a cycle, since `xacml_admin.js`
+// requires this file for the page shell.
+//
+// It carries ONE function and is validated whole, for `setLogoutReader()`'s
+// reason: a preview that could be installed without the thing it previews
+// would be a page saying "no decider" beside a service that is plainly
+// deciding.
+//
+// AN EMPTY SLOT IS A SENTENCE AND NOT A BLANK. The section draws anyway and
+// says the XACML family is not loaded in this process, which is the honest
+// answer and the same one `issuance_gate.check()` gives: nothing is gated.
+// ---------------------------------------------------------------------------
+let rolePreviewer = null;
+
+function setRolePreviewer(hooks) {
+  log.debug("Entering setRolePreviewer().");
+  if (!hooks || typeof hooks.preview !== 'function' ||
+      typeof hooks.policy !== 'function') {
+    log.error('admin: setRolePreviewer() was offered an object without both ' +
+              'preview() and policy(), so it was refused and /admin/roles ' +
+              'will say the decision cannot be previewed. Installing half of ' +
+              'it would leave the page able to ask a question and unable to ' +
+              'say which policy answered.');
+    log.debug("Leaving setRolePreviewer(). Refused.");
+    return false;
+  }
+  rolePreviewer = hooks;
+  log.info('admin: /admin/roles can preview an issuance decision — the same ' +
+           'call the nine issuance sites make, through the same policy.');
+  log.debug("Leaving setRolePreviewer(). Installed.");
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// THE REGISTER, IN ONE PLACE so that the page, `?format=json` and
+// `GET /admin-api/roles` cannot come to disagree about what is in it — the
+// same property `consentView()` and `permissionsView()` give their registers.
+// ---------------------------------------------------------------------------
+function rolesRegister() {
+  log.debug("Entering rolesRegister().");
+  const configured = roles.all();
+  // WHICH APPLICATIONS REQUIRE WHAT, computed from the applications registry
+  // rather than kept anywhere: the requirement lives on the application entry
+  // and this is a READING of it. `requiresNarrowedRoles()` is what tells an
+  // application somebody has deliberately restricted from one that merely has
+  // the default — and the difference matters, because every application in
+  // this service requires EVERYBODY and listing all of them would bury the
+  // handful that were narrowed.
+  const requiring = applications.list().filter(function (row) {
+    return applications.requiresNarrowedRoles(row.identifier);
+  }).map(function (row) {
+    const required = applications.requiredRolesOf(row.identifier);
+    return {
+      application: row.identifier,
+      name: row.name || row.identifier,
+      required: required,
+      // WHETHER ANYBODY AT ALL COULD SATISFY IT. A role named on an
+      // application entry that no role entry defines and that is not built in
+      // is a requirement NOBODY can hold — which refuses everybody, silently
+      // and correctly, and looks exactly like the application being broken.
+      // This is the one thing this page can say that neither the application
+      // page nor the role table can.
+      unknown: required.filter(function (name) {
+        return !roles.isBuiltIn(name) && !configured.some(function (role) {
+          return role.name === name;
+        });
+      })
+    };
+  });
+  const out = {
+    // The store, so a reader can say where these entries are and reach them
+    // with an ldapsearch.
+    container: roles.directoryInstalled() ? 'ou=roles' : '',
+    storable: !!roles.directoryInstalled(),
+    defaultRequired: roles.DEFAULT_REQUIRED_ROLE,
+    claim: config.value('roles.claim') !== false,
+    claimName: String(config.value('roles.claimName') || 'roles'),
+    enforced: config.value('roles.enforceIssuance') !== false,
+    gated: !!rolePreviewer,
+    policy: rolePreviewer ? rolePreviewer.policy() : null,
+    builtIn: roles.builtInCatalogue(),
+    roles: configured,
+    requiring: requiring,
+    counts: {
+      builtIn: roles.BUILT_IN_NAMES.length,
+      configured: configured.length,
+      members: configured.reduce(function (n, one) {
+        return n + one.users.length + one.groups.length +
+               one.applications.length;
+      }, 0),
+      requiring: requiring.length,
+      unsatisfiable: requiring.filter(function (one) {
+        return one.unknown.length > 0;
+      }).length
+    }
+  };
+  log.debug("Leaving rolesRegister(). " + out.counts.configured +
+            " configured role(s).");
+  return out;
+}
+
+function rolesView() {
+  log.debug("Entering rolesView().");
+  const register = rolesRegister();
+  log.debug("Leaving rolesView(). " + register.counts.configured + " role(s).");
+  return register;
+}
+
+// ---------------------------------------------------------------------------
+// THE FIVE WRITES. Every one of them goes through `common/roles.js`, which
+// holds the rules — the name grammar, the refusal to shadow a built-in one,
+// and the cap — so this function reads fields off a body and decides nothing.
+// It is the same division `rbacAction()` has with `admin_rbac.js`.
+// ---------------------------------------------------------------------------
+function rolesAction(body, context) {
+  log.debug("Entering rolesAction(). action=" + (body.action || '(none)'));
+  const action = String(body.action || '');
+  const ctx = context || {};
+  const actor = String(ctx.actor || body.actor || '');
+  const name = String(body.role || body.name || '').trim();
+  const kind = String(body.kind || '').trim();
+  // `member` for the thing being added and never `name`, which is the ROLE's.
+  // Named apart for `permissionsAction()`'s reason: this is another feature
+  // where a body naming the wrong field still succeeds and writes the
+  // right-looking thing into the wrong place — here, a role called `alice`.
+  const member = String(body.member || '').trim();
+  const description = String(body.description || '');
+
+  if (action === 'create-role') {
+    const existing = roles.read(name);
+    if (existing) {
+      log.debug("Leaving rolesAction(). create-role refused: it is there.");
+      return { ok: false, errors: ['There is already a role called "' + name +
+                                   '". Roles are edited in place — add a ' +
+                                   'member to it rather than creating it ' +
+                                   'again.'] };
+    }
+    const result = roles.write(name, { description: description });
+    if (result.ok) {
+      auditLog.audit({ action: 'roles.create', actor: actor, target: name,
+                    protocol: 'XACML', channel: 'http',
+                    detail: 'created the role "' + name + '"' });
+    }
+    log.debug("Leaving rolesAction(). create-role " +
+              (result.ok ? 'ok.' : 'refused.'));
+    return result.ok ? result : { ok: false, errors: [result.why] };
+  }
+
+  if (action === 'delete-role') {
+    // WHAT STILL REQUIRES IT IS REPORTED AND THE DELETE STILL HAPPENS, which
+    // is deliberate and is the more useful of the two behaviours. Refusing
+    // would mean a role could not be removed until every application that
+    // named it had been edited, and the application entries are the things
+    // somebody is usually in the middle of changing. The reply names them, so
+    // the consequence — those applications now require a role NOBODY holds,
+    // and are therefore issued nothing — is said at the moment it is created
+    // rather than discovered later as a service that stopped working.
+    const stillRequired = applications.list().filter(function (row) {
+      return applications.requiredRolesOf(row.identifier)
+        .some(function (one) { return one === name; });
+    }).map(function (row) { return row.identifier; });
+    const result = roles.remove(name);
+    if (!result.ok) {
+      log.debug("Leaving rolesAction(). delete-role refused.");
+      return { ok: false, errors: [result.why] };
+    }
+    auditLog.audit({ action: 'roles.delete', actor: actor, target: name,
+                  protocol: 'XACML', channel: 'http',
+                  detail: 'deleted the role "' + name + '"' +
+                          (stillRequired.length
+                             ? '; still required by ' + stillRequired.join(', ')
+                             : '') });
+    log.debug("Leaving rolesAction(). delete-role ok.");
+    return { ok: true, name: name, stillRequired: stillRequired,
+             message: 'The role "' + name + '" is gone.' +
+                      (stillRequired.length
+                         ? ' ' + numberWord(stillRequired.length) +
+                           ' application(s) still require it and can now be ' +
+                           'issued nothing: ' + stillRequired.join(', ') +
+                           '. Clear appRequiredRole on each, or create the ' +
+                           'role again.'
+                         : '') };
+  }
+
+  if (action === 'describe-role') {
+    const row = roles.read(name);
+    if (!row) {
+      log.debug("Leaving rolesAction(). describe-role refused.");
+      return { ok: false, errors: ['There is no role called "' + name + '".'] };
+    }
+    // THE WHOLE RECORD IS WRITTEN BACK and not just the description, because
+    // `roles.write()` REPLACES an entry — a write carrying only the
+    // description would empty the membership, which is the one mistake in this
+    // file that would be silent and total.
+    const result = roles.write(name, {
+      description: description, users: row.users, groups: row.groups,
+      applications: row.applications
+    });
+    log.debug("Leaving rolesAction(). describe-role " +
+              (result.ok ? 'ok.' : 'refused.'));
+    return result.ok ? result : { ok: false, errors: [result.why] };
+  }
+
+  if (action === 'add-member' || action === 'remove-member') {
+    const kindRow = roleMemberKindOf(kind);
+    if (!kindRow) {
+      log.debug("Leaving rolesAction(). Unknown member kind.");
+      return { ok: false, errors: ['"' + kind + '" is not a kind of member. ' +
+                                   'There are three: ' +
+                                   ROLE_MEMBER_KINDS.map(function (one) {
+                                     return one.kind;
+                                   }).join(', ') + '.'] };
+    }
+    if (!member) {
+      log.debug("Leaving rolesAction(). No member named.");
+      return { ok: false, errors: ['`member` names the ' + kindRow.label +
+                                   ' being ' + (action === 'add-member'
+                                     ? 'added to' : 'removed from') +
+                                   ' the role, and it is required. `role` is ' +
+                                   'the role\'s own name.'] };
+    }
+    const row = roles.read(name);
+    if (!row) {
+      // A BUILT-IN ROLE IS NAMED IN THE REFUSAL RATHER THAN FALLING THROUGH TO
+      // "no such role", because that is the mistake somebody will actually
+      // make: the six built-in roles are in every menu on this page, they have
+      // no members and cannot be given any, and "there is no role called
+      // ALL_AUTHENTICATED_USERS" would be a flatly false sentence about a role
+      // the page had just drawn.
+      if (roles.isBuiltIn(name)) {
+        log.debug("Leaving rolesAction(). Built-in role.");
+        return { ok: false, errors: ['"' + name + '" is a BUILT-IN role. It ' +
+                                     'is COMPUTED from the context of each ' +
+                                     'decision rather than stored, so it has ' +
+                                     'no membership to edit — everybody who ' +
+                                     'matches it holds it, always. Create a ' +
+                                     'role of your own to give somebody ' +
+                                     'something they do not already have.'] };
+      }
+      log.debug("Leaving rolesAction(). No such role.");
+      return { ok: false, errors: ['There is no role called "' + name +
+                                   '". Create it first.'] };
+    }
+    const held = {
+      users: row.users.slice(), groups: row.groups.slice(),
+      applications: row.applications.slice()
+    };
+    const list = held[kindRow.field];
+    // Case-insensitively, for `roles.js`'s reason: a username here arrives
+    // from a login form, a SAML subject, a Kerberos principal and a client_id,
+    // and this service has always treated those as one identity however they
+    // were typed.
+    const at = list.map(function (one) {
+      return String(one).toLowerCase();
+    }).indexOf(member.toLowerCase());
+    if (action === 'add-member') {
+      if (at >= 0) {
+        log.debug("Leaving rolesAction(). Already a member.");
+        return { ok: false, errors: ['"' + member + '" already holds "' +
+                                     name + '" as ' + kindRow.label + '.'] };
+      }
+      list.push(member);
+    } else {
+      if (at < 0) {
+        log.debug("Leaving rolesAction(). Not a member.");
+        return { ok: false, errors: ['"' + member + '" does not hold "' +
+                                     name + '" as ' + kindRow.label + '.'] };
+      }
+      list.splice(at, 1);
+    }
+    const result = roles.write(name, {
+      description: row.description, users: held.users, groups: held.groups,
+      applications: held.applications
+    });
+    if (!result.ok) {
+      log.debug("Leaving rolesAction(). The write was refused.");
+      return { ok: false, errors: [result.why] };
+    }
+    auditLog.audit({
+      action: action === 'add-member' ? 'roles.grant' : 'roles.revoke',
+      actor: actor, target: member, protocol: 'XACML', channel: 'http',
+      detail: (action === 'add-member' ? 'gave ' : 'took ') + kindRow.label +
+              ' "' + member + '" the role "' + name + '"' +
+              (action === 'add-member' ? '' : ' away') });
+    log.debug("Leaving rolesAction(). " + action + " ok.");
+    return { ok: true, role: name, kind: kind, member: member,
+             message: action === 'add-member'
+               ? '"' + member + '" now holds "' + name + '".'
+               : '"' + member + '" no longer holds "' + name + '".' };
+  }
+
+  log.debug("Leaving rolesAction(). Unknown action.");
+  return { ok: false, errors: ['Unknown action "' + action + '". The ' +
+                               numberWord(ROLE_ACTIONS.length) + ' are: ' +
+                               ROLE_ACTIONS.join(', ') + '.'] };
+}
+
+// ---------------------------------------------------------------------------
+// THE DRY RUN. Asked through the SAME call the nine issuance sites make, so a
+// preview that agreed with the enforcement only by coincidence is impossible —
+// which is the property that makes it worth having at all.
+// ---------------------------------------------------------------------------
+function rolesPreview(query) {
+  log.debug("Entering rolesPreview().");
+  const asked = query || {};
+  const application = String(asked.application || '').trim();
+  const who = String(asked.subject || asked.username || '').trim();
+  const kind = String(asked.subjectKind || 'user') === 'application'
+    ? 'application' : 'user';
+  const issuance = String(asked.kind || '');
+  if (!application || !who) {
+    log.debug("Leaving rolesPreview(). Nothing asked.");
+    return null;
+  }
+  if (!rolePreviewer) {
+    log.debug("Leaving rolesPreview(). No previewer.");
+    return { asked: { application: application, subject: who,
+                      subjectKind: kind, kind: issuance },
+             available: false,
+             why: 'The XACML family is not loaded in this process, so there ' +
+                  'is no PDP to ask and nothing is gated: every issuance is ' +
+                  'allowed. That is what issuance_gate.check() answers with ' +
+                  'an empty decider, and it is why a process without the ' +
+                  'engine is a smaller service rather than a broken one.' };
+  }
+  const answer = rolePreviewer.preview({
+    application: application,
+    kind: issuance || undefined,
+    subject: { kind: kind, name: who, authenticated: true }
+  });
+  log.debug("Leaving rolesPreview(). " + (answer.allowed ? 'Permit.' : 'Refused.'));
+  return Object.assign({ asked: { application: application, subject: who,
+                                  subjectKind: kind, kind: issuance },
+                         available: true }, answer);
+}
+
+function rolesBack(listView) {
+  return '<input type="hidden" name="back" value="' +
+         esc(queryWith(listView || {}, {})) + '">';
+}
+
+// One row of the configured table. The three membership lists are drawn as one
+// column each rather than one list of "members", because the three are looked
+// up in three different places and a reader tracking down why somebody holds a
+// role needs to know which one to look in.
+function roleRow(one, listView) {
+  const members = ROLE_MEMBER_KINDS.map(function (kindRow) {
+    const list = one[kindRow.field];
+    if (!list.length) {
+      return '<td><span class="state-none">none</span></td>';
+    }
+    return '<td>' + list.map(function (member) {
+      return '<div><code>' + esc(member) + '</code> ' +
+        '<form method="post" action="/admin/roles" class="inline">' +
+        rolesBack(listView) +
+        '<input type="hidden" name="action" value="remove-member">' +
+        '<input type="hidden" name="role" value="' + esc(one.name) + '">' +
+        '<input type="hidden" name="kind" value="' + esc(kindRow.kind) + '">' +
+        '<input type="hidden" name="member" value="' + esc(member) + '">' +
+        '<button type="submit" class="danger">Remove</button>' +
+        '</form></div>';
+    }).join('') + '</td>';
+  }).join('');
+  return '<tr><td class="who"><code>' + esc(one.name) + '</code>' +
+    (one.description ? '<br><span class="sub">' + esc(one.description) +
+                       '</span>' : '') +
+    '</td>' + members +
+    '<td class="act"><form method="post" action="/admin/roles">' +
+      rolesBack(listView) +
+      '<input type="hidden" name="action" value="delete-role">' +
+      '<input type="hidden" name="role" value="' + esc(one.name) + '">' +
+      '<button type="submit" class="danger">Delete</button>' +
+    '</form></td></tr>';
+}
+
+app.get('/admin/roles', function (req, res) {
+  log.debug("Entering the admin roles page.");
+  const register = rolesRegister();
+  const listView = listViewOf('/admin/roles', req.query);
+  const navParams = pageParamsOf(req.query);
+
+  const q = String((Array.isArray(req.query.q) ? req.query.q[0] : req.query.q) || '')
+    .trim().toLowerCase();
+  // OVER THE NAME, THE DESCRIPTION AND EVERY MEMBER, because a reader arrives
+  // at this page holding exactly one of those and does not know which column
+  // it is in — the same reasoning /admin/consent's filter carries.
+  const matched = q
+    ? register.roles.filter(function (one) {
+        return [one.name, one.description].concat(one.users, one.groups,
+                                                  one.applications)
+          .some(function (text) {
+            return String(text).toLowerCase().indexOf(q) >= 0;
+          });
+      })
+    : register.roles;
+
+  const rolePage = pagedRows(req.query, matched,
+    { name: 'roles', noun: 'roles', defaultPer: 25 });
+  const rolesNav = pageNavPair('/admin/roles', navParams, rolePage.paging);
+
+  const roleOptions = register.roles.map(function (one) {
+    return '<option value="' + esc(one.name) + '">' + esc(one.name) +
+           '</option>';
+  }).join('');
+  const kindOptions = ROLE_MEMBER_KINDS.map(function (one) {
+    return '<option value="' + esc(one.kind) + '">' + esc(one.label) +
+           '</option>';
+  }).join('');
+  const applicationOptions = applications.list().map(function (row) {
+    return '<option value="' + esc(row.identifier) + '">' +
+           esc(row.name && row.name !== row.identifier
+             ? row.name + ' — ' + row.identifier : row.identifier) +
+           '</option>';
+  }).join('');
+  const issuanceOptions = issuanceGate.KINDS.map(function (one) {
+    return '<option value="' + esc(one) + '">' + esc(one) + '</option>';
+  }).join('');
+
+  const preview = rolesPreview(req.query);
+
+  const inner =
+    '<h2>Roles</h2>' +
+    note('<strong>A role is a name somebody may hold, and holding one is what ' +
+    'this service decides an ISSUANCE on.</strong> Three kinds of thing can be ' +
+    'mapped into a role &mdash; a person, a group (so every member of it holds ' +
+    'the role) and an APPLICATION (so a client authenticating as itself holds ' +
+    'one, which is what a <code>client_credentials</code> grant is decided on, ' +
+    'where there is no person at all). An application entry names the roles it ' +
+    'REQUIRES in <code>appRequiredRole</code>, and nothing is issued for that ' +
+    'application to somebody who holds none of them &mdash; a decision made by ' +
+    'the XACML PDP against the policy <code>xacml.issuancePolicy</code> names, ' +
+    'never by an <code>if</code> in an issuance site. So the reason for a ' +
+    'refusal is a document you can read on ' +
+    '<a href="/admin/xacml/policies">Policies</a>, test on ' +
+    '<a href="/admin/xacml/decide">Try a decision</a>, and see in the ' +
+    '<a href="/admin/audit">audit log</a>.') +
+
+    note('<strong>This is not <a href="/admin/rbac">Admin roles</a>, which is ' +
+    'the page above it in the sidebar.</strong> That one has exactly two roles, ' +
+    'they are ordinary directory GROUPS, and what they grant is this console. ' +
+    'This one has as many roles as you make, they live in <code>' +
+    esc(register.container || 'ou=roles') + '</code>, and what they grant is ' +
+    'being issued something. <strong>It is not ' +
+    '<a href="/admin/groups">Groups</a> either</strong>: a group still grants ' +
+    'nothing on its own, and that sentence is still true everywhere it is ' +
+    'written. What changed is that a role may NAME a group &mdash; so adding ' +
+    'somebody to <code>cn=developers</code> can now give them a role, through ' +
+    'this register and only through it.') +
+
+    (register.storable ? '' : warn('<strong>There is nowhere to keep a role.</strong> ' +
+      'This process has no embedded directory installed behind the register, so ' +
+      'no role can be created. The six BUILT-IN roles below still answer &mdash; ' +
+      'they are computed rather than stored &mdash; so an application requiring ' +
+      'EVERYBODY still admits everybody, which is the default and means nothing ' +
+      'is refused. There is no fallback store, deliberately: a role register ' +
+      'that quietly lived in memory would decide things nobody could find.')) +
+
+    (register.enforced ? '' : warn('<strong>Nothing is being decided.</strong> ' +
+      '<code>roles.enforceIssuance</code> is OFF, so no issuance asks the PDP ' +
+      'at all and every application admits everybody whatever its entry says. ' +
+      'This page still records what would be asked. The switch is in Settings ' +
+      'at the foot of this page, and it is the way back if a policy edit locks ' +
+      'something out.')) +
+
+    (register.gated ? '' : warn('<strong>The XACML family is not loaded in ' +
+      'this process.</strong> <code>common/issuance_gate.js</code> has no ' +
+      'decider, so every issuance is allowed and this page is a register that ' +
+      'nothing reads. That is the designed behaviour for a process without the ' +
+      'engine &mdash; a smaller service rather than a broken one &mdash; and it ' +
+      'is what <code>npm test</code> and the parent project\'s in-process ' +
+      'Kerberos jobs run as.')) +
+
+    '<h3 id="built-in">The six built-in roles</h3>' +
+    note('<strong>Computed, in no container, and not editable.</strong> Every ' +
+    'one of them is answered from the CONTEXT of the decision being made rather ' +
+    'than from a store, so they have no members to list and cannot be created, ' +
+    'renamed or deleted. <code>' + esc(register.defaultRequired) + '</code> is ' +
+    'the one that matters most: an application that names no required role ' +
+    'requires it, everybody holds it, and nothing is refused &mdash; which is ' +
+    'exactly how this service behaved before roles existed. <strong>That is ' +
+    'what makes this feature off by default without being absent</strong>: the ' +
+    'machinery is always running and always visible, and narrowing an ' +
+    'application is shortening a list rather than switching on a subsystem that ' +
+    'has never run. The pairs are complementary ON PURPOSE and both halves ' +
+    'exist because &ldquo;everyone who did not sign in&rdquo; is a thing policy ' +
+    'authors reach for and cannot express as a negation in a XACML target.') +
+    '<table><thead><tr><th>Role</th><th>Who holds it</th></tr></thead><tbody>' +
+    register.builtIn.map(function (one) {
+      return '<tr><td class="who"><code>' + esc(one.name) + '</code></td>' +
+             '<td>' + esc(one.what) + '</td></tr>';
+    }).join('') +
+    '</tbody></table>' +
+
+    '<h3 id="roles">Roles you have made</h3>' +
+    note('<strong>Membership, and nothing else.</strong> Each row is one entry ' +
+    'under <code>' + esc(register.container || 'ou=roles') + '</code>; every ' +
+    'column but the first is somebody who HOLDS the role. What a role is ' +
+    'REQUIRED for is not here &mdash; that lives on the application entry that ' +
+    'requires it and is drawn read-only further down, because it is a fact ' +
+    'about the application rather than about the role.') +
+    '<form method="get" action="/admin/roles"><div class="formrow">' +
+      '<label for="q">Text</label>' +
+      '<input type="text" id="q" name="q" size="40" value="' + esc(q) +
+        '" placeholder="a role, a description or a member">' +
+      '<button class="secondary">Filter</button>' +
+      (q ? ' <a href="/admin/roles#roles">clear</a>' : '') +
+    '</div></form>' +
+    '<table><thead><tr><th>Role</th>' +
+    ROLE_MEMBER_KINDS.map(function (one) {
+      return '<th>Held by ' + esc(one.label) + '</th>';
+    }).join('') +
+    '<th></th></tr></thead><tbody>' +
+    (rolePage.shown.length
+      ? rolePage.shown.map(function (one) { return roleRow(one, listView); }).join('')
+      : '<tr><td colspan="5"><span class="state-none">' +
+        (q ? 'No role matches &ldquo;' + esc(q) + '&rdquo;.'
+           : 'No role has been made. Every application therefore requires ' +
+             esc(register.defaultRequired) + ' and refuses nobody.') +
+        '</span></td></tr>') +
+    '</tbody></table>' + rolesNav +
+
+    '<h3 id="create">Make a role</h3>' +
+    note('The name becomes an LDAP RDN under <code>' +
+    esc(register.container || 'ou=roles') + '</code> and a value in a token ' +
+    'claim, so it is up to 64 characters of letters, digits, and ' +
+    '<code>. _ : @ -</code> or a space. It may not be one of the six above: ' +
+    'those are computed and answered first, so a stored role of the same name ' +
+    'could never be reached.') +
+    '<form method="post" action="/admin/roles">' + rolesBack(listView) +
+    '<input type="hidden" name="action" value="create-role">' +
+    '<div class="formrow">' +
+    '<label>Name <input type="text" name="role" required></label>' +
+    '<label>Description <input type="text" name="description" size="50"></label>' +
+    '<button type="submit">Create</button>' +
+    '</div></form>' +
+
+    '<h3 id="member">Give somebody a role</h3>' +
+    note(ROLE_MEMBER_KINDS.map(function (one) {
+      return '<strong>' + esc(one.label) + '</strong> &mdash; ' + esc(one.what);
+    }).join('<br>')) +
+    '<form method="post" action="/admin/roles">' + rolesBack(listView) +
+    '<input type="hidden" name="action" value="add-member">' +
+    '<div class="formrow">' +
+    '<label>Role <select name="role" required>' + roleOptions + '</select></label>' +
+    '<label>Kind <select name="kind">' + kindOptions + '</select></label>' +
+    '<label>Name <input type="text" name="member" required></label>' +
+    '<button type="submit">Add</button>' +
+    '</div></form>' +
+    (register.roles.length ? '' : note('There is no role to add anybody to ' +
+      'yet. The select above is empty because the six built-in roles have no ' +
+      'membership &mdash; they are computed.')) +
+
+    '<h3 id="requiring">What requires a role</h3>' +
+    note('<strong>The other relation, and it is edited somewhere else.</strong> ' +
+    'An application demands roles through <code>appRequiredRole</code> on its ' +
+    'own entry, which is where it is written &mdash; on the application\'s page, ' +
+    'in the attribute editor, or with an <code>ldapmodify</code>. This table ' +
+    'RESOLVES it, which that page cannot: it says whether anything actually ' +
+    'defines each role named. <strong>Only NARROWED applications are listed.</strong> ' +
+    'Every other application in this realm requires <code>' +
+    esc(register.defaultRequired) + '</code>, which everybody holds, and ' +
+    'listing all of them would bury the ones somebody restricted on purpose.') +
+    '<table><thead><tr><th>Application</th><th>Requires</th>' +
+    '<th>Any of them holdable?</th></tr></thead><tbody>' +
+    (register.requiring.length
+      ? register.requiring.map(function (one) {
+          return '<tr><td class="who"><a href="' +
+            esc('/admin/applications' + queryWith(listView, { application: one.application })) +
+            '">' + esc(one.name) + '</a>' +
+            (one.name === one.application ? ''
+              : '<br><code>' + esc(one.application) + '</code>') + '</td>' +
+            '<td>' + one.required.map(function (role) {
+              return '<code>' + esc(role) + '</code>';
+            }).join(' or ') + '</td>' +
+            '<td>' + (one.unknown.length
+              ? '<span class="state-none">No. ' +
+                one.unknown.map(function (role) {
+                  return '<code>' + esc(role) + '</code>';
+                }).join(', ') + ' is not a built-in role and no entry defines ' +
+                'it, so NOBODY can hold it and this application is issued ' +
+                'nothing at all &mdash; which looks exactly like the ' +
+                'application being broken. Make the role, or clear the value.' +
+                '</span>'
+              : 'Yes &mdash; every role named is defined.') + '</td></tr>';
+        }).join('')
+      : '<tr><td colspan="3"><span class="state-none">Nothing has been ' +
+        'narrowed. Every application in this realm requires <code>' +
+        esc(register.defaultRequired) + '</code> and refuses nobody, which is ' +
+        'the state this service starts in.</span></td></tr>') +
+    '</tbody></table>' +
+
+    '<h3 id="preview">Would this be issued?</h3>' +
+    note('<strong>The same call the nine issuance sites make.</strong> It goes ' +
+    'through the embedded PEP and the PDP against the issuance policy, so a ' +
+    'preview that agreed with the enforcement only by coincidence is impossible ' +
+    '&mdash; which is the only reason it is worth having. Nothing is issued and ' +
+    'nothing is recorded. <a href="/admin/xacml/decide">Try a decision</a> asks ' +
+    'the same engine the other way round: an arbitrary request against the ' +
+    'repository root, which is the policy about somebody ELSE\'s boundary.') +
+    // NEITHER FIELD IS `required`, and that is not laziness. A browser will
+    // not SUBMIT a form with an empty required field at all — constraint
+    // validation blocks it silently — so a reader who pressed Ask with one
+    // box empty would get no navigation, no message and no way to tell that
+    // from a control that does nothing. The handler answers the honest thing
+    // instead: with nothing asked it draws no decision, exactly as
+    // `GET /admin-api/roles/preview` answers 200 with `answered: false`. It
+    // was `required` for one run, and `tests/vendored/sts_admin_console.js`
+    // caught it — that job submits every GET form on this console and asserts
+    // the browser actually went somewhere.
+    '<form method="get" action="/admin/roles">' +
+    '<div class="formrow">' +
+    '<label>Application <input type="text" name="application" list="role-preview-apps" value="' +
+      esc((preview && preview.asked.application) || '') + '"></label>' +
+    '<datalist id="role-preview-apps">' + applicationOptions + '</datalist>' +
+    '<label>Subject <input type="text" name="subject" value="' +
+      esc((preview && preview.asked.subject) || '') + '"></label>' +
+    '<label>as <select name="subjectKind">' +
+      '<option value="user">a person</option>' +
+      '<option value="application"' +
+      (preview && preview.asked.subjectKind === 'application' ? ' selected' : '') +
+      '>an application</option></select></label>' +
+    '<label>Issuing <select name="kind">' + issuanceOptions + '</select></label>' +
+    '<button type="submit">Ask</button>' +
+    '</div></form>' +
+    (preview
+      ? (preview.available === false
+          ? warn(esc(preview.why))
+          : '<div class="' + (preview.allowed ? 'ok' : 'err') + '">' +
+            '<strong>' + esc(preview.decision) + ' &mdash; ' +
+            (preview.allowed ? 'it would be issued' : 'it would be REFUSED') +
+            '.</strong><br>' + esc(preview.why) + '<br>' +
+            '<span class="sub">Holds: ' +
+            (preview.roles.length ? codeList(preview.roles) : 'no role at all') +
+            '. Requires: ' +
+            (preview.required.length ? codeList(preview.required) : 'nothing') +
+            '. Policy: <code>' + esc(String(preview.policy || '(none)')) +
+            '</code>.</span></div>'
+        )
+      : '') +
+
+    '<h3 id="policy">The policy that decides</h3>' +
+    (register.policy
+      ? (register.policy.ok
+          ? note('<strong>' + (register.policy.builtIn
+              ? 'The BUILT-IN issuance policy is deciding.'
+              : 'A policy you wrote is deciding: <code>' +
+                esc(register.policy.name) + '</code>.') +
+            '</strong> The rule it states is the same either way &mdash; the ' +
+            'party being authenticated must hold one of the roles the ' +
+            'application requires &mdash; and the requirement travels in the ' +
+            'REQUEST rather than being written into the document, which is ' +
+            'why ONE policy decides for every application and narrowing one ' +
+            'is editing its entry rather than editing a policy.<br><br>' +
+            (register.policy.builtIn
+              ? '<strong>Nothing is seeded and there is nothing to ' +
+                'delete.</strong> It was seeded once and the realm case ' +
+                'killed that: <code>ou=policies</code> is per realm and the ' +
+                'seed is written in the default realm at startup, so a realm ' +
+                'created afterwards had no issuance policy and every ' +
+                'application narrowed in it was issued NOTHING. To EDIT the ' +
+                'rule, create a policy named <code>' +
+                esc(register.policy.name) + '</code> from the ' +
+                '<code>role-issuance</code> template on ' +
+                '<a href="/admin/xacml/policies">Policies</a>: an entry of ' +
+                'that name overrides the built-in one.'
+              : 'It is an ordinary entry under <code>ou=policies</code>, so ' +
+                'the <a href="/admin/xacml/editor">editor</a>, ALFA, ' +
+                '<code>/admin-api/xacml</code> and an <code>ldapmodify</code> ' +
+                'all reach it. DELETING it puts the built-in policy back &mdash; ' +
+                'it is an override rather than the only copy.') +
+            '<br><br><strong>It is not the repository ROOT and it is not sent ' +
+            'to remote PEPs.</strong> Two questions, two documents: the root ' +
+            'answers what a caller asks at <code>/xacml/pdp</code> and what ' +
+            'every remote PEP pulls, and this answers who may be issued ' +
+            'something HERE. Making them one document would mean editing the ' +
+            'demo policy changed who could sign in.')
+          : warn('<strong>The issuance policy is not being evaluated.</strong> ' +
+            esc(register.policy.why) + '<br><br>An application that requires ' +
+            'only <code>' + esc(register.defaultRequired) + '</code> is ' +
+            'unaffected &mdash; everybody holds it, so there was never ' +
+            'anything to decide. <strong>An application whose entry names a ' +
+            'role is REFUSED</strong>, and that asymmetry is deliberate: ' +
+            'somebody deliberately asked for a restriction, and permitting ' +
+            'because the document implementing it is missing would be a ' +
+            'configured refusal silently not happening.'))
+      : '') +
+
+    '<h3 id="claim">The claim</h3>' +
+    note('<strong>' + (register.claim
+      ? 'Every access token, ID Token, SAML 2.0 assertion and SAML 1.1 ' +
+        'assertion names the roles its subject holds, in <code>' +
+        esc(register.claimName) + '</code>.'
+      : 'The claim is OFF, so nothing carries a role.') +
+    '</strong> The claim is OMITTED ENTIRELY for anybody holding no CONFIGURED ' +
+    'role, and the six built-in ones are never in it: <code>' +
+    esc(register.defaultRequired) + '</code> and ' +
+    '<code>ALL_AUTHENTICATED_USERS</code> are true of almost every token this ' +
+    'service issues, so carrying them would add two meaningless members to ' +
+    'every token every existing client parses and tell a relying party nothing ' +
+    'it did not know from holding the token. They exist to be REQUIRED, not to ' +
+    'be carried.<br><br>' +
+    '<code>' + esc(register.claimName) + '</code> is ALSO what is looked for ' +
+    'on the way IN: the embedded PEP reads that member out of a token a caller ' +
+    'presented and unions what it finds with this register\'s own answer. ' +
+    '<strong>That half is weaker and the policy says so in its own ' +
+    'description</strong> &mdash; this service does not verify access tokens it ' +
+    'did not issue, so a claim is evidence about a token rather than about a ' +
+    'person. The <code>role-issuance</code> template has a parameter that ' +
+    'leaves that arm out.') +
+
+    configFormsFor('/admin/roles');
+
+  const json = Object.assign({}, register, {
+    matched: matched.length,
+    shown: rolePage.shown.length,
+    paging: pagingJson(rolePage.paging),
+    query: { q: q },
+    memberKinds: ROLE_MEMBER_KINDS,
+    issuanceKinds: issuanceGate.KINDS,
+    actions: ROLE_ACTIONS.slice(),
+    preview: preview,
+    settings: configSettingsJson('/admin/roles')
+  });
+  respond(req, res, json, 'Roles', '/admin/roles', inner);
+  log.debug("Leaving the admin roles page.");
+});
+
+app.post('/admin/roles', function (req, res) {
+  log.debug("Entering the admin roles action endpoint.");
+  const body = parseBody(req);
+  // The actor is the person whose session got them through the gate, read here
+  // rather than inside rolesAction() for rbacAction()'s reason: the management
+  // API calls the same function with an actor of its own, and a function that
+  // reached for a cookie would only work from one of them.
+  const state = gateStateFor(req);
+  const result = rolesAction(body, { actor: (state && state.username) || '',
+                                     via: 'console' });
+  const back = '/admin/roles' +
+    queryWith(listViewFromBack('/admin/roles', body.back), {}) +
+    // WHICH HEADING THE READER WAS ON. `from` is a NAME and never a URL, for
+    // configReturnTo()'s reason: a redirect target taken out of a request body
+    // is an open redirect and one carrying a newline is a header injection.
+    // The worst a hand-written value can reach is another heading on this
+    // same page.
+    (['built-in', 'roles', 'create', 'member', 'requiring', 'preview',
+      'policy', 'claim'].indexOf(String(body.from || '')) >= 0
+       ? '#' + String(body.from) : '#roles');
+  respondToAction(req, res, back, result);
+  log.debug("Leaving the admin roles action endpoint.");
 });
 
 app.get('/admin/rbac', function (req, res) {
@@ -28482,6 +29421,19 @@ module.exports = {
   consentView: consentView,
   consentAction: consentAction,
   consentActionNames: function () { return CONSENT_ACTIONS.slice(); },
+  // The role register, its five actions, their names and the two closed
+  // vocabularies they take — the same shape the consent register above has,
+  // for rule 7's reason: the management API mirrors the page and reads the
+  // action list to check it. `rolesPreview` is exported too, because the dry
+  // run is a control on that page and rule 7 gives every control an operation.
+  rolesView: rolesView,
+  rolesAction: rolesAction,
+  rolesPreview: rolesPreview,
+  rolesActionNames: function () { return ROLE_ACTIONS.slice(); },
+  roleMemberKinds: function () { return ROLE_MEMBER_KINDS.slice(); },
+  // The ELEVENTH slot, filled by `xacml/xacml_role_pep.js` at 23c. See its
+  // header: a require in either direction fails rule 3e's test.
+  setRolePreviewer: setRolePreviewer,
   usersView: usersView,
   groupsView: groupsView,
   applicationsView: applicationsView,

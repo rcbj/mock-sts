@@ -789,6 +789,11 @@ function editorJson(name) {
     policies: rows.map(function (one) { return one.name; }),
     policy: { name: chosen.name, enabled: chosen.enabled,
               isRoot: chosen.isRoot, policyId: parsed ? parsed.id : null,
+              // WHICH IT IS, because a PolicySet and a Policy take different
+              // children and a caller of /admin-api/xacml/editor that could
+              // not tell them apart would have to guess which actions apply.
+              kind: parsed ? (parsed.kind || 'Policy') : null,
+              version: parsed ? (parsed.version || '1.0') : null,
               combiningAlgId: parsed ? parsed.combiningAlgId : null,
               description: parsed ? parsed.description : '' },
     problem: problem,
@@ -798,6 +803,11 @@ function editorJson(name) {
                options: editor.optionsAt(parsed, row.path) };
     }) : [],
     problems: parsed ? validate.problemsIn(parsed) : [problem],
+    // NOT a static type problem and deliberately kept out of that list: it is
+    // a schema rule (section 5.14) that changes no decision this PDP makes,
+    // so it is reported on its own rather than mixed in with the errors that
+    // stop a policy loading. See `xacml_editor.js`'s `xpathVersionGaps()`.
+    xpathVersionGaps: parsed ? editor.xpathVersionGaps(parsed) : [],
     document: chosen.document,
     // Emitted rather than stored. ALFA is a VIEW of the model here, not a
     // second copy of the policy — a stored ALFA text and a stored XML one
@@ -815,6 +825,50 @@ function editorJson(name) {
 // boolean predicates, and choosing one RESETS the datatype of both its value
 // and its attribute, because a Match whose literal is a string and whose
 // designator is an integer does not typecheck.
+// A yes/no control that can say NO. It is a <select> and not a checkbox, and
+// that is the one piece of markup on this page worth arguing about: an
+// unchecked checkbox SENDS NOTHING, so a form carrying one could never turn
+// MustBePresent off — the handler cannot tell "unchecked" from "this form does
+// not edit that field", and it has to keep the value for the second case or
+// every other form on the row would silently clear it. Two states that must
+// both be sendable is exactly what a select is for.
+function yesNo(name, value) {
+  return select(name, [{ value: 'false', label: 'no' },
+                       { value: 'true', label: 'yes' }],
+                value ? 'true' : 'false');
+}
+
+function typeOptions() {
+  return editor.typeMenu().map(function (one) {
+    return { value: one.uri, label: one.label };
+  });
+}
+
+function categoryOptions() {
+  return editor.CATEGORY_MENU.map(function (one) {
+    return { value: one.uri, label: one.label };
+  });
+}
+
+function functionOptions() {
+  return editor.applyFunctions().map(function (one) {
+    return { value: one.uri,
+             label: one.label + '  (' + one.arity + ' → ' + one.returns + ')' };
+  });
+}
+
+// The inline edit form for one node, or '' where the node has no fields of its
+// own. This is where the "next valid element" idea stops being a menu and
+// becomes a form: a Match's function dropdown carries only the two-argument
+// boolean predicates, and choosing one RESETS the datatype of both its value
+// and its attribute, because a Match whose literal is a string and whose
+// designator is an integer does not typecheck.
+//
+// SEVERAL ROWS CARRY MORE THAN ONE FORM, and they are separate on purpose
+// rather than being one wide one. Every edit action here keeps whatever the
+// submitted form did not mention, so a small form that changes a Match's
+// function cannot disturb its attribute — and a person pressing Update under
+// "Reference" can see that the function is not part of what they are changing.
 function editFormFor(policy, row) {
   const located = editor.nodeAt(policy, row.path);
   if (!located) {
@@ -825,73 +879,132 @@ function editFormFor(policy, row) {
     'class="inline">' + hidden('policy', policy.__editorName) +
     hidden('path', row.path);
 
-  if (row.kind === 'policy') {
+  // A POLICY AND A POLICY SET TAKE THE SAME FORM AND NOT THE SAME MENU. The
+  // rule-combining and policy-combining algorithm URIs differ by one segment
+  // and a set carrying the rule spelling names an algorithm no combiner can
+  // find, so the menu comes from `algorithmMenuFor()` — one function, used
+  // here and by the handler that validates the answer, so the page cannot
+  // offer something the edit then refuses.
+  if (row.kind === 'policy' || row.kind === 'policySet') {
+    const menu = editor.algorithmMenuFor(node);
+    const chosen = menu.filter(function (one) {
+      return one.uri === node.combiningAlgId;
+    })[0] || {};
     return head + hidden('action', 'edit-policy') +
-      'PolicyId ' + textField('id', node.id, 44) + ' ' +
-      select('combiningAlgId', editor.RULE_ALG_MENU.map(function (one) {
+      (row.kind === 'policySet' ? 'PolicySetId ' : 'PolicyId ') +
+      textField('id', node.id, 40) + ' ' +
+      select('combiningAlgId', menu.map(function (one) {
         return { value: one.uri, label: one.label };
       }), node.combiningAlgId) +
+      ' Version ' + textField('version', node.version || '1.0', 6) +
+      '<br>Description ' + textField('description', node.description, 60) +
+      '<br>MaxDelegationDepth ' +
+      textField('maxDelegationDepth', node.maxDelegationDepth, 4) +
+      ' XPathVersion ' + textField('xpathVersion', node.xpathVersion, 44) +
       ' <button type="submit">Update</button></form>' +
-      '<div class="sub">' + esc((editor.RULE_ALG_MENU.filter(function (one) {
-        return one.uri === node.combiningAlgId;
-      })[0] || {}).what || '') + '</div>';
+      '<div class="sub">' + esc(chosen.what || '') + '</div>' +
+      '<div class="sub">Version is dot-separated numbers. ' +
+      '<strong>MaxDelegationDepth is carried and not honoured</strong> — ' +
+      'this PDP implements no administrative delegation, so the attribute ' +
+      'survives a round trip and is read by nothing. XPathVersion belongs in ' +
+      '&lt;' + (row.kind === 'policySet' ? 'PolicySetDefaults'
+                                          : 'PolicyDefaults') + '&gt; and the ' +
+      'specification asks for it whenever the document holds an ' +
+      'AttributeSelector or an xpathExpression.</div>';
+  }
+
+  if (row.kind === 'reference') {
+    return head + hidden('action', 'edit-reference') +
+      esc(node.kind) + ' ' + textField('ref', node.ref, 44) +
+      ' Version ' + textField('version', node.version, 8) +
+      ' <button type="submit">Update</button></form>' +
+      '<div class="sub">The id of a policy stored <em>separately</em> in this ' +
+      'repository. It is resolved when a decision is made rather than when ' +
+      'this document is loaded, so naming one that does not exist yet is ' +
+      'allowed — an unresolved reference is reported on the decision. Leave ' +
+      'Version empty for no constraint.</div>';
   }
 
   if (row.kind === 'rule') {
     return head + hidden('action', 'edit-rule') +
       select('effect', [{ value: 'Permit', label: 'Permit' },
                         { value: 'Deny', label: 'Deny' }], node.effect) +
-      ' RuleId ' + textField('id', node.id, 40) +
+      ' RuleId ' + textField('id', node.id, 36) +
+      ' Description ' + textField('description', node.description, 40) +
       ' <button type="submit">Update</button></form>';
+  }
+
+  if (row.kind === 'variable') {
+    const rename = head + hidden('action', 'edit-variable') +
+      // FROM THE PATH rather than from the label: the label is prose this
+      // page composes and a change to it would silently start renaming
+      // variables to something with a description stuck on the end.
+      'VariableId $' + textField('variableId',
+                                 String(row.path).split('.').pop(), 12) +
+      ' <button type="submit">Rename</button></form>' +
+      '<div class="sub">Every <code>VariableReference</code> naming it is ' +
+      'rewritten with it — a rename that left them behind would produce a ' +
+      'document that does not load, and the write would be refused. The ' +
+      'scope is <strong>this policy</strong>: a sibling policy in the same ' +
+      'set cannot see it.</div>';
+    // The definition IS an expression, so the expression's own form follows —
+    // one row, two forms, rather than a variable you can rename and whose
+    // value you cannot reach.
+    return rename + expressionForm(policy, row, node);
   }
 
   if (row.kind === 'match') {
     const menu = editor.matchFunctions().map(function (one) {
       return { value: one.uri, label: one.label };
     });
-    return head + hidden('action', 'edit-match') +
+    const reference = node.reference || {};
+    const selector = reference.kind === 'selector';
+    const test = head + hidden('action', 'edit-match') +
       select('matchId', menu, node.matchId) + ' ' +
-      textField('value', node.value.lexical, 18) + ' against ' +
-      textField('attributeId', node.reference.attributeId, 24) + ' in ' +
-      select('category', editor.CATEGORY_MENU.map(function (one) {
-        return { value: one.uri, label: one.label };
-      }), node.reference.category) +
+      textField('value', node.value.lexical, 18) +
       ' <button type="submit">Update</button></form>' +
       '<div class="sub">The datatype follows the function — both sides ' +
       'become ' + esc(editor.shortType(node.value.type)) + '.</div>';
+    const against = head + hidden('action', 'edit-match') +
+      'against ' +
+      select('referenceKind',
+             [{ value: 'designator', label: 'an attribute' },
+              { value: 'selector', label: 'an XPath selector' }],
+             selector ? 'selector' : 'designator') + ' ' +
+      (selector ? 'Path ' + textField('path', reference.path, 24)
+                : 'AttributeId ' +
+                  textField('attributeId', reference.attributeId, 24)) +
+      ' in ' + select('category', categoryOptions(), reference.category) +
+      (selector
+         ? ' ContextSelectorId ' +
+           textField('contextSelectorId', reference.contextSelectorId, 20)
+         : ' Issuer ' + textField('issuer', reference.issuer, 16)) +
+      ' must be present ' + yesNo('mustBePresent', reference.mustBePresent) +
+      ' <button type="submit">Update</button></form>' +
+      '<div class="sub">A <code>Match</code> holds an ' +
+      '<code>AttributeDesignator</code> <em>or</em> an ' +
+      '<code>AttributeSelector</code> and never both. Switching the kind ' +
+      'redraws this form with the fields that kind takes. <strong>Must be ' +
+      'present</strong> is the difference between an absent attribute being ' +
+      'an empty bag and being Indeterminate — which is the difference ' +
+      'between a policy that quietly does not apply and one that fails ' +
+      'closed.</div>';
+    return test + against;
   }
 
-  if (row.kind === 'expression' && node.kind === 'value') {
-    return head + hidden('action', 'edit-value') +
-      textField('lexical', node.lexical, 24) + ' as ' +
-      select('type', editor.typeMenu().map(function (one) {
-        return { value: one.uri, label: one.label };
-      }), node.type) +
-      ' <button type="submit">Update</button></form>';
-  }
-
-  if (row.kind === 'expression' && node.kind === 'designator') {
-    return head + hidden('action', 'edit-designator') +
-      textField('attributeId', node.attributeId, 24) + ' in ' +
-      select('category', editor.CATEGORY_MENU.map(function (one) {
-        return { value: one.uri, label: one.label };
-      }), node.category) + ' as ' +
-      select('dataType', editor.typeMenu().map(function (one) {
-        return { value: one.uri, label: one.label };
-      }), node.dataType) +
-      ' <label><input type="checkbox" name="mustBePresent" value="true"' +
-      (node.mustBePresent ? ' checked' : '') + '> must be present</label>' +
-      ' <button type="submit">Update</button></form>';
-  }
-
-  if (row.kind === 'expression' && node.kind === 'apply') {
-    return head + hidden('action', 'edit-apply') +
-      select('functionId', editor.applyFunctions().map(function (one) {
-        return { value: one.uri,
-                 label: one.label + '  (' + one.arity + ' → ' +
-                        one.returns + ')' };
-      }), node.functionId) +
-      ' <button type="submit">Update</button></form>';
+  if (row.kind === 'assignment') {
+    return head + hidden('action', 'edit-assignment') +
+      'AttributeId ' + textField('attributeId', node.attributeId, 30) +
+      ' Category ' + select('category',
+                            [{ value: '', label: '(none)' }]
+                              .concat(categoryOptions()),
+                            node.category || '') +
+      ' Issuer ' + textField('issuer', node.issuer, 16) +
+      ' <button type="submit">Update</button></form>' +
+      '<div class="sub">What the PEP is handed alongside the obligation. ' +
+      'Category and Issuer are optional and mean "this assignment is about ' +
+      'that category" — leave them empty for a plain named value. The value ' +
+      'itself is the expression below.</div>';
   }
 
   if (row.kind === 'obligation') {
@@ -900,6 +1013,128 @@ function editFormFor(policy, row) {
       select('on', [{ value: 'Permit', label: 'Permit' },
                     { value: 'Deny', label: 'Deny' }], node.on) +
       ' <button type="submit">Update</button></form>';
+  }
+
+  if (row.kind === 'expression') {
+    return expressionForm(policy, row, node);
+  }
+  return '';
+}
+
+// The five expression kinds that have fields of their own. Separate from
+// `editFormFor()` because a VariableDefinition is an expression too and needs
+// exactly these forms under its rename box — written twice they would drift,
+// and the sixth kind (`variableRef`) is deliberately absent from both: its
+// whole content is which variable it names, and that is chosen by REPLACING it
+// from the Add menu, where the list of legal names is computed.
+function expressionForm(policy, row, node) {
+  const head = '<form method="post" action="/admin/xacml/editor" ' +
+    'class="inline">' + hidden('policy', policy.__editorName) +
+    hidden('path', row.path);
+
+  if (node.kind === 'value') {
+    const xpath = node.type === model.TYPE.XPATH_EXPRESSION;
+    return head + hidden('action', 'edit-value') +
+      textField('lexical', node.lexical, 24) + ' as ' +
+      select('type', typeOptions(), node.type) +
+      (xpath
+         ? ' over ' + select('xpathCategory', categoryOptions(),
+                             node.xpathCategory || model.CATEGORY.RESOURCE)
+         : '') +
+      ' <button type="submit">Update</button></form>' +
+      (xpath
+         ? '<div class="sub">An <code>xpathExpression</code> value is an ' +
+           'XPath, and <code>XPathCategory</code> is the request category it ' +
+           'runs against. The prefix bindings it uses travel with the ' +
+           'document.</div>'
+         : '');
+  }
+
+  if (node.kind === 'designator') {
+    return head + hidden('action', 'edit-designator') +
+      textField('attributeId', node.attributeId, 24) + ' in ' +
+      select('category', categoryOptions(), node.category) + ' as ' +
+      select('dataType', typeOptions(), node.dataType) +
+      ' Issuer ' + textField('issuer', node.issuer, 16) +
+      ' must be present ' + yesNo('mustBePresent', node.mustBePresent) +
+      ' <button type="submit">Update</button></form>' +
+      '<div class="sub">An empty <strong>Issuer</strong> means <em>any</em> ' +
+      'issuer, which is not the same as an issuer whose name is the empty ' +
+      'string — so clearing the box removes the attribute rather than ' +
+      'writing one.</div>';
+  }
+
+  if (node.kind === 'selector') {
+    const bindings = Object.keys(node.namespaces || {})
+      .filter(function (prefix) {
+        return prefix !== '';
+      }).sort().map(function (prefix) {
+        return '<code>' + esc(prefix) + '</code> → <code>' +
+          esc(node.namespaces[prefix]) + '</code>';
+      }).join(', ');
+    return head + hidden('action', 'edit-selector') +
+      'Path ' + textField('path', node.path, 30) + ' over ' +
+      select('category', categoryOptions(), node.category) + ' as ' +
+      select('dataType', typeOptions(), node.dataType) +
+      '<br>ContextSelectorId ' +
+      textField('contextSelectorId', node.contextSelectorId, 24) +
+      ' must be present ' + yesNo('mustBePresent', node.mustBePresent) +
+      ' &nbsp; namespace ' + textField('namespacePrefix', '', 6) + ' = ' +
+      textField('namespaceUri', '', 30) +
+      ' <button type="submit">Update</button></form>' +
+      '<div class="sub">An <code>AttributeSelector</code> runs an XPath over ' +
+      'the <code>&lt;Content&gt;</code> of a request category and returns a ' +
+      '<strong>bag</strong>, exactly as a designator does — so most ' +
+      'functions still need a <code>one-and-only</code> around it. ' +
+      '<code>ContextSelectorId</code> names an attribute holding the node to ' +
+      'start from; empty means the whole content.</div>' +
+      '<div class="sub">Namespace bindings' +
+      (bindings ? ': ' + bindings : ': none') + '. A prefix in the path ' +
+      'means nothing without one, and they travel with the document. Type a ' +
+      'prefix and a URI to add or change one; a prefix with an empty URI ' +
+      'removes it.</div>';
+  }
+
+  if (node.kind === 'function') {
+    return head + hidden('action', 'edit-function') +
+      select('functionId', functionOptions(), node.functionId) +
+      ' <button type="submit">Update</button></form>' +
+      '<div class="sub">Named here as a <strong>value</strong> rather than ' +
+      'applied — this is the first argument of a higher-order function such ' +
+      'as <code>any-of</code>, <code>all-of</code> or <code>map</code>. ' +
+      'Applying it instead is the commonest way to write one of those ' +
+      'wrongly.</div>';
+  }
+
+  if (node.kind === 'apply') {
+    return head + hidden('action', 'edit-apply') +
+      select('functionId', functionOptions(), node.functionId) +
+      ' Description ' + textField('description', node.description, 30) +
+      ' <button type="submit">Update</button></form>';
+  }
+
+  if (node.kind === 'variableRef') {
+    // POINTING IT AT ANOTHER VARIABLE IS A REPLACEMENT, and the same action
+    // the Add menu uses: `set-expression-variable` puts a new
+    // VariableReference where this one is. The menu is the variables THIS
+    // POLICY defines — computed by the grammar rather than listed here, so a
+    // reference to a variable belonging to a sibling policy cannot be chosen.
+    const scope = editor.variablesInScope(policy, row.path);
+    if (!scope.length) {
+      return '<div class="sub">Names <code>$' + esc(node.variableId) +
+        '</code>, which this policy does not define — so the document will ' +
+        'not load. Add a variable definition to the policy, or replace this ' +
+        'expression from the Add menu.</div>';
+    }
+    return head + hidden('action', 'set-expression-variable') +
+      select('variableId', scope.map(function (one) {
+        return { value: one.id, label: '$' + one.id + '  — ' + one.detail };
+      }), node.variableId) +
+      ' <button type="submit">Update</button></form>' +
+      '<div class="sub">Only the variables <strong>this policy</strong> ' +
+      'defines are offered. A VariableReference may not name one belonging ' +
+      'to a sibling policy in the same set — section 5.24 — and the ' +
+      'document would not load.</div>';
   }
   return '';
 }
@@ -946,6 +1181,29 @@ app.get('/admin/xacml/editor', function (req, res) {
         'safely, disable it first on the ' +
         '<a href="/admin/xacml/policies">Policies</a> page.',
         'Editing is live')
+    : '';
+
+  const xpathGap = json.xpathVersionGaps.length
+    ? admin.warn(
+        'This document holds an <code>AttributeSelector</code> or an ' +
+        '<code>xpathExpression</code> value, and ' +
+        (json.xpathVersionGaps.length === 1
+           ? '<code>' + esc(json.xpathVersionGaps[0]) + '</code> declares'
+           : 'these declare') +
+        ' no <code>XPathVersion</code>' +
+        (json.xpathVersionGaps.length === 1 ? '' :
+           ': <code>' + json.xpathVersionGaps.map(esc).join('</code>, <code>') +
+           '</code>') +
+        '. Section 5.14 says the element MUST be present when a policy uses ' +
+        'one. <strong>Nothing here will refuse the document</strong> — this ' +
+        'PDP has one XPath engine and does not choose a dialect by URI, so ' +
+        'the decision is the same either way — but a schema validator ' +
+        'elsewhere will refuse it, and this is the kind of defect that ' +
+        'travels a long way before anybody finds out. The field is on the ' +
+        'policy\'s own row above: ' +
+        '<code>http://www.w3.org/TR/1999/REC-xpath-19991116</code> is what ' +
+        'the conformance suite uses.',
+        'No XPathVersion, and this document needs one')
     : '';
 
   const problems = json.problems.length
@@ -1006,10 +1264,40 @@ app.get('/admin/xacml/editor', function (req, res) {
     'rule has a Target and an Effect, a new Match has a function, a value ' +
     'and an attribute. An editor that produced half-built elements would ' +
     'hold a document that could not be saved, and a document that cannot be ' +
-    'saved cannot be evaluated, which is when you most want to look at it.</p>',
+    'saved cannot be evaluated, which is when you most want to look at it.</p>' +
+    '<p><strong>A <code>PolicySet</code> is edited here too, and it holds ' +
+    'policies rather than rules.</strong> Its children may be a policy ' +
+    'written inline, a nested set, or a <code>PolicyIdReference</code> ' +
+    'naming a policy stored separately in this repository — which is how a ' +
+    'PDP reaches more than one document: the root is evaluated and ' +
+    'references are resolved when a decision is made. Its combining ' +
+    'algorithm comes from the <em>policy</em>-combining list, which is a ' +
+    'different set of URIs from the rule-combining one they are almost ' +
+    'spelt the same as.</p>' +
+    '<p>The rest of the syntax is here as well: ' +
+    '<code>VariableDefinition</code> (named once, evaluated once per ' +
+    'request, visible to its own policy only), <code>AttributeSelector</code>' +
+    ' (an XPath over a request category\u2019s content, with the namespace ' +
+    'bindings its prefixes need), <code>Function</code> as a value (what a ' +
+    'higher-order function such as <code>any-of</code> or <code>map</code> ' +
+    'takes as its first argument), the attribute assignments under an ' +
+    'obligation, and the optional attributes — <code>Version</code>, ' +
+    '<code>Issuer</code>, <code>MustBePresent</code>, ' +
+    '<code>ContextSelectorId</code>, <code>XPathVersion</code> and ' +
+    '<code>MaxDelegationDepth</code>.</p>' +
+    '<p><strong>Two things are shown and cannot be added.</strong> The four ' +
+    'combiner-parameter elements are drawn and removable, because a ' +
+    'document may arrive carrying them and an element you cannot see is one ' +
+    'you cannot delete — but there is no Add button, since section C of the ' +
+    'specification says none of the twelve standard combining algorithms ' +
+    'takes a parameter, and a control that provably changes no decision ' +
+    'would be the first such control on this console. ' +
+    '<code>&lt;PolicyIssuer&gt;</code> is not here at all: it belongs to the ' +
+    'administrative delegation profile, which this PDP does not implement, ' +
+    'so a document carrying one loses it here.</p>',
     'How this editor works');
 
-  const body = chooser + liveWarning + problems + explain +
+  const body = chooser + liveWarning + problems + xpathGap + explain +
     '<table><tr><th>Element</th><th>Kind</th><th>Add / remove</th></tr>' +
     rows + '</table>' +
     '<details><summary>The same policy as ALFA</summary>' +
@@ -1255,11 +1543,24 @@ const EDITOR_ACTIONS = ['remove', 'add-rule', 'add-target-anyof', 'add-allof',
                         'add-match', 'edit-match', 'edit-rule', 'edit-policy',
                         'add-condition', 'set-expression-apply',
                         'set-expression-value', 'set-expression-designator',
+                        'set-expression-selector', 'set-expression-function',
                         'set-expression-variable', 'add-argument',
                         'edit-apply', 'edit-value', 'edit-designator',
+                        'edit-selector', 'edit-function',
                         'add-rule-obligation', 'add-policy-obligation',
                         'add-rule-advice', 'add-policy-advice',
-                        'edit-obligation', 'add-assignment'];
+                        'edit-obligation', 'add-assignment', 'edit-assignment',
+                        'add-variable', 'edit-variable',
+                        // THE POLICY SET'S FOUR. `add-policy` and `add-rule`
+                        // are not two spellings of one move: a set holds
+                        // policies and a policy holds rules, and the editor
+                        // offered only the second until a policy set could be
+                        // edited at all — which is how it came to accept a
+                        // rule on a set, report it added, and write a document
+                        // without it.
+                        'add-policy', 'add-policyset',
+                        'add-policy-reference', 'add-policyset-reference',
+                        'edit-reference'];
 
 function actionNames() {
   return POLICY_ACTIONS.concat(EDITOR_ACTIONS).concat(PEP_ACTIONS);

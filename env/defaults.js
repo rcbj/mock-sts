@@ -243,18 +243,19 @@ var config = {
 
   // --- XACML -----------------------------------------------------------
   xacml: {
-    enabled: true,                 // XACML enabled
-    maxPolicies: 200,              // Policies the repository may hold
-    pepBias: "deny-biased",        // What the embedded PEP does with a non-Permit
-    returnPolicyIdList: false,     // Always return the applicable policy identifiers
-    remotePeps: true,              // Remote Policy Enforcement Points may register
-    pepRequireCertificate: true,   // A registering PEP must present a client certificate
-    maxPeps: 50,                   // Remote PEPs the register may hold
-    pepStaleAfterS: 300,           // Seconds before a registered PEP is reported stale
-    pepNotify: true,               // Nudge a registered PEP when the repository changes
-    pepNotifyAllowedHosts: "",     // Notify endpoint allowlist
-    pepNotifyAllowInsecure: false, // Allow http:// and untrusted TLS for a nudge
-    pepNotifyTimeoutMs: 2000       // Nudge timeout (ms)
+    enabled: true,                   // XACML enabled
+    maxPolicies: 200,                // Policies the repository may hold
+    pepBias: "deny-biased",          // What the embedded PEP does with a non-Permit
+    returnPolicyIdList: false,       // Always return the applicable policy identifiers
+    remotePeps: true,                // Remote Policy Enforcement Points may register
+    pepRequireCertificate: true,     // A registering PEP must present a client certificate
+    maxPeps: 50,                     // Remote PEPs the register may hold
+    pepStaleAfterS: 300,             // Seconds before a registered PEP is reported stale
+    pepNotify: true,                 // Nudge a registered PEP when the repository changes
+    pepNotifyAllowedHosts: "",       // Notify endpoint allowlist
+    pepNotifyAllowInsecure: false,   // Allow http:// and untrusted TLS for a nudge
+    pepNotifyTimeoutMs: 2000,        // Nudge timeout (ms)
+    issuancePolicy: "role-issuance"  // The policy issuance decisions are made with
   },
 
   // --- SSF -------------------------------------------------------------
@@ -323,6 +324,14 @@ var config = {
     claimName: "groups",     // Claim name
     claimValue: "cn",        // What names a group
     claimFromMemberOf: true  // Believe an entry's own memberOf
+  },
+
+  // --- Roles -----------------------------------------------------------
+  roles: {
+    claim: true,           // Carry a roles claim
+    claimName: "roles",    // Role claim name
+    enforceIssuance: true, // Decide issuance on roles
+    maxRoles: 200          // Maximum roles
   },
 
   // --- Audit log -------------------------------------------------------

@@ -116,6 +116,19 @@ const applications = require('../common/applications');
 // delegation, which is why the refusals are recorded here as carefully as the
 // successes. A library like the two above: it registers no route.
 const delegation = require('../common/delegation');
+// THE ROLE GATE. A LEAF (rule 3) requiring only `helpers` and `config`, both of
+// which this module already has. See `common/issuance_gate.js`; an unfilled
+// decider answers "allowed", so the parent project's in-process Kerberos jobs
+// — which load this file and never the XACML family — behave exactly as they
+// did.
+//
+// **IT ADDS ONE LINE TO THE PARENT PROJECT'S `sts/` COPY SET**, which is the
+// standing obligation CLAUDE.md's last section describes: the closure of what
+// `krb5_kdc.js`, `krb5_service.js` and `spnego.js` require is copied into that
+// project's `tests/Dockerfile`, and a require added here needs
+// `COPY sts/common/issuance_gate.js ./sts/common/` in the commit that bumps
+// the pin across this change. `docs/parent-project-migration.md` records it.
+const gate = require('../common/issuance_gate');
 const asn1 = require('./krb5_asn1.js');
 const msgs = require('./krb5_messages.js');
 const kcrypto = require('./krb5_crypto.js');
@@ -1496,6 +1509,49 @@ async function handleTgsReq(request) {
   // ticket presented here is normally a TGT, saying so explicitly is what keeps this
   // correct once cross-realm referrals arrive and the presented ticket is somebody
   // else's krbtgt.
+  // ---------------------------------------------------------------------------
+  // THE ROLE GATE, asked once the service principal is known and before
+  // anything is signed.
+  //
+  // **THIS IS THE ONLY ISSUANCE SITE HERE THAT ALREADY POLICED SOMETHING**,
+  // and the two policings are about different questions, which is worth being
+  // exact about because they sit forty lines apart. The S4U checks above ask
+  // whether this REQUESTER may act on somebody else's behalf — [MS-SFU], two
+  // attributes, and a refusal that names them. This one asks whether the
+  // PRINCIPAL the ticket is for holds a role the service requires, which is
+  // the same question `/oauth2/token` and `/saml2/sso` are asked and has
+  // nothing to do with delegation.
+  //
+  // It is asked at the TGS and not at the AS, and that is a decision rather
+  // than an omission: an AS-REQ is answered with a TGT for `krbtgt`, which is
+  // this KDC's own ticket-granting service and not an application anybody
+  // would put a requirement on. A requirement belongs to the SERVICE somebody
+  // is reaching, and the TGS is where a client asks for one.
+  //
+  // KDC_ERR_POLICY (12) is the error the specification has for exactly this —
+  // "KDC policy rejects request" — and it is the right word rather than a
+  // near-enough one: the request is well formed, the ticket verifies, and the
+  // answer is a policy decision. `e-text` carries the PEP's sentence, which
+  // `kinit`, `kvno` and MIT's libraries all print.
+  // ---------------------------------------------------------------------------
+  const serviceName = (service.name || []).join('/');
+  const kerberosRoleAnswer = gate.check({
+    application: serviceName,
+    kind: gate.ISSUANCE.KERBEROS_TICKET,
+    subject: { kind: 'user',
+               name: ((ticketPart.cname || {}).name || []).join('/'),
+               authenticated: true },
+    claims: null
+  });
+  if (!kerberosRoleAnswer.allowed) {
+    log.info('krb5: the issuance policy refused a service ticket for ' +
+             ((ticketPart.cname || {}).name || []).join('/') + ' to ' +
+             serviceName + '. ' + kerberosRoleAnswer.why);
+    return errorReply(12, { crealm: ticketPart.crealm,
+      cname: ticketPart.cname, realm: answeringRealm, sname: body.sname,
+      eText: kerberosRoleAnswer.why });
+  }
+
   const krbtgt = principals.find(['krbtgt', answeringRealm], answeringRealm);
   if (!krbtgt) {
     log.error('krb5: there is no krbtgt principal for ' + answeringRealm + ', so no ticket can ' +

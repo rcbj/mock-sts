@@ -87,25 +87,42 @@ const CLIENT_SOURCE_DIR = path.join('client', 'src');
 // copy beside it rather than one over there.
 //
 // `browser: true` means the job drives Chrome through selenium-webdriver. There
-// is exactly one, and it is the admin console's ONLY coverage against this
-// working tree, which is why `--no-browser` names it when it leaves it out.
+// are TWO, and both are console coverage against this working tree, which is
+// why `--no-browser` names them when it leaves them out.
+// `sts_admin_console.js` walks every page; `sts_xacml_editor.js` drives ONE
+// page in depth — the guided policy editor, whose forty forms per render, whose
+// menus and whose nested-form hazard are markup rather than behaviour, and are
+// therefore invisible to the in-process suite that already holds its grammar.
+// They are not redundant: the first would notice the editor page failing to
+// draw, and nothing but the second notices it drawing a menu against the wrong
+// row's path.
 // ---------------------------------------------------------------------------
 //
 // `local: true` means THIS REPOSITORY OWNS THE FILE and there is no copy of it
-// over there to compare against. SIX jobs are marked so, and they are the
-// six that drive this service's OWN `/admin` console and its `/admin-api`:
+// over there to compare against. EIGHT jobs are marked so, and they are the
+// eight that drive this service's OWN `/admin` console and its `/admin-api`:
 // `sts_metadata.js`, `admin_api.js`, `sts_admin_api_operations.js`,
-// `sts_admin_console.js`, `sts_delegated_permissions_example.js` and
-// `sts_consent.js` — the last two of which are newer than the argument below
+// `sts_admin_console.js`, `sts_delegated_permissions_example.js`,
+// `sts_consent.js`, `sts_xacml_endpoints.js` and `sts_xacml_editor.js` — the
+// last four of which are newer than the argument below
 // and are covered by it for the same reason: one builds an example THROUGH
 // `/admin-api` for somebody to read on `/admin`, and the other grants a GLOBAL
 // CONSENT through `/admin-api/consent` and then watches a sign-in stop being
 // asked, which is a console control with a protocol consequence and could not
-// be asserted at all from a repository holding only one half of it. Read the
-// paragraph below as though it said both: it builds an example THROUGH
-// `/admin-api` for somebody to
-// read on `/admin`, so the tree that changes those doors is the tree that
-// should go red when it stops working. They ran from the parent project's `tests/` until
+// be asserted at all from a repository holding only one half of it. THE TWO
+// XACML JOBS ARE HERE FOR THAT SAME REASON AND IT IS THE STRONGEST CASE OF THE
+// FOUR: a PDP with an empty repository answers NotApplicable to everything, so
+// there is no question worth asking `/xacml/pdp` until a policy exists, and the
+// only way to put one there over HTTP is `/admin-api/xacml`. Every assertion in
+// either file therefore spans a console door and a protocol door — a template
+// built on `/admin-api` deciding at `/xacml/pdp`, a policy disabled on the
+// console disappearing from what a remote PEP pulls, a rule built by pressing
+// buttons on `/admin/xacml/editor` changing what `/xacml/protected` allows —
+// and a test with the two halves in two repositories could not make one of
+// them. Read the paragraph below as though it said all of them: they build
+// something THROUGH `/admin-api` for somebody to read on `/admin`, so the tree
+// that changes those doors is the tree that should go red when it stops
+// working. They ran from the parent project's `tests/` until
 // 2026-08-28 and were removed there on that date, on the argument that a test
 // asserting something about this console belongs in the tree where a control
 // is added to that console — the tree that should go red when the control
@@ -118,8 +135,8 @@ const CLIENT_SOURCE_DIR = path.join('client', 'src');
 //
 // What `local` buys is that `tools/vendor-check.js` does not compare them:
 // `allFiles()` leaves them out, so a parent checkout beside this one reports
-// clean instead of four GONE UPSTREAM, and `--vendor-sync` cannot overwrite
-// them. THE EDITING RULE IS THEREFORE INVERTED FOR THESE FOUR — they are
+// clean instead of eight GONE UPSTREAM, and `--vendor-sync` cannot overwrite
+// them. THE EDITING RULE IS THEREFORE INVERTED FOR THESE EIGHT — they are
 // changed HERE, and only here.
 // ---------------------------------------------------------------------------
 const JOBS = [
@@ -134,9 +151,12 @@ const JOBS = [
   { file: 'sts_dpop.js',                 browser: false },
   { file: 'sts_jws_verification.js',     browser: false },
   { file: 'sts_metadata.js',             browser: false, local: true },
+  { file: 'sts_roles.js',                browser: false, local: true },
   { file: 'sts_saml11.js',               browser: false },
   { file: 'sts_saml_encryption.js',      browser: false },
   { file: 'sts_userinfo_protected.js',   browser: false },
+  { file: 'sts_xacml_editor.js',         browser: true,  local: true },
+  { file: 'sts_xacml_endpoints.js',      browser: false, local: true },
   { file: 'vc_did.js',                   browser: false }
 ];
 
@@ -144,7 +164,7 @@ const JOBS = [
 // THE HELPERS, and `env/local.js`. None of these is a job; every one of them is
 // reached by a `require` from at least one job above, which is the whole reason
 // it is here. The set was computed as the transitive local-require closure of
-// the fifteen jobs, not chosen — so a job that grows a new `require('./x.js')`
+// the seventeen jobs, not chosen — so a job that grows a new `require('./x.js')`
 // over there arrives here as a MISSING MODULE at load time, which is a failed
 // job with a name in it rather than a silent gap.
 // ---------------------------------------------------------------------------

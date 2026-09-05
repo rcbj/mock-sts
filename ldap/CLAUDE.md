@@ -843,7 +843,7 @@ anywhere.
 
 ---
 
-## The five HTML views are ADMIN CONSOLE PAGES since 2026-09-01
+## The five HTML views are ADMIN CONSOLE PAGES since 2026-09-01, and there are EIGHT of them since 2026-09-05
 
 They were `/ldap`, `/ldap/directory`, `/ldap/applications`, `/ldap/federations`
 and `/ldap/spiffe`: five pages in a shell written in this file, with their own
@@ -876,7 +876,7 @@ knowing before touching any of it.
   attribute of every entry prints `oauthClientSecret` and `fedClientSecret` in
   the clear, and these were the ONE surface in this service handing those to
   anybody who could reach the port while the console next door asked for a role
-  to show far less. `/admin-api` mirrors all five and is still ungated, which is
+  to show far less. `/admin-api` mirrors all eight and is still ungated, which is
   what a test drives and what somebody locked out of the console reaches for.
 * **THE PAGING AND THE SHORTENING ARE THE CONSOLE'S, NOT THIS FILE'S.**
   `admin.pagedRows()`, `admin.pageNavPair()`, `admin.perPageOptions()`,
@@ -910,9 +910,12 @@ comment above that function carries the argument, including why the `title` is
 set as well and is not redundant.
 
 **Rule 3e's NINTH SLOT is `admin.setDirectoryPages()` and this file fills it**,
-with the five view functions, so that `mgmt-api/admin_api.js` (19) can mirror
+with the eight view functions, so that `mgmt-api/admin_api.js` (19) can mirror
 these pages without requiring this module (21) and dragging every route
-registered here ahead of its own. See the root `CLAUDE.md`.
+registered here ahead of its own. It is validated WHOLE, so a name added to
+`DIRECTORY_PAGE_NAMES` without a view is a refused install rather than one
+operation answering as though no directory were loaded. See the root
+`CLAUDE.md`.
 
 ## `oauthConsent`: the seventh slot, and the one attribute here that records an answer
 
@@ -953,3 +956,81 @@ read only by the authorization endpoint deciding whether to draw a screen. The
 other half of the feature — `oauthGlobalConsent` — is on an APPLICATION's entry
 and belongs to the applications schema rather than to this module's list of its
 own invented names.
+
+## THE THREE PAGES ADDED ON 2026-09-05, AND THE BUG THEY CAME OUT OF
+
+`/admin/ldap/roles`, `/admin/ldap/policies` and `/admin/ldap/peps`. They are
+built here for the same reason the other five are, and the specific fact that
+made them cheap is that **this module already requires all three of the modules
+that own those containers** — `common/roles.js` (247), `xacml/xacml_store.js`
+(187) and `xacml/xacml_pep_registry.js` (188) — because it fills each one's
+`setDirectory()` slot. The schemas were already in scope. No new require, no
+cycle, no route moved.
+
+**They closed a claim rather than adding a feature.** Each of those three
+modules exports a `SCHEMA` whose comment says it is "Published on
+`/admin/ldap/*` the way every other container's is", and for three of them no
+such page had ever been written — the export was dead in `xacml_store.js` since
+XACML phase two, in `xacml_pep_registry.js` since phase five, and in `roles.js`
+from the afternoon it was written.
+
+### What writing them exposed, which is the reason to chase a dead export
+
+**`learnName()` had never been given those three schemas.** The store
+lower-cases every attribute name because `@ldapjs/attribute` does, and
+`entryObject()` un-lower-cases it from one table that each owning module
+contributes its own spellings to — a merge `applications.js` has had for months.
+Without it:
+
+* `/admin/ldap/roles` counted a role's members by reading `roleMemberUser` off
+  the entry and reported **`0 user(s)` for a role somebody plainly held**,
+  because the store had `rolememberuser`.
+* `/admin/ldap/policies` showed every policy's kind as `(unstated)`, and — worse
+  — **drew a DISABLED policy as enabled**, because a missing `xacmlEnabled` is
+  not the string `FALSE`.
+
+Both are fixed by merging the three schemas into `learnName()` rather than by
+reading case-insensitively at each site. **A lookup that silently misses answers
+something PLAUSIBLE**, and these pages are not the only readers of these
+entries: `?format=json`, `/admin-api/ldap/*` and the directory dump all see the
+canonical spellings now.
+
+The second one is the one to remember when writing the ninth page: the booleans
+in this directory are `TRUE` and `FALSE` (RFC 4517's Boolean syntax, which is
+upper case, and what those modules write). A page comparing against `'false'`
+does not fail loudly — it overstates what is switched on.
+
+**`federation.SCHEMA` WAS THE OLDEST INSTANCE OF THIS AND IS MERGED TOO**, in
+the same change. It had never shown, which is why it lasted: that page draws its
+columns from `federation.list()` records, and `federation.js` reads an attribute
+CASE-INSENSITIVELY — `valueOf()` walks the keys — so the lower-cased spellings
+surfaced only in the raw entry dump, beside a published schema saying
+`fedSigningCertificate`. Which is exactly the symptom the applications merge was
+written for: a page that reads as though IT were wrong, when what is wrong is
+that the store lower-cases a name because `@ldapjs/attribute` does.
+
+**A module defending itself is the defence in the wrong place**, and that is the
+general lesson rather than a fact about federation. `federation.js` being careful
+protects `federation.js`; the next reader of one of those entries — a console
+page, an `/admin-api` operation, something not yet written — asks for
+`fedEnabled`, gets `undefined`, and reports something plausible. That is the bug
+the three merges above hit TWICE on the day they were written, in a container
+whose owning module was equally careful. The spelling belongs in the one table
+every reader goes through.
+
+### What each of the three says that its console twin does not
+
+* **roles** — that this container is HALF the feature. Membership is here;
+  the requirement (`appRequiredRole`) is on the application entry. And that the
+  six built-in roles are in NO container, so an empty `ou=roles` is the ordinary
+  state of a service refusing nobody.
+* **policies** — that a write over LDAP **skips the typechecker**. Every write
+  through `/admin/xacml` and `/admin-api/xacml` is statically validated so a
+  policy that does not typecheck is refused at write time; an `ldapmodify` of
+  `xacmlPolicyDocument` reaches the entry directly, and nothing caches these
+  entries.
+* **peps** — that almost everything in it is a RECORD rather than
+  configuration, which is what it has in common with `ou=agents`; that an
+  identity there came from the CLIENT CERTIFICATE and never from the body; and
+  that an empty container is not a feature that is off, because a PEP pulls and
+  converges without ever registering.

@@ -565,11 +565,14 @@ away from a client. One vocabulary for both doors is worth more than a shorter
 URL, and the parity check reads the console's own list either way.
 
 
-## The five directory operations, and the slot they go through (2026-09-01)
+## The directory operations, and the slot they go through (2026-09-01, and three more on 2026-09-05)
 
 `GET /admin-api/ldap/directory`, `/ldap/applications`, `/ldap/federations`,
 `/ldap/spiffe` and `/ldap/service` mirror the five console pages that moved into
-`/admin/ldap/` that day. They exist because of rule 7 and for no other reason —
+`/admin/ldap/` that day, and `/ldap/roles`, `/ldap/policies` and `/ldap/peps`
+mirror the three added on 2026-09-05 — when `ou=roles`, `ou=policies` and
+`ou=peps` each got the page its own module's schema comment had been claiming
+for weeks. They exist because of rule 7 and for no other reason —
 a page of that console gets an operation here in the same change — and the
 parity check in `tests/vendored/admin_api.js` is what would have noticed if they
 had not.
@@ -578,8 +581,10 @@ had not.
 `admin.js`'s NINTH SLOT filled by `ldap/ldap_server.js`.** This module is
 required at #19 and that one at #21, so a plain require would drag every route
 registered there ahead of this API's own; and `admin.js` cannot require it
-either, because that module requires `admin.js` back. The slot carries all five
-views and is validated whole. Each operation calls exactly the function that
+either, because that module requires `admin.js` back. The slot carries all eight
+views and is validated whole — so a name added to `DIRECTORY_PAGE_NAMES`
+without its view is a refused install rather than one operation answering as
+though no directory were loaded. Each operation calls exactly the function that
 DRAWS the page, so an operation and its page cannot come to disagree about what
 is in the directory.
 
@@ -602,6 +607,21 @@ is schemaless on purpose, so an `attributes` member written out property by
 property would be a document making a promise the store does not keep. The names
 are published in the one place that can keep them right — each reply carries the
 container's own `schema`, read out of the module that owns it.
+
+**THE THREE ADDED IN 2026-09-05 ARE READ-ONLY AND SAY SO**, each pointing at
+the resource that writes: `/admin-api/roles` for the role register,
+`/admin-api/xacml` for the repository and for PEPs. That is the same split
+`/ldap/applications` and `/ldap/spiffe` already have, and it is what keeps one
+door per fact.
+
+Two of them carry a sentence their writing twin does not, which is the whole
+reason they are worth their rows rather than being a shape of the existing
+operations. `/ldap/roles` says that the container is HALF the register — the
+requirement is `appRequiredRole` on an APPLICATION entry, so a caller wanting
+both halves resolved wants `GET /admin-api/roles`. And `/ldap/policies` says
+that **a write over LDAP skips the typechecker**: every write through
+`/admin-api/xacml` is statically validated so a policy that does not typecheck
+is refused at write time, and an `ldapmodify` reaches the entry directly.
 
 ## `/admin-api/consent`: a resource of its own, and why the action names stutter
 
@@ -679,3 +699,58 @@ be two places to disagree.
 are drawn — the applications page's arrangement with `/admin/delegation`, and
 for its reason: moving a form is not moving an action, and a route per page
 would have wanted an operation per page over one function.
+
+## `/admin-api/roles`: the register, the preview, and the one read that is not a page
+
+Three shapes under one tag, added 2026-09-05 with the role register itself.
+
+`GET /admin-api/roles` is the register whole — the six built-in roles, every
+configured role with its three membership lists, and every application that has
+been NARROWED. That last list is the reason this operation exists rather than
+being `/admin-api/ldap/roles` with a filter: **the two halves of a role live in
+two containers**, membership on the role entry and the requirement
+(`appRequiredRole`) on the application entry, and this is the only surface that
+resolves them together. `requiring[].unknown` is what that resolution buys — a
+role an application demands that NOTHING defines, which refuses everybody,
+silently and correctly, and looks exactly like the application being broken.
+
+`POST /admin-api/roles/:action` is the five writes: `create-role`,
+`delete-role`, `add-member`, `remove-member` and `describe-role`. Creating and
+populating are separate on purpose, because a role is worth creating before
+anybody holds it — an application can be narrowed to it first and the register
+will then say so.
+
+`GET /admin-api/roles/preview` is the one worth reading the code for. **It is
+the SAME call the nine issuance sites make** — `common/issuance_gate.check()`,
+through `xacml/xacml_role_pep.js`, against the policy `xacml.issuancePolicy`
+names — so a preview that agreed with the enforcement only by coincidence is
+impossible. That is the only reason it is worth having, and it is why the
+answer arrives through `admin.js`'s ELEVENTH SLOT rather than through anything
+this module could compute.
+
+**It is not `POST /xacml/pdp`**, which asks the same engine a different
+question: an arbitrary request against the repository ROOT, which is the policy
+about somebody else's boundary. Two questions, two documents.
+
+### `answered: false` is not leniency, it is the page's own shape
+
+`preview` needs an `application` and a `subject` and declares NEITHER required.
+A GET of `/admin/roles` with no parameters draws the form and no answer, so the
+operation answers 200 with `answered: false` and says what was missing — this is
+a READ, and a read with no question in it has nothing to refuse.
+
+**There is deliberately no `decision` member on that reply.** The hazard is
+gone by construction rather than by care: `issuance_gate.check()` ALLOWS a call
+that names no application, so an operation that fell through to the gate would
+hand back a Permit meaning "you did not ask". `answered` is the first thing to
+read, and `available: false` is the separate fact that the XACML family is not
+loaded in this process at all.
+
+### `gated` and `enforced` are two different offs
+
+`GET /admin-api/roles` reports both because they are reached differently and a
+caller diagnosing "why is nothing being refused" needs to know which one it is.
+`gated: false` means the XACML family is not loaded, so `issuance_gate.js` has
+no decider and every issuance is allowed whatever the register says.
+`enforced: false` means `roles.enforceIssuance` is off — the same outcome by a
+different route, and the way back if a policy edit locks something out.

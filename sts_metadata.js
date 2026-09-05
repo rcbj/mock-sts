@@ -1202,6 +1202,48 @@ const ENDPOINTS = [
           'vocabulary, not a constraint, and one nothing would enforce is worth reading ' +
           'rather than inferring. Two attributes hold credentials in the clear, for the ' +
           'reason /krb5/principals prints the Kerberos passwords. Add ?format=json.' },
+  { path: '/admin/ldap/roles', group: 'LDAP', name: 'The role entries, and their schema',
+    specs: ['rfc4511', 'rfc4512', 'rfc4519'],
+    what: 'THE MEMBERSHIP HALF OF THE ROLE REGISTER, one entry per role under ou=roles, ' +
+          'and a person, a GROUP and an APPLICATION are all first-class members of one — ' +
+          'that third one is the unusual part and is the point, because a ' +
+          'client_credentials grant has no person in it and until an application could ' +
+          'hold a role there was nothing to decide about one. THE OTHER HALF IS NOT IN ' +
+          'THIS CONTAINER: which roles an application DEMANDS before anything is issued ' +
+          'for it is appRequiredRole on the application entry, so nothing here refuses ' +
+          'anybody by itself. The page also lists the SIX BUILT-IN ROLES, which are ' +
+          'computed from the context of the decision being made and are in no container ' +
+          'at all — which is why an empty ou=roles is the ordinary state of a service ' +
+          'deciding every issuance against EVERYBODY and refusing nobody, rather than a ' +
+          'sign that the feature is not loaded. And it publishes the SCHEMA, for the ' +
+          'reason every container page here does: this directory is schemaless. ' +
+          'Add ?format=json.' },
+  { path: '/admin/ldap/policies', group: 'LDAP', name: 'The policy repository, and its schema',
+    specs: ['rfc4511', 'rfc4512', 'xacml30'],
+    what: 'ou=policies IS the XACML policy repository, the way ou=federations is the ' +
+          'federation register: one entry per policy or policy set, holding the document ' +
+          'itself, with exactly one of them the ROOT because a PDP evaluates one document ' +
+          'and reaches the rest through PolicyIdReference. A WRITE HERE SKIPS THE ' +
+          'TYPECHECKER, which is not true of any other door into this repository — every ' +
+          'write through /admin/xacml and /admin-api/xacml parses the document and ' +
+          'statically typechecks it, so a policy that does not typecheck is refused at ' +
+          'WRITE time instead of answering Indeterminate on every request, and an ' +
+          'ldapmodify of xacmlPolicyDocument reaches the entry directly. Nothing caches ' +
+          'these entries, so the next request is decided against whatever was written. ' +
+          'Add ?format=json.' },
+  { path: '/admin/ldap/peps', group: 'LDAP', name: 'The registered PEP entries, and their schema',
+    specs: ['rfc4511', 'rfc4512', 'xacml30'],
+    what: 'THE REMOTE POLICY ENFORCEMENT POINTS that have registered with this PDP, under ' +
+          'ou=peps. Almost every attribute is a RECORD this service wrote as a PEP ' +
+          'registered, pulled or reported rather than configuration somebody typed, which ' +
+          'is what this container has in common with ou=agents next door: an identity here ' +
+          'was taken from the CLIENT CERTIFICATE the PEP presented and never from the body ' +
+          'it sent, which is the one defect in that family that would have been a security ' +
+          'bug. Two attributes are not a record and an ldapmodify of either is a real ' +
+          'change — xacmlPepEnabled, which a reconnecting PEP does not clear, and ' +
+          'xacmlPepNotifyUrl, one of the three addresses this service will dial. AN EMPTY ' +
+          'CONTAINER IS NOT A FEATURE THAT IS OFF: a PEP pulls GET /xacml/pep/policies and ' +
+          'converges whether or not it ever registers. Add ?format=json.' },
   { path: '/admin/ldap/directory', group: 'LDAP', name: 'Every entry in the directory',
     specs: ['rfc4511', 'rfc4514'],
     what: 'The whole store, DN by DN, with where each entry came from — seeded, added over ' +
@@ -2312,6 +2354,32 @@ const ENDPOINTS = [
           'mechanism, kind, outcome, protocol and free text; paged; ' +
           '?format=json carries the acts, the distinct CHAINS among them (one ' +
           'per edge of the picture) and the policy.' },
+  { path: '/admin/roles', group: 'Admin', name: 'Roles',
+    // XACML because the decision is a XACML one, and rfc6749/oidc/saml because
+    // those are the issuances a role gates. NOT the delegation page's four:
+    // nothing here is an act, and [MS-SFU] has nothing to do with whether
+    // somebody may be issued a token.
+    specs: ['xacml30', 'rfc6749', 'oidc'],
+    what: 'NON-SPEC PAGE. Who holds a ROLE, and what requires one. A role is ' +
+          'a name a person, a GROUP or an APPLICATION can be mapped into — ' +
+          'and that third one is the unusual half and the point: a ' +
+          'client_credentials grant has no person in it, so until an ' +
+          'application could hold a role there was nothing to decide about ' +
+          'one. TWO RELATIONS AND THEY ARE OPPOSITE. MEMBERSHIP is stored on ' +
+          'the role entry under ou=roles and is edited here. REQUIREMENT is ' +
+          'appRequiredRole on an APPLICATION entry, edited on that ' +
+          'application\'s page, and drawn here read-only because this is the ' +
+          'only surface that can RESOLVE it — it says whether anything ' +
+          'defines each role an application demands, and a role nothing ' +
+          'defines refuses everybody while looking exactly like a broken ' +
+          'application. Absent means EVERYBODY, which everybody holds, so an ' +
+          'unedited service refuses nobody and the feature is off by default ' +
+          'without being absent. The six BUILT-IN roles are computed from the ' +
+          'context of each decision and are in no container. The preview asks ' +
+          'the SAME call the nine issuance sites make, so it cannot disagree ' +
+          'with the enforcement. It is NOT /admin/rbac, which is two ' +
+          'directory groups granting this console, and it is NOT ' +
+          '/admin/groups, where a group still grants nothing on its own.' },
   { path: '/admin/consent', group: 'Admin', name: 'Consent',
     // Two specifications and not the delegation page's four. Nothing here has
     // been PERFORMED, so [MS-SFU] and WS-Trust have nothing to do with it;
@@ -3462,6 +3530,60 @@ const ENDPOINTS = [
           'rather than turned away. Removing a permission does not revoke the ' +
           'grants naming it — they become dangling, because tidying them ' +
           'would be one call writing to entries it did not name.' },
+  { path: '/admin-api/roles', group: 'Management API', name: 'Roles',
+    specs: ['openapi', 'xacml30'],
+    what: 'NON-SPEC. The role register, both relations. `roles` is MEMBERSHIP ' +
+          '— one entry per role under ou=roles, with the users, groups and ' +
+          'applications that hold it — and is written through the resource ' +
+          'below. `requiring` is REQUIREMENT: appRequiredRole on an ' +
+          'application\'s own entry, READ here and written through ' +
+          'POST /admin-api/applications/add, because one store gets one door ' +
+          'that writes it. Only NARROWED applications are listed; every other ' +
+          'one requires EVERYBODY and refuses nobody. `requiring[].unknown` ' +
+          'names a role an application demands that nothing defines, which is ' +
+          'the one thing neither the application resource nor the role list ' +
+          'can say. `gated: false` means the XACML family is not loaded in ' +
+          'this process and nothing is decided at all; `enforced: false` is ' +
+          'the same outcome from roles.enforceIssuance being off. READ ONLY — ' +
+          'the five controls are on the resource below. Mirrors ' +
+          'GET /admin/roles.' },
+  { path: '/admin-api/roles/preview', group: 'Management API',
+    name: 'Would this be issued?',
+    specs: ['openapi', 'xacml30'],
+    what: 'NON-SPEC. One issuance decision, made and thrown away: nothing is ' +
+          'issued and nothing is recorded. It goes through the SAME call the ' +
+          'nine issuance sites make — issuance_gate.check(), the embedded PEP ' +
+          'and the PDP against the policy xacml.issuancePolicy names — so a ' +
+          'preview that agreed with the enforcement only by coincidence is ' +
+          'impossible, which is the only reason it exists. It is NOT ' +
+          'POST /xacml/pdp, which asks the same engine about the repository ' +
+          'ROOT: that document answers questions about somebody ELSE\'s ' +
+          'boundary and this one answers a question about this service. ' +
+          '`application` and `subject` are both required, because an issuance ' +
+          'named with neither is allowed by definition rather than by policy. ' +
+          '`kind` becomes the XACML action-id, so a policy may permit an ' +
+          'access token and refuse a refresh token. `available: false` means ' +
+          'the engine is not loaded here. Mirrors the dry run on ' +
+          '/admin/roles.' },
+  { path: '/admin-api/roles/:action', group: 'Management API',
+    name: 'Make and change roles',
+    specs: ['openapi', 'xacml30'],
+    what: 'create-role, delete-role, describe-role, add-member and ' +
+          'remove-member — the same five the console\'s forms post to ' +
+          '/admin/roles, through the same function, so neither door can ' +
+          'enforce a rule the other does not. `kind` on the two member ' +
+          'actions chooses which of THREE lists the value goes in and they ' +
+          'are looked up in three different places, so naming the wrong one ' +
+          'succeeds and writes something that will never match. `member` is ' +
+          'named apart from `role` deliberately: a body that confused them ' +
+          'would succeed and create a role called alice. A BUILT-IN role is ' +
+          'refused by name rather than falling through to "no such role", ' +
+          'because those six are drawn in every menu on the page and have no ' +
+          'membership to edit. delete-role SUCCEEDS even where applications ' +
+          'still require the role and NAMES them: each of those is now issued ' +
+          'nothing at all, and saying so at the moment it happens is better ' +
+          'than refusing until every application entry has been edited. ' +
+          'Nothing already ISSUED is touched by any of the five.' },
   { path: '/admin-api/consent', group: 'Management API', name: 'Consent',
     specs: ['openapi', 'rfc6749', 'oidc'],
     what: 'NON-SPEC. The consent register, both halves, and the third in this ' +
@@ -3665,6 +3787,48 @@ const ENDPOINTS = [
           'does: entriesPage and agentsPage move one list each and per is ' +
           'shared. Read-only; the entries are edited through ' +
           '/admin-api/spiffe/entries.' },
+  { path: '/admin-api/ldap/roles', group: 'Management API',
+    name: 'The role entries as the directory holds them',
+    specs: ['rfc4511', 'rfc4512', 'rfc4519', 'openapi'],
+    what: 'GET /admin/ldap/roles over JSON: the MEMBERSHIP half of the role ' +
+          'register, one entry per role under ou=roles, with a person, a ' +
+          'GROUP and an APPLICATION all first-class members of one. The other ' +
+          'half is not in this container — which roles an application DEMANDS ' +
+          'is appRequiredRole on the application entry — so nothing in this ' +
+          'reply refuses anybody by itself and a caller wanting both halves ' +
+          'resolved wants GET /admin-api/roles. builtIn names the six roles ' +
+          'that are COMPUTED and in no container at all, which is why an ' +
+          'empty roles array is the ordinary state of a service refusing ' +
+          'nobody rather than a sign the feature is unloaded. Read-only; the ' +
+          'register is edited through /admin-api/roles.' },
+  { path: '/admin-api/ldap/policies', group: 'Management API',
+    name: 'The policy repository as the directory holds it',
+    specs: ['rfc4511', 'rfc4512', 'xacml30', 'openapi'],
+    what: 'GET /admin/ldap/policies over JSON: ou=policies IS the XACML ' +
+          'policy repository, one entry per policy or policy set holding the ' +
+          'document itself, with exactly one of them the root. It says one ' +
+          'thing GET /admin-api/xacml/policies does not: A WRITE OVER LDAP ' +
+          'SKIPS THE TYPECHECKER. Every write through the console and through ' +
+          '/admin-api/xacml is statically validated, so a policy that does ' +
+          'not typecheck is refused at write time rather than answering ' +
+          'Indeterminate on every request; an ldapmodify of ' +
+          'xacmlPolicyDocument reaches the entry directly, and nothing caches ' +
+          'these entries. Read-only; the repository is edited through ' +
+          '/admin-api/xacml.' },
+  { path: '/admin-api/ldap/peps', group: 'Management API',
+    name: 'The registered remote PEPs as the directory holds them',
+    specs: ['rfc4511', 'rfc4512', 'xacml30', 'openapi'],
+    what: 'GET /admin/ldap/peps over JSON: the remote Policy Enforcement ' +
+          'Points that have registered with this PDP, under ou=peps. Almost ' +
+          'every attribute is a RECORD this service wrote rather than ' +
+          'configuration, which is what this container has in common with ' +
+          'ou=agents — an identity here was taken from the CLIENT ' +
+          'CERTIFICATE the PEP presented and never from the body it sent. The ' +
+          'two that are not a record are xacmlPepEnabled, which a ' +
+          'reconnecting PEP does not clear, and xacmlPepNotifyUrl. An empty ' +
+          'peps array is not a feature that is off: a PEP pulls ' +
+          '/xacml/pep/policies and converges without ever registering. ' +
+          'Read-only; PEPs are managed through /admin-api/xacml.' },
   { path: '/admin-api/ldap/service', group: 'Management API',
     name: 'What the directory IS, right now',
     specs: ['rfc4511', 'rfc4512', 'rfc4513', 'rfc4514', 'rfc4515', 'openapi'],

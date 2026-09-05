@@ -381,6 +381,417 @@ function checkPapActions(t) {
           'there is');
 }
 
+
+// ---------------------------------------------------------------------------
+// A POLICY SET IS NOT A POLICY WITH DIFFERENT CHILDREN.
+//
+// This is the section that would have caught the defect the whole group of
+// them was written for. Until a policy set was editable, `kindAt()` derived
+// "policy" from the empty path, the menu offered `add-rule`, `applyEdit()`
+// pushed onto `rules`, `xacml_xml.js` serialized `children` and never looked
+// at `rules` — and the editor answered "Rule added." about a document that did
+// not contain it. Every layer behaved correctly on its own.
+// ---------------------------------------------------------------------------
+function newPolicySet() {
+  return { kind: 'PolicySet', id: 'urn:test:set', description: '',
+           version: '1.0', combiningAlgId: model.POLICY_ALG.DENY_OVERRIDES,
+           target: null, children: [], obligations: [], advice: [] };
+}
+
+function checkPolicySets(t) {
+  const set = newPolicySet();
+
+  t.equal(editor.optionsAt(set, '').kind, 'policySet',
+          'the root of a PolicySet is a policySet and not a policy — derived ' +
+          'from the NODE, because the path is the same empty string for both');
+
+  const offered = editor.optionsAt(set, '').additions.map(actionOf);
+  t.check(offered.indexOf('add-policy') >= 0,
+          'a policy set offers a Policy');
+  t.check(offered.indexOf('add-rule') < 0,
+          'and does NOT offer a Rule — a set holds policies, and the menu ' +
+          'that offered one wrote it where the serializer does not look');
+
+  const refused = editor.applyEdit(set, '', 'add-rule', {});
+  t.check(!refused.ok && /holds policies, not rules/.test(refused.why),
+          'and the ACTION refuses it too, because /admin-api is not the menu',
+          refused.why);
+
+  t.check(editor.applyEdit(set, '', 'add-policy', {}).ok,
+          'a policy can be added to the set');
+  t.check(editor.applyEdit(set, '', 'add-policyset', {}).ok,
+          'and a nested set');
+  t.check(editor.applyEdit(set, '', 'add-policy-reference',
+                           { ref: 'urn:test:elsewhere' }).ok,
+          'and a PolicyIdReference');
+  t.check(editor.applyEdit(set, 'children.0', 'add-rule', {}).ok,
+          'a rule goes on the CHILD POLICY, which is where it belongs');
+
+  // THE TWO ALGORITHM VOCABULARIES ARE ONE URI SEGMENT APART, and a policy set
+  // carrying the rule-combining spelling names an algorithm no combiner can
+  // find. Nothing else in this repository would refuse it.
+  const wrong = editor.applyEdit(set, '', 'edit-policy',
+                                 { combiningAlgId: model.RULE_ALG.DENY_OVERRIDES });
+  t.check(!wrong.ok && /policy-combining/.test(wrong.why),
+          'a RULE-combining algorithm is refused on a policy set', wrong.why);
+  const right = editor.applyEdit(
+    set, '', 'edit-policy',
+    { combiningAlgId: model.POLICY_ALG.ONLY_ONE_APPLICABLE });
+  t.check(right.ok, 'and the policy-combining one is accepted', right.why);
+  t.check(editor.optionsAt(set, 'children.0').kind === 'policy',
+          'a child of the set is a policy, and its own menu offers rules');
+
+  const document = xml.writePolicy(set);
+  let back = null;
+  try {
+    back = xml.parsePolicy(document);
+  } catch (error) {
+    t.check(false, 'the edited policy set still type-checks', error.message);
+    return;
+  }
+  t.check(true, 'the edited policy set type-checks');
+  t.equal(back.children.length, 3,
+          'and all three children survived the round trip — the assertion ' +
+          'that fails when an edit is accepted and then serialized nowhere');
+  t.equal(back.children[0].rules.length, 1,
+          'including the rule on the child policy');
+  t.equal(back.combiningAlgId, model.POLICY_ALG.ONLY_ONE_APPLICABLE,
+          'and the policy-combining algorithm is the one that was chosen');
+
+  const rows = editor.tree(set).map(function (row) { return row.kind; });
+  t.check(rows.indexOf('reference') >= 0,
+          'the tree draws the reference, so it can be seen and removed');
+  t.check(rows.filter(function (kind) { return kind === 'policySet'; })
+            .length === 2,
+          'and recurses into the nested set rather than stopping at the root');
+}
+
+// ---------------------------------------------------------------------------
+// VARIABLES, AND THE MENU ITEM THAT USED TO BE A TRAP.
+//
+// `set-expression-variable` has been in the menu since the editor shipped and
+// there was no way to DEFINE a variable — so choosing it built `$v1`, the
+// validator refused the document, the store declined the write, and the
+// editor's one promise (it cannot offer what the validator will refuse) was
+// broken by its own menu.
+// ---------------------------------------------------------------------------
+function checkVariables(t) {
+  const policy = templates.build('rbac', {}, { name: 'vars' }).policy;
+  editor.applyEdit(policy, 'rules.0', 'add-condition', {});
+
+  const before = editor.optionsAt(policy, 'rules.0.condition')
+    .additions.map(actionOf);
+  t.check(before.indexOf('set-expression-variable') < 0,
+          'with no variable defined, a VariableReference is NOT offered — ' +
+          'the menu withdraws what the validator would refuse');
+
+  const added = editor.applyEdit(policy, '', 'add-variable', {});
+  t.check(added.ok, 'a variable can be defined', added.why || added.what);
+  t.check(editor.optionsAt(policy, 'rules.0.condition').additions
+            .map(actionOf).indexOf('set-expression-variable') >= 0,
+          'and now the reference IS offered');
+
+  const duplicate = editor.applyEdit(policy, '', 'add-variable',
+                                     { variableId: 'v1' });
+  t.check(!duplicate.ok && /already defines/.test(duplicate.why),
+          'a duplicate VariableId is refused — the reader rejects a document ' +
+          'defining one twice, so allowing it would write a policy this ' +
+          'service cannot load back', duplicate.why);
+
+  const dotted = editor.applyEdit(policy, '', 'add-variable',
+                                  { variableId: 'a.b' });
+  t.check(!dotted.ok && /dotted path/.test(dotted.why),
+          'and so is a name with a dot in it, because the id becomes a path ' +
+          'segment here — refused where it can be explained rather than ' +
+          'discovered as a row whose buttons do nothing', dotted.why);
+
+  t.check(editor.applyEdit(policy, 'rules.0.condition.args.1',
+                           'set-expression-variable', {}).ok,
+          'an argument can be pointed at the variable');
+  const unknown = editor.applyEdit(policy, 'rules.0.condition.args.1',
+                                   'set-expression-variable',
+                                   { variableId: 'nope' });
+  t.check(!unknown.ok && /5.24/.test(unknown.why),
+          'and naming one this policy does not define is refused, citing the ' +
+          'section that says why', unknown.why);
+
+  // THE RENAME IS THE INTERESTING ONE: a rename that left the references
+  // behind produces a document that does not load, so the store would refuse
+  // the write and nothing would change — a control that silently does nothing.
+  const renamed = editor.applyEdit(policy, 'variables.v1', 'edit-variable',
+                                   { variableId: 'staffTypes' });
+  t.check(renamed.ok && /1 reference/.test(renamed.what),
+          'renaming a variable rewrites the references with it, and says how ' +
+          'many', renamed.what || renamed.why);
+  let back = null;
+  try {
+    back = xml.parsePolicy(xml.writePolicy(policy));
+  } catch (error) {
+    t.check(false, 'the renamed policy still type-checks', error.message);
+    return;
+  }
+  t.check(true, 'the renamed policy type-checks — which is the whole point: ' +
+          'an unrewritten reference is a document that will not load');
+  t.check(!!back.variables.staffTypes,
+          'the definition is under the new name');
+  t.equal(Object.keys(back.variables).length, 1,
+          'and not under both');
+}
+
+// ---------------------------------------------------------------------------
+// THE THREE EXPRESSION KINDS THE MODEL HAD AND THE EDITOR COULD NOT BUILD.
+// ---------------------------------------------------------------------------
+function checkSelectorsAndFunctions(t) {
+  const policy = templates.build('rbac', {}, { name: 'expr' }).policy;
+  editor.applyEdit(policy, 'rules.0', 'add-condition', {});
+
+  // A HIGHER-ORDER FUNCTION TAKES A FUNCTION, and until `newExpression()` knew
+  // that, choosing `any-of` built an <AttributeValue> in that position — an
+  // expression the validator refuses, offered by the editor's own menu.
+  const higher = editor.applyEdit(
+    policy, 'rules.0.condition', 'set-expression-apply',
+    { functionId: 'urn:oasis:names:tc:xacml:3.0:function:any-of' });
+  t.check(higher.ok, 'a higher-order function can be chosen', higher.why || '');
+  const condition = editor.nodeAt(policy, 'rules.0.condition').node;
+  t.equal(condition.args[0].kind, 'function',
+          'and its first argument arrives as a Function REFERENCE rather ' +
+          'than a literal — which is the difference between a policy that ' +
+          'loads and one the validator refuses');
+  t.equal(validate.problemsIn(policy).length, 0,
+          'so the policy type-checks with no further edits');
+
+  const changed = editor.applyEdit(
+    policy, 'rules.0.condition.args.0', 'edit-function',
+    { functionId: 'urn:oasis:names:tc:xacml:1.0:function:string-greater-than' });
+  t.check(changed.ok, 'the function reference can be changed', changed.why || '');
+
+  // `map` applies its function to ONE value; the other six take a predicate of
+  // two. A default of the wrong shape is legal XACML that fails at evaluation,
+  // which is worse than one that fails at load.
+  editor.applyEdit(policy, 'rules.0.condition', 'set-expression-apply',
+                   { functionId: 'urn:oasis:names:tc:xacml:3.0:function:map' });
+  t.equal(editor.nodeAt(policy, 'rules.0.condition').node.args[0].functionId,
+          'urn:oasis:names:tc:xacml:1.0:function:string-normalize-to-lower-case',
+          'and `map` gets a ONE-argument default rather than a predicate');
+
+  // AN AttributeSelector, AND THE BINDINGS THAT MAKE ITS PATH MEAN ANYTHING.
+  //
+  // Put back to a boolean condition first: `map` returns a BAG, and a rule
+  // whose Condition is a bag does not load. That is the validator doing its
+  // job on an expression this test built on purpose, and it is worth leaving
+  // in the file rather than starting from a fresh policy — the second half of
+  // this check is that the SELECTOR round-trips through a document, and a
+  // document that will not parse cannot show it.
+  editor.applyEdit(policy, 'rules.0.condition', 'set-expression-apply',
+                   { functionId: 'urn:oasis:names:tc:xacml:1.0:function:' +
+                                 'string-is-in' });
+  const selector = editor.applyEdit(policy, 'rules.0.condition.args.1',
+                                    'set-expression-selector', {});
+  t.check(selector.ok, 'an AttributeSelector can be built', selector.why || '');
+  const bound = editor.applyEdit(
+    policy, 'rules.0.condition.args.1', 'edit-selector',
+    { path: '//md:record/md:patient', namespacePrefix: 'md',
+      namespaceUri: 'http://www.medico.com/schemas/record',
+      mustBePresent: 'true' });
+  t.check(bound.ok, 'and given a path and a namespace binding',
+          bound.why || '');
+
+  // THE ASSERTION THIS PAIR EXISTS FOR. The reader captured namespace
+  // bindings from the document and the writer dropped them, so the FIRST edit
+  // of any policy holding a selector produced one whose prefixes resolved to
+  // nothing — and an unresolvable prefix is an empty bag, which is
+  // NotApplicable, which looks exactly like a policy that decided you may not.
+  const document = xml.writePolicy(policy);
+  t.check(/<AttributeSelector[^>]*xmlns:md="http:\/\/www\.medico\.com/
+            .test(document),
+          'the binding is WRITTEN ONTO the selector, so the path still ' +
+          'resolves in the document that comes back out');
+  t.check(/MustBePresent="true"/.test(document),
+          'and MustBePresent survives — the difference between an absent ' +
+          'attribute being an empty bag and being Indeterminate');
+
+  const back = xml.parsePolicy(document);
+  t.equal(xml.writePolicy(back), document,
+          'and the round trip is a fixed point rather than drifting a ' +
+          'binding on each pass');
+  t.equal(editor.xpathVersionGaps(back).length, 1,
+          'a document using a selector with no XPathVersion is REPORTED — ' +
+          'section 5.14 asks for one, no decision here changes either way, ' +
+          'and a schema validator elsewhere would refuse it');
+  editor.applyEdit(back, '', 'edit-policy',
+                   { xpathVersion: 'http://www.w3.org/TR/1999/REC-xpath-19991116' });
+  t.equal(editor.xpathVersionGaps(back).length, 0,
+          'and setting it closes the report');
+  t.check(/<PolicyDefaults>/.test(xml.writePolicy(back)),
+          'which is written as <PolicyDefaults><XPathVersion>');
+}
+
+// ---------------------------------------------------------------------------
+// THE OPTIONAL ATTRIBUTES, AND THE ASSIGNMENTS THAT COULD BE ADDED AND NOT SEEN.
+// ---------------------------------------------------------------------------
+function checkOptionalSyntax(t) {
+  const policy = templates.build('rbac', {}, { name: 'optional' }).policy;
+
+  editor.applyEdit(policy, 'rules.0', 'add-rule-obligation', {});
+  editor.applyEdit(policy, 'rules.0.obligations.0', 'add-assignment', {});
+  const rows = editor.tree(policy);
+  const assignment = rows.filter(function (row) {
+    return row.kind === 'assignment';
+  })[0];
+  t.check(!!assignment,
+          'an attribute assignment is DRAWN — it could be added and not seen ' +
+          'since the editor shipped, so the only way to correct a mistyped ' +
+          'one was to remove the whole obligation');
+  if (assignment) {
+    const edited = editor.applyEdit(policy, assignment.path,
+                                    'edit-assignment',
+                                    { attributeId: 'urn:test:notify',
+                                      category: model.CATEGORY.RESOURCE,
+                                      issuer: 'sts' });
+    t.check(edited.ok, 'and it can be edited', edited.why || '');
+    t.check(editor.optionsAt(policy, assignment.path).removable,
+            'and removed');
+    t.check(editor.optionsAt(policy, assignment.path + '.expression').kind ===
+              'expression',
+            'and its VALUE is an expression node of its own, with the whole ' +
+            'expression menu on it');
+  }
+
+  // Optional attributes, each of which used to have no control at all.
+  const versioned = editor.applyEdit(policy, '', 'edit-policy',
+                                     { version: '2.13.7',
+                                       maxDelegationDepth: '4',
+                                       description: 'Written by the editor.' });
+  t.check(versioned.ok, 'Version, MaxDelegationDepth and Description are ' +
+          'settable', versioned.why || '');
+  const bad = editor.applyEdit(policy, '', 'edit-policy',
+                               { version: 'draft 2' });
+  t.check(!bad.ok && /dot-separated/.test(bad.why),
+          'and a Version that is not dot-separated numbers is refused here, ' +
+          'because nothing else in this service would refuse it and a schema ' +
+          'validator elsewhere will', bad.why);
+
+  const matchPath = 'rules.0.target.anyOf.0.allOf.0.matches.0';
+  const issued = editor.applyEdit(policy, matchPath, 'edit-match',
+                                  { issuer: 'urn:test:issuer',
+                                    mustBePresent: 'true' });
+  t.check(issued.ok, 'a Match\'s designator takes an Issuer and ' +
+          'MustBePresent', issued.why || '');
+
+  // THE TRISTATE. An unchecked checkbox sends nothing, so a form that edits
+  // the FUNCTION and does not carry the MustBePresent control must not clear
+  // it — which is what `given.mustBePresent === 'true'` did on every save.
+  editor.applyEdit(policy, matchPath, 'edit-match', { value: 'contractor' });
+  t.check(editor.nodeAt(policy, matchPath).node.reference.mustBePresent,
+          'and editing the Match\'s VALUE leaves MustBePresent alone rather ' +
+          'than clearing it — a field the form did not mention is not a ' +
+          'field set to false');
+
+  // A Match may reference a SELECTOR instead, and it is a switch rather than
+  // two fields: the schema allows exactly one of the two.
+  const switched = editor.applyEdit(policy, matchPath, 'edit-match',
+                                    { referenceKind: 'selector',
+                                      path: '//md:patient' });
+  t.check(switched.ok, 'a Match can test an XPath selector instead of a ' +
+          'named attribute', switched.why || '');
+  t.equal(editor.nodeAt(policy, matchPath).node.reference.kind, 'selector',
+          'and the reference IS the selector rather than both');
+
+  const document = xml.writePolicy(policy);
+  t.check(/MaxDelegationDepth="4"/.test(document),
+          'MaxDelegationDepth is written — carried and not honoured, since ' +
+          'this PDP implements no delegation, but a round trip that dropped ' +
+          'it would delete it from a document that arrived with one');
+  t.check(/Version="2.13.7"/.test(document), 'and the Version');
+  let back = null;
+  try {
+    back = xml.parsePolicy(document);
+  } catch (error) {
+    t.check(false, 'and the result still type-checks', error.message);
+    return;
+  }
+  t.check(true, 'and the result still type-checks');
+  t.equal(back.maxDelegationDepth, '4', 'and reads back');
+}
+
+// ---------------------------------------------------------------------------
+// THE FOUR COMBINER-PARAMETER ELEMENTS: CARRIED, DRAWN, REMOVABLE, NOT ADDABLE.
+//
+// The one place in this editor where those come apart, and the assertion is
+// about all four halves at once — a document that arrives with them keeps
+// them, the person can see and delete them, and no menu offers one, because
+// section C says no standard combining algorithm reads a parameter.
+// ---------------------------------------------------------------------------
+const WITH_COMBINER_PARAMETERS =
+  '<?xml version="1.0" encoding="UTF-8"?>\n' +
+  '<Policy xmlns="urn:oasis:names:tc:xacml:3.0:core:schema:wd-17" ' +
+  'PolicyId="urn:test:combiner" Version="1.0" ' +
+  'RuleCombiningAlgId="urn:oasis:names:tc:xacml:1.0:rule-combining-algorithm:' +
+  'first-applicable">\n' +
+  '  <Target/>\n' +
+  '  <CombinerParameters>\n' +
+  '    <CombinerParameter ParameterName="order">\n' +
+  '      <AttributeValue DataType="http://www.w3.org/2001/XMLSchema#integer">' +
+  '1</AttributeValue>\n' +
+  '    </CombinerParameter>\n' +
+  '  </CombinerParameters>\n' +
+  '  <RuleCombinerParameters RuleIdRef="urn:test:combiner:rule:1">\n' +
+  '    <CombinerParameter ParameterName="weight">\n' +
+  '      <AttributeValue DataType="http://www.w3.org/2001/XMLSchema#integer">' +
+  '7</AttributeValue>\n' +
+  '    </CombinerParameter>\n' +
+  '  </RuleCombinerParameters>\n' +
+  '  <Rule RuleId="urn:test:combiner:rule:1" Effect="Permit"><Target/></Rule>\n' +
+  '</Policy>\n';
+
+function checkCombinerParameters(t) {
+  let policy = null;
+  try {
+    policy = xml.parsePolicy(WITH_COMBINER_PARAMETERS);
+  } catch (error) {
+    t.check(false, 'a policy carrying combiner parameters loads',
+            error.message);
+    return;
+  }
+  t.equal(policy.combinerParameters.length, 1,
+          'a <CombinerParameters> is READ rather than walked past');
+  t.equal(policy.ruleCombinerParameters.length, 1,
+          'and so is a <RuleCombinerParameters>');
+
+  // THE ASSERTION THAT MATTERS: the editor rewrites the whole document on
+  // every edit, so anything the reader skips is DELETED by the first click.
+  editor.applyEdit(policy, '', 'edit-policy', { description: 'touched' });
+  const document = xml.writePolicy(policy);
+  t.check(/ParameterName="order"/.test(document) &&
+          /RuleIdRef="urn:test:combiner:rule:1"/.test(document),
+          'and both survive an unrelated edit — an element the reader drops ' +
+          'is not merely unread, it is deleted by the next rename');
+
+  const kinds = editor.tree(policy).map(function (row) { return row.kind; });
+  t.check(kinds.indexOf('combinerParameter') >= 0 &&
+          kinds.indexOf('combinerParameterGroup') >= 0,
+          'they are DRAWN, because an element you cannot see is one you ' +
+          'cannot delete');
+  t.check(editor.optionsAt(policy, 'combinerParameters.0').removable,
+          'and removable');
+
+  const offered = [];
+  Object.keys(editor.ADDITIONS).forEach(function (kind) {
+    editor.ADDITIONS[kind].forEach(function (one) {
+      offered.push(one.action);
+    });
+  });
+  t.check(!offered.some(function (action) {
+    return /combiner/i.test(action);
+  }), 'and NO menu offers to add one — section C says none of the twelve ' +
+      'standard combining algorithms takes a parameter, so an Add button ' +
+      'here would be the first control on this console that provably ' +
+      'changes no decision');
+
+  t.equal(xml.writePolicy(xml.parsePolicy(document)), document,
+          'the round trip through them is a fixed point');
+}
+
 function run(t) {
   checkWriter(t);
   checkTemplates(t);
@@ -389,6 +800,11 @@ function run(t) {
   checkMenuAndApiAgree(t);
   checkEdits(t);
   checkMatchTypeFollowsFunction(t);
+  checkPolicySets(t);
+  checkVariables(t);
+  checkSelectorsAndFunctions(t);
+  checkOptionalSyntax(t);
+  checkCombinerParameters(t);
   checkPapActions(t);
 }
 

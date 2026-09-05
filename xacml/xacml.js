@@ -70,6 +70,21 @@ const pepHttp = require('./xacml_pep_http');
 // half-initialised module rather than with an error.
 require('./xacml_admin');
 
+// THE EMBEDDED PEP FOR THIS SERVICE'S OWN ISSUANCE, required from here for the
+// same reason and with one extra consequence: requiring it is what FILLS
+// `common/issuance_gate.js`'s decider slot, so from this line onward every
+// issuance site's `gate.check()` reaches the engine. Before it — and in any
+// process that never loads this family, which is `npm test`, the parent
+// project's in-process Kerberos jobs and the remote PEP container — the gate
+// answers "allowed" and this service is exactly what it was.
+//
+// It registers NO ROUTE and is therefore a library (rule 3): it is here rather
+// than in `server.js` so that the require order keeps its one line for this
+// family, and its position within that line does not matter. It must come
+// after `xacml_admin.js` for no technical reason at all, and does, because the
+// pages are what an administrator fixes a refusal with.
+require('./xacml_role_pep');
+
 function enabled() {
   return config.value('xacml.enabled') !== false;
 }
