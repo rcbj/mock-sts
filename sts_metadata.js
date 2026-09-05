@@ -1267,6 +1267,52 @@ const ENDPOINTS = [
           'is the case nobody tests. An obligation it cannot discharge turns ' +
           'a Permit into a refusal (section 7.2), which is the part ' +
           'implementations skip.' },
+  { path: '/admin/xacml', group: 'XACML', name: 'The XACML console page',
+    specs: ['xacml30'],
+    what: 'Settings, and what the PDP currently decides with. The one ' +
+          'setting on it that is NOT the PDP\'s is xacml.pepBias, which ' +
+          'belongs to the embedded Policy ENFORCEMENT point.' },
+  { path: '/admin/xacml/policies', group: 'XACML',
+    name: 'The policy repository',
+    specs: ['xacml30'],
+    what: 'Enable, disable, choose the root, delete, and create from an ' +
+          'RBAC or ABAC template. The table IS ou=policies in the embedded ' +
+          'directory.' },
+  { path: '/admin/xacml/editor', group: 'XACML', name: 'The guided editor',
+    specs: ['xacml30'],
+    what: 'Every element offers exactly what XACML allows at that point, ' +
+          'computed on the server by the same code that validates the ' +
+          'result — so the editor cannot offer something that will then be ' +
+          'refused. NO JAVASCRIPT: this console is script-src \'none\', so ' +
+          'every control is a form POST and every choice is a round trip. ' +
+          'There is no draft state; the policy being edited is the one the ' +
+          'PDP is using.' },
+  { path: '/admin/xacml/decide', group: 'XACML', name: 'Try a decision',
+    specs: ['xacml30'],
+    what: 'Ask the PDP about somebody and see the decision, which policies ' +
+          'applied, and — separately — what the embedded PEP would do with ' +
+          'it. Those last two are different answers, and when a policy "is ' +
+          'not working" it is nearly always because only one was being ' +
+          'looked at.' },
+  { path: '/admin-api/xacml', group: 'XACML',
+    name: 'The XACML console page over JSON', specs: ['xacml30'],
+    what: 'What GET /admin/xacml draws, as data. Ungated, like the rest of ' +
+          '/admin-api.' },
+  { path: '/admin-api/xacml/policies', group: 'XACML',
+    name: 'The policy repository over JSON', specs: ['xacml30'],
+    what: 'Every policy with its static type-check problems, the root, and ' +
+          'the templates with the parameters each takes.' },
+  { path: '/admin-api/xacml/editor', group: 'XACML',
+    name: 'One policy as an editable tree', specs: ['xacml30'],
+    what: 'Each node carries the legal moves at that point, so a caller can ' +
+          'walk the tree and POST one without a second copy of the grammar.' },
+  { path: '/admin-api/xacml/:action', group: 'XACML',
+    name: 'Change a policy or the repository', specs: ['xacml30'],
+    what: 'The console\'s two POST endpoints as ONE action resource — a ' +
+          'caller should not have to work out which page owns "enable". ' +
+          'Twenty-eight actions: five on the repository and the rest the ' +
+          'editor\'s. Rule 7 is why this exists in the same commit as the ' +
+          'pages.' },
   { path: '/.well-known/ssf-configuration', group: 'Shared Signals',
     name: 'Transmitter configuration metadata',
     specs: ['ssf'],

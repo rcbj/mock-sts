@@ -2525,7 +2525,7 @@ const SETTINGS = [
   { key: 'xacml.pepBias', group: 'XACML',
     label: 'What the embedded PEP does with a non-Permit',
     env: 'STS_XACML_PEP_BIAS', type: 'enum',
-    values: ['deny-biased', 'permit-biased'], dflt: 'deny-biased',
+    enumValues: ['deny-biased', 'permit-biased'], dflt: 'deny-biased',
     runtime: true,
     description: 'THIS IS THE PEP\'S DECISION AND NOT THE PDP\'S, which is ' +
                  'the whole reason it is a setting. XACML section 7.2 lets a ' +

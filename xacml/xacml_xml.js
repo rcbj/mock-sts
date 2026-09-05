@@ -50,7 +50,7 @@
 // ---------------------------------------------------------------------------
 
 const { DOMParser, XMLSerializer } = require('@xmldom/xmldom');
-const { log } = require('../common/helpers');
+const { log, xmlEscape } = require('../common/helpers');
 const model = require('./xacml_model');
 const validate = require('./xacml_validate');
 
@@ -184,6 +184,16 @@ function namespacesInScope(node) {
 // substitution group is closed, so anything else here is a syntax error rather
 // than something to skip — see the header.
 // ---------------------------------------------------------------------------
+// The <Description> of an element, or ''. Read because it is the one part of a
+// policy that exists purely for the next person, and a round trip through the
+// editor that dropped it would silently delete every explanation the author
+// wrote — the change nobody notices until they go looking for the reason a
+// rule is there.
+function descriptionOf(node) {
+  const found = firstNamed(node, 'Description');
+  return found ? textOf(found).trim() : '';
+}
+
 function readExpression(node) {
   log.debug('Entering readExpression(). element=' + localName(node));
   const name = localName(node);
@@ -391,6 +401,7 @@ function readRule(node) {
   log.debug('Leaving readRule(). id=' + attribute(node, 'RuleId'));
   return { id: requiredAttribute(node, 'RuleId'),
            effect: effect,
+           description: descriptionOf(node),
            target: readTarget(firstNamed(node, 'Target')),
            condition: conditionExpression,
            obligations: readObligations(node),
@@ -437,6 +448,7 @@ function readPolicy(node) {
   return {
     kind: 'Policy',
     id: requiredAttribute(node, 'PolicyId'),
+    description: descriptionOf(node),
     version: attribute(node, 'Version') || '1.0',
     combiningAlgId: requiredAttribute(node, 'RuleCombiningAlgId'),
     target: readTarget(firstNamed(node, 'Target')),
@@ -469,6 +481,7 @@ function readPolicySet(node) {
   return {
     kind: 'PolicySet',
     id: requiredAttribute(node, 'PolicySetId'),
+    description: descriptionOf(node),
     version: attribute(node, 'Version') || '1.0',
     combiningAlgId: requiredAttribute(node, 'PolicyCombiningAlgId'),
     target: readTarget(firstNamed(node, 'Target')),
@@ -655,8 +668,258 @@ function readResponseAssignments(parent, wrapper, item, idAttribute) {
   });
 }
 
+
+// ---------------------------------------------------------------------------
+// THE MODEL, WRITTEN BACK OUT AS XACML 3.0 XML.
+//
+// The reader's inverse, and the PAP is what needs it: the guided editor works
+// on the MODEL, so every structural change has to be serialized back into the
+// document `ou=policies` actually stores. `xacml_alfa.js` will need it too —
+// ALFA in, model, XML out is the whole of what an ALFA compiler is here.
+//
+// TWO THINGS IT DELIBERATELY DOES NOT PRESERVE, and both are worth knowing
+// before pointing the editor at a hand-authored policy:
+//
+//   * COMMENTS AND WHITESPACE. The model does not carry them, so a document
+//     that goes through the editor comes back reformatted and stripped of
+//     anything a person wrote between the elements. That is why the store
+//     keeps the document AS AUTHORED and why opening a policy in the editor
+//     and saving it is a deliberate act rather than a side effect of viewing.
+//   * ATTRIBUTE ORDER. Written in the schema's order rather than the source's.
+//
+// Neither changes what a policy MEANS — `tests/xacml_service.js` asserts that
+// a document through the reader and back decides identically — but the diff
+// after an edit will be large, and somebody expecting a one-line change should
+// know why before they see it.
+// ---------------------------------------------------------------------------
+
+// Every attribute value and every text node goes through `xmlEscape`, which is
+// the same function every other document this service emits is escaped with —
+// so the policy writer and the SAML writer cannot disagree about what escaping
+// is.
+function attr(name, value) {
+  if (value === null || value === undefined || value === '') {
+    return '';
+  }
+  return ' ' + name + '="' + xmlEscape(String(value)) + '"';
+}
+
+function indent(depth) {
+  return new Array(depth + 1).join('  ');
+}
+
+function writeExpression(expression, depth) {
+  log.debug('Entering writeExpression(). kind=' + expression.kind);
+  const pad = indent(depth);
+  if (expression.kind === 'value') {
+    log.debug('Leaving writeExpression(). AttributeValue.');
+    return pad + '<AttributeValue' + attr('DataType', expression.type) + '>' +
+      xmlEscape(String(expression.lexical === undefined
+                         ? '' : expression.lexical)) +
+      '</AttributeValue>';
+  }
+  if (expression.kind === 'designator') {
+    log.debug('Leaving writeExpression(). AttributeDesignator.');
+    return pad + '<AttributeDesignator' +
+      attr('Category', expression.category) +
+      attr('AttributeId', expression.attributeId) +
+      attr('DataType', expression.dataType) +
+      attr('Issuer', expression.issuer) +
+      // MustBePresent is written ALWAYS, including when false. The schema
+      // requires it, and relying on a reader to default a missing one is a
+      // liberty worth not needing in a document this service produced itself.
+      ' MustBePresent="' + (expression.mustBePresent ? 'true' : 'false') +
+      '"/>';
+  }
+  if (expression.kind === 'selector') {
+    log.debug('Leaving writeExpression(). AttributeSelector.');
+    return pad + '<AttributeSelector' +
+      attr('Category', expression.category) +
+      attr('Path', expression.path) +
+      attr('DataType', expression.dataType) +
+      attr('ContextSelectorId', expression.contextSelectorId) +
+      ' MustBePresent="' + (expression.mustBePresent ? 'true' : 'false') +
+      '"/>';
+  }
+  if (expression.kind === 'function') {
+    log.debug('Leaving writeExpression(). Function.');
+    return pad + '<Function' + attr('FunctionId', expression.functionId) +
+      '/>';
+  }
+  if (expression.kind === 'variableRef') {
+    log.debug('Leaving writeExpression(). VariableReference.');
+    return pad + '<VariableReference' +
+      attr('VariableId', expression.variableId) + '/>';
+  }
+  if (expression.kind === 'apply') {
+    const inner = (expression.args || []).map(function (argument) {
+      return writeExpression(argument, depth + 1);
+    }).join('\n');
+    log.debug('Leaving writeExpression(). Apply.');
+    return pad + '<Apply' + attr('FunctionId', expression.functionId) + '>' +
+      (inner ? '\n' + inner + '\n' + pad : '') + '</Apply>';
+  }
+  log.debug('Leaving writeExpression(). Unwritable.');
+  throw model.syntaxError('Cannot write an expression of kind "' +
+                          expression.kind + '".');
+}
+
+function writeTarget(target, depth) {
+  log.debug('Entering writeTarget().');
+  const pad = indent(depth);
+  // AN ABSENT TARGET AND AN EMPTY ONE MEAN THE SAME THING — match everything —
+  // and `<Target/>` is written for both, because the schema REQUIRES the
+  // element on a Rule and a Policy. Omitting it where the model holds null
+  // would produce a document this service's own reader accepts and somebody
+  // else's schema validator rejects, which is the worst of both.
+  if (!target || !target.anyOf || !target.anyOf.length) {
+    log.debug('Leaving writeTarget(). Empty.');
+    return pad + '<Target/>';
+  }
+  const body = target.anyOf.map(function (anyOf) {
+    const allOfs = anyOf.allOf.map(function (allOf) {
+      const matches = allOf.matches.map(function (match) {
+        return indent(depth + 3) + '<Match' +
+          attr('MatchId', match.matchId) + '>\n' +
+          writeExpression(match.value, depth + 4) + '\n' +
+          writeExpression(match.reference, depth + 4) + '\n' +
+          indent(depth + 3) + '</Match>';
+      }).join('\n');
+      return indent(depth + 2) + '<AllOf>\n' + matches + '\n' +
+        indent(depth + 2) + '</AllOf>';
+    }).join('\n');
+    return indent(depth + 1) + '<AnyOf>\n' + allOfs + '\n' +
+      indent(depth + 1) + '</AnyOf>';
+  }).join('\n');
+  log.debug('Leaving writeTarget(). ' + target.anyOf.length + ' AnyOf.');
+  return pad + '<Target>\n' + body + '\n' + pad + '</Target>';
+}
+
+function writeHolders(holders, depth, wrapper, item, idAttr, onAttr) {
+  if (!holders || !holders.length) {
+    return '';
+  }
+  const pad = indent(depth);
+  const body = holders.map(function (holder) {
+    const assignments = (holder.assignments || []).map(function (one) {
+      return indent(depth + 2) + '<AttributeAssignmentExpression' +
+        attr('AttributeId', one.attributeId) +
+        attr('Category', one.category) +
+        attr('Issuer', one.issuer) + '>\n' +
+        writeExpression(one.expression, depth + 3) + '\n' +
+        indent(depth + 2) + '</AttributeAssignmentExpression>';
+    }).join('\n');
+    return indent(depth + 1) + '<' + item + attr(idAttr, holder.id) +
+      attr(onAttr, holder.on) + '>' +
+      (assignments ? '\n' + assignments + '\n' + indent(depth + 1) : '') +
+      '</' + item + '>';
+  }).join('\n');
+  return '\n' + pad + '<' + wrapper + '>\n' + body + '\n' + pad + '</' +
+    wrapper + '>';
+}
+
+function writeRule(rule, depth) {
+  log.debug('Entering writeRule(). id=' + rule.id);
+  const pad = indent(depth);
+  let body = '';
+  if (rule.description) {
+    body += '\n' + indent(depth + 1) + '<Description>' +
+      xmlEscape(rule.description) + '</Description>';
+  }
+  body += '\n' + writeTarget(rule.target, depth + 1);
+  if (rule.condition) {
+    body += '\n' + indent(depth + 1) + '<Condition>\n' +
+      writeExpression(rule.condition, depth + 2) + '\n' +
+      indent(depth + 1) + '</Condition>';
+  }
+  body += writeHolders(rule.obligations, depth + 1, 'ObligationExpressions',
+                       'ObligationExpression', 'ObligationId', 'FulfillOn');
+  body += writeHolders(rule.advice, depth + 1, 'AdviceExpressions',
+                       'AdviceExpression', 'AdviceId', 'AppliesTo');
+  log.debug('Leaving writeRule().');
+  return pad + '<Rule' + attr('RuleId', rule.id) +
+    attr('Effect', rule.effect) + '>' + body + '\n' + pad + '</Rule>';
+}
+
+function writePolicyBody(policy, depth, withNamespace) {
+  const pad = indent(depth);
+  let body = '';
+  if (policy.description) {
+    body += '\n' + indent(depth + 1) + '<Description>' +
+      xmlEscape(policy.description) + '</Description>';
+  }
+  body += '\n' + writeTarget(policy.target, depth + 1);
+  Object.keys(policy.variables || {}).forEach(function (id) {
+    body += '\n' + indent(depth + 1) + '<VariableDefinition' +
+      attr('VariableId', id) + '>\n' +
+      writeExpression(policy.variables[id], depth + 2) + '\n' +
+      indent(depth + 1) + '</VariableDefinition>';
+  });
+  (policy.rules || []).forEach(function (rule) {
+    body += '\n' + writeRule(rule, depth + 1);
+  });
+  body += writeHolders(policy.obligations, depth + 1, 'ObligationExpressions',
+                       'ObligationExpression', 'ObligationId', 'FulfillOn');
+  body += writeHolders(policy.advice, depth + 1, 'AdviceExpressions',
+                       'AdviceExpression', 'AdviceId', 'AppliesTo');
+  return pad + '<Policy' +
+    (withNamespace ? ' xmlns="' + model.NS_XACML + '"' : '') +
+    attr('PolicyId', policy.id) +
+    attr('Version', policy.version || '1.0') +
+    attr('RuleCombiningAlgId', policy.combiningAlgId) + '>' +
+    body + '\n' + pad + '</Policy>';
+}
+
+// THE NAMESPACE IS DECLARED ON THE ROOT AND NOWHERE ELSE, which is why the
+// nested calls pass `false`. A `xmlns` repeated on every descendant is legal
+// and is noise; more to the point, a nested Policy carrying its own default
+// namespace declaration reads as though it might be a DIFFERENT namespace, and
+// somebody will eventually change one of them.
+function writePolicySetBody(policySet, depth, withNamespace) {
+  const pad = indent(depth);
+  let body = '';
+  if (policySet.description) {
+    body += '\n' + indent(depth + 1) + '<Description>' +
+      xmlEscape(policySet.description) + '</Description>';
+  }
+  body += '\n' + writeTarget(policySet.target, depth + 1);
+  (policySet.children || []).forEach(function (child) {
+    if (child.kind === 'Policy') {
+      body += '\n' + writePolicyBody(child, depth + 1, false);
+    } else if (child.kind === 'PolicySet') {
+      body += '\n' + writePolicySetBody(child, depth + 1, false);
+    } else if (child.kind === 'PolicyIdReference' ||
+               child.kind === 'PolicySetIdReference') {
+      body += '\n' + indent(depth + 1) + '<' + child.kind +
+        attr('Version', child.version) + '>' + xmlEscape(child.ref) +
+        '</' + child.kind + '>';
+    }
+  });
+  body += writeHolders(policySet.obligations, depth + 1,
+                       'ObligationExpressions', 'ObligationExpression',
+                       'ObligationId', 'FulfillOn');
+  body += writeHolders(policySet.advice, depth + 1, 'AdviceExpressions',
+                       'AdviceExpression', 'AdviceId', 'AppliesTo');
+  return pad + '<PolicySet' +
+    (withNamespace ? ' xmlns="' + model.NS_XACML + '"' : '') +
+    attr('PolicySetId', policySet.id) +
+    attr('Version', policySet.version || '1.0') +
+    attr('PolicyCombiningAlgId', policySet.combiningAlgId) + '>' +
+    body + '\n' + pad + '</PolicySet>';
+}
+
+function writePolicy(policy) {
+  log.debug('Entering writePolicy(). id=' + policy.id);
+  const body = policy.kind === 'PolicySet'
+    ? writePolicySetBody(policy, 0, true)
+    : writePolicyBody(policy, 0, true);
+  log.debug('Leaving writePolicy().');
+  return '<?xml version="1.0" encoding="UTF-8"?>\n' + body + '\n';
+}
+
 module.exports = {
   parsePolicy: parsePolicy,
+  writePolicy: writePolicy,
   parseRequest: parseRequest,
   parseResponse: parseResponse,
   parseDocument: parseDocument,

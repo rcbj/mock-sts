@@ -1,13 +1,13 @@
 # xacml/ — the XACML 3.0 engine
 
-**Phases one and two are here: the ENGINE, the STORE, the PIP and a service
-surface.** `server.js` requires `xacml.js` at 23c, four routes answer under
-`/xacml`, policies live in `ou=policies` in the embedded directory, and an
-embedded PEP enforces a decision at `/xacml/protected`.
+**Phases one to three are here: the ENGINE, the STORE, the PIP, a service
+surface and the PAP.** `server.js` requires `xacml.js` at 23c, four routes
+answer under `/xacml`, four console pages under `/admin/xacml`, twelve
+operations under `/admin-api/xacml`, and policies live in `ou=policies` in the
+embedded directory.
 
-**What is NOT here is the PAP** — no console page, no `/admin-api` operation,
-and therefore no way to author a policy through this service. A seeded policy
-makes the surface demonstrable in the meantime. See *What is not here yet*.
+**What is NOT here is ALFA and the remote PEP** — phases four and five. See
+*What is not here yet*.
 
 ## What is here
 
@@ -22,13 +22,55 @@ makes the surface demonstrable in the meantime. See *What is not here yet*.
 | `xacml_json.js` | The JSON Profile 1.1 request and response — what anybody actually sends. The second reader. **No I/O.** |
 | `xacml_store.js` | The repository. Owns the policy schema; `ou=policies` IS the store. |
 | `xacml_pip.js` | Attribute resolution off the subject's own directory entry. |
-| `xacml.js` | **The only file here that registers a route.** Four of them, plus the embedded PEP. |
+| `xacml.js` | The protocol routes: four under `/xacml`, plus the embedded PEP. |
+| `xacml_templates.js` | RBAC and ABAC starting points. **Adding one is a row in `TEMPLATES` and nothing else.** No DOM. |
+| `xacml_editor.js` | The editor's GRAMMAR: what may be added where, and how one edit is applied. **No DOM** — which is what lets the menus be asserted in node. |
+| `xacml_admin.js` | The four `/admin/xacml` console pages and their actions. |
 | `conformance/` | The vendored OASIS suite. `PROVENANCE.md` is the argument, `MANIFEST.js` the drift check. **Not edited here, ever.** |
 
-Two tests, both in-process, no port, no container:
+Three tests, all in-process, no port, no container:
 `tests/xacml_conformance.js` (the engine, against 455 cases somebody else
-wrote) and `tests/xacml_service.js` (the store, the PIP, the JSON Profile and
-the PEP — the half that is not XACML but is how this service wires it up).
+wrote), `tests/xacml_service.js` (the store, the PIP, the JSON Profile and the
+PEP) and `tests/xacml_pap.js` (the templates, the editor grammar and the XML
+writer).
+
+## The console
+
+```
+/admin/xacml            settings, and what the PDP decides with
+/admin/xacml/policies   the repository; enable, disable, root, delete,
+                        create from an RBAC or ABAC template
+/admin/xacml/editor     the guided editor
+/admin/xacml/decide     ask the PDP and see what the PEP would do
+```
+
+**The editor has no JavaScript, and that is argued rather than assumed.** This
+console is `script-src 'none'` and `admin-ui/CLAUDE.md` refuses a script nine
+times over under a rule that the argument must be *made* each time — the test
+being whether the page CANNOT work without one. An editor can. So every
+"pick the next valid element" dropdown is a `<select>` whose options were
+computed on the server by `xacml_editor.js`, and choosing one is a form POST.
+
+*What it costs*: a round trip per element — a five-rule policy built by hand is
+perhaps forty POSTs. The page says so; the templates are the answer.
+
+*What it buys*: the menu is computed by the same process that will validate the
+policy, against the real function library, so **the editor cannot offer
+something the validator will then refuse**. A browser-side editor would have
+needed a second copy of the grammar shipped to the page, and a second copy of a
+grammar is what this whole directory is arranged to avoid.
+
+**The editor holds no session state.** The draft IS the stored policy: every
+edit loads the document, applies one change, serializes and writes back. There
+is nothing to lose when a browser closes and no second copy that could disagree
+with the stored one. The cost is that editing is LIVE, so the page says so and
+puts the disable control one click away.
+
+**Every element arrives complete and valid** — a new rule has a Target and an
+Effect, a new Match has a function, a value and an attribute — because an
+editor that produced half-built elements would hold a document that cannot be
+saved, and a document that cannot be saved cannot be evaluated, which is when
+you most want to look at it.
 
 ## The surface
 
@@ -197,35 +239,46 @@ where somebody has to remember to wrap one.
 
 ## What is not here yet
 
-Phases three to five. None is started.
+Phases four and five. Neither is started.
 
-**The first thing phase three must do** is a `SETTING_HOMES` row in
-`admin-ui/admin.js`. The XACML settings group has no console page, so the
-service warns at every boot that those four settings are *editable nowhere* —
-which is true. They can be set by environment variable and in the appconfig
-file; they cannot be changed while running. The warning names the fix.
+* **ALFA** — `xacml_alfa.js`, a parser and an emitter over the same model, and
+  a third tab on the editor. The XML writer landed in phase three, so ALFA in →
+  model → XML out is now the whole of what an ALFA compiler is here. ALFA is an
+  OASIS **Committee Specification Draft** rather than a ratified standard, and
+  the page will say so — the way `docs/xmldsig-pqc.md` labels every draft URI.
+* **The remote PEP** — `xacml-pep/`, its own container, registering over mutual
+  TLS **on the main port**, which already asks for a client certificate
+  (`server.js`'s `requestCert: true`), so no new listener is needed. The
+  certificate maps to a directory entry through `ldap_server.js`'s existing
+  `certificatePlan()` rather than a second mapping. It carries its own copy of
+  the engine, because pushing *policies* to a PEP only makes sense if it
+  evaluates them — otherwise you would push decisions.
+* **`AttributeSelector` and the XPath functions.** A policy using one is
+  Indeterminate rather than silently empty, which is the deliberate choice: an
+  empty bag is a perfectly ordinary result a policy may be written to expect,
+  so returning one would make an unimplemented feature look like a decision.
 
-* **The PAP.** A `Protocols → XACML` group in `admin-ui/admin.js`'s `SECTIONS`,
-  with a guided policy editor. **It will have no JavaScript**: this console is
-  `script-src 'none'` and `admin-ui/CLAUDE.md` refuses a script nine times over,
-  so the "pick the next valid element" dropdowns are a `<select>` per node whose
-  options are computed on the server and whose choice is a form POST.
-  `xacml_validate.js`'s `problemsIn()` is what renders beside the form.
-* **ALFA.** `xacml_alfa.js`, a parser and an emitter over the same model.
-* **The remote PEP.** `xacml-pep/`, its own container, registering over mutual
-  TLS on the main port — which already asks for a client certificate
-  (`server.js`'s `requestCert: true`), so no new listener is needed — and
-  mapping the certificate through `ldap_server.js`'s existing
-  `certificatePlan()` rather than a second mapping.
+## What phase three actually cost outside this directory
 
-**When the routes land, the checklist is `ssf/CLAUDE.md`'s** *WHAT ADDING A
-PROTOCOL FAMILY COST HERE*. The rows that get forgotten are not the protocol's
-own endpoints — they are the console and `/admin-api` ones, and
-`tests/vendored/sts_metadata.js` is what catches them.
+For the next person adding a console surface, following the shape
+`ssf/CLAUDE.md` records:
 
-On the require order: this directory will sit at **23c**, after
-`ldap/ldap_server` (21) for the directory and after `admin-ui/admin` (18) for
-the shell, and it will fill a slot on `admin.js` rather than being required by
-`mgmt-api/admin_api.js` (19) — a require from 19 to 23c would drag every
-`/xacml` route ahead of the management API's own. That is rule 3e's test,
-answered in both directions the way SSF answered it.
+* `common/config.js` — the `xacml.pepBias` row needed **`enumValues`**, not
+  `values`. The wrong key name is not a startup error: the setting loads, the
+  service runs, and the settings form throws a 500 on the one page that draws
+  it.
+* `admin-ui/admin.js` — the **tenth slot** `setXacmlPages()`, a `SETTING_HOMES`
+  row (its absence is what the boot warning was about), an `XACML` group of
+  four in `SECTIONS` with a `blurb` each, and three helpers exported that had
+  been private: `configFormsFor`, `configSettingsJson` and `respondToAction`.
+* `mgmt-api/admin_api.js` — three GETs and a POST with nine documented actions;
+  `mgmt-api/admin_api_spec.js` — `Xacml`, `XacmlPolicies` and `XacmlEditor`.
+* `sts_metadata.js` — **eight** `ENDPOINTS` rows, four of them console pages
+  and four management API, which are again the ones a checklist forgets.
+
+**The one thing that is not a file**: `protocolSettingsJsonFor()` is NOT the
+JSON counterpart of `configFormsFor()`. It is keyed by admin.js's own
+`PROTOCOL_SETTINGS_PAGES` table and **throws** for a path that table does not
+carry — correct for the pages that file generates, and a 500 for one drawn
+anywhere else. `configSettingsJson()` is the right function and is now
+exported beside the renderer it belongs to.

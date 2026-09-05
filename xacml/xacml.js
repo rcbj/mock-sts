@@ -58,6 +58,14 @@ const pdp = require('./xacml_pdp');
 const store = require('./xacml_store');
 const pip = require('./xacml_pip');
 const validate = require('./xacml_validate');
+// THE CONSOLE PAGES. Required from here rather than from `server.js` so that
+// the require order has ONE line for this family: this module is 23c and the
+// pages are part of it. `xacml_admin.js` requires `admin-ui/admin` (18) for
+// the shell, which is already loaded by the time anything here runs — and it
+// requires THIS module lazily, inside the one function that needs it, because
+// a require at its top would close a cycle and node answers a cycle with a
+// half-initialised module rather than with an error.
+require('./xacml_admin');
 
 function enabled() {
   return config.value('xacml.enabled') !== false;

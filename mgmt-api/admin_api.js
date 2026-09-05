@@ -4394,6 +4394,159 @@ const ROUTES = [
   // `ssf/ssf_http.js` spends its header bounding — so the console has no
   // create form either, and the parity holds because there is no control to
   // mirror.
+  // ---------------------------------------------------------------------
+  // XACML. THREE READS AND ONE WRITE, and the write is the whole PAP: the
+  // console's two POST endpoints (`/admin/xacml/policies` and
+  // `/admin/xacml/editor`) are ONE action function here, because a caller
+  // should not have to work out which page owns "enable". The console keeps
+  // two because a form posts back to the page it came from.
+  //
+  // RULE 7 IS WHY THIS IS IN THE SAME COMMIT AS THE PAGES. Every control the
+  // console grows owes an operation here, and the one that is easiest to
+  // forget is not the protocol's own endpoint — it is exactly this.
+  { method: 'GET', path: BASE + '/xacml', tag: 'XACML',
+    operationId: 'getXacml',
+    summary: 'The Policy Decision Point: whether it is on, what it decides ' +
+             'with, and where the attributes come from',
+    description: 'Everything /admin/xacml draws, as JSON.\n\nTHIS IS THE ' +
+                 'ONLY FAMILY ON THIS SERVICE THAT ANSWERS A QUESTION ABOUT ' +
+                 'SOMEBODY ELSE\'S BOUNDARY. Every other protocol here ' +
+                 'authenticates or provisions a person; this one is handed a ' +
+                 'subject who was authenticated somewhere else and asked ' +
+                 'whether they may.\n\n`pepBias` is the embedded Policy ' +
+                 'ENFORCEMENT point\'s setting and not the PDP\'s. ' +
+                 'Deny-biased and permit-biased agree on every Permit and ' +
+                 'every Deny and differ on Indeterminate and NotApplicable, ' +
+                 'which is exactly the case nobody tests.',
+    mirrors: 'GET /admin/xacml',
+    responseDescription: 'The PDP, its repository and its PIP.',
+    responseSchema: { $ref: '#/components/schemas/Xacml' },
+    handler: function (req, res) {
+      log.debug("Entering the management API XACML endpoint.");
+      sendJson(res, 200, admin.xacmlView(req));
+      log.debug("Leaving the management API XACML endpoint.");
+    } },
+
+  { method: 'GET', path: BASE + '/xacml/policies', tag: 'XACML',
+    operationId: 'getXacmlPolicies',
+    summary: 'The policy repository, with the type-check problems of each',
+    description: 'Everything /admin/xacml/policies draws.\n\nTHE STORE IS ' +
+                 '`ou=policies` IN THE EMBEDDED DIRECTORY — that container ' +
+                 'IS the repository rather than a copy of one, so an ' +
+                 '`ldapmodify` of `xacmlPolicyDocument` changes what the PDP ' +
+                 'decides on the next request.\n\nEXACTLY ONE POLICY IS THE ' +
+                 'ROOT. A PDP evaluates one document and reaches the rest ' +
+                 'through PolicyIdReference, so the root is where evaluation ' +
+                 'starts; a repository with none decides nothing and reports ' +
+                 '`root: null`.\n\n`templates` is what POST ' +
+                 '/admin-api/xacml/create-from-template will build, with the ' +
+                 'parameters each takes.',
+    mirrors: 'GET /admin/xacml/policies',
+    responseDescription: 'The policies, the root, and the templates.',
+    responseSchema: { $ref: '#/components/schemas/XacmlPolicies' },
+    handler: function (req, res) {
+      log.debug("Entering the management API XACML policies endpoint.");
+      sendJson(res, 200, admin.xacmlPoliciesView(req));
+      log.debug("Leaving the management API XACML policies endpoint.");
+    } },
+
+  { method: 'GET', path: BASE + '/xacml/editor', tag: 'XACML',
+    operationId: 'getXacmlEditor',
+    summary: 'One policy as an editable tree, with what may legally be added ' +
+             'at each node',
+    description: 'Everything /admin/xacml/editor draws. `?policy=<name>` ' +
+                 'chooses one; without it, the root.\n\nEach node in `tree` ' +
+                 'carries `options.additions` — the elements XACML allows AT ' +
+                 'THAT POINT, computed against the real function library by ' +
+                 'the same code that validates the result. That is what ' +
+                 'makes this usable as an API and not only as a page: a ' +
+                 'caller can walk the tree, read the legal moves, and POST ' +
+                 'one, without a second copy of the grammar.',
+    mirrors: 'GET /admin/xacml/editor',
+    responseDescription: 'The policy as a tree of editable nodes.',
+    responseSchema: { $ref: '#/components/schemas/XacmlEditor' },
+    handler: function (req, res) {
+      log.debug("Entering the management API XACML editor endpoint.");
+      sendJson(res, 200, admin.xacmlEditorView(req));
+      log.debug("Leaving the management API XACML editor endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/xacml/:action', tag: 'XACML',
+    mirrors: 'POST /admin/xacml/policies and POST /admin/xacml/editor',
+    handler: function (req, res) {
+      log.debug("Entering the management API XACML action endpoint.");
+      const body = parseBody(req);
+      const result = admin.xacmlAction(withAction(req, body));
+      sendJson(res, result.ok ? 200 : 400, result);
+      log.debug("Leaving the management API XACML action endpoint.");
+    },
+    actions: [
+      { action: 'create-from-template', operationId: 'createXacmlPolicy',
+        summary: 'Create a policy from a template',
+        description: 'A template is a working, valid, evaluable policy in a ' +
+                     'shape people actually write — the first twenty clicks ' +
+                     'of the editor already made. `template` names one (see ' +
+                     'GET /admin-api/xacml/policies), `name` names the ' +
+                     'directory entry, and each parameter is sent as ' +
+                     '`p_<name>`; anything omitted takes the template\'s own ' +
+                     'default, so a call with only `template` produces the ' +
+                     'documented example.\n\nA template BUILDS THE MODEL and ' +
+                     'the writer serializes it, rather than substituting ' +
+                     'into XML text — so a role called `a"b` cannot produce ' +
+                     'a document that will not parse.\n\nThe FIRST policy in ' +
+                     'an empty repository becomes the root, because a ' +
+                     'repository with a policy and no root decides nothing.' },
+      { action: 'enable', operationId: 'enableXacmlPolicy',
+        summary: 'Put a policy back into the decision',
+        description: 'Sets `xacmlEnabled` on its directory entry.' },
+      { action: 'disable', operationId: 'disableXacmlPolicy',
+        summary: 'Take a policy out of the decision without deleting it',
+        description: 'The point of having this separate from delete: a ' +
+                     'disabled policy is still there to be read, edited and ' +
+                     'put back, which is what you want while working on it — ' +
+                     'the editor is LIVE, so a policy being edited is a ' +
+                     'policy the PDP is deciding with unless it is off.' },
+      { action: 'set-root', operationId: 'setXacmlRootPolicy',
+        summary: 'Choose the policy the PDP starts from',
+        description: 'Clears the flag on the incumbent first, because the ' +
+                     'store refuses a second root. Done in that order ' +
+                     'deliberately: a failure then leaves the repository ' +
+                     'with NO root rather than with two, which is the ' +
+                     'recoverable one of the two bad states.' },
+      { action: 'delete', operationId: 'deleteXacmlPolicy',
+        summary: 'Remove a policy from the repository',
+        description: 'Deleting the ROOT leaves the repository deciding ' +
+                     'nothing, and the reply says so rather than letting it ' +
+                     'be discovered by a Deny.' },
+      { action: 'edit-policy', operationId: 'editXacmlPolicy',
+        summary: 'Change a policy\'s id, description or combining algorithm',
+        description: 'The combining algorithm is the single most ' +
+                     'consequential line in a policy, which is why it is ' +
+                     'here rather than only in the document.' },
+      { action: 'add-rule', operationId: 'addXacmlRule',
+        summary: 'Add a rule to a policy',
+        description: 'Every element this editor adds arrives COMPLETE AND ' +
+                     'VALID — a new rule has a Target, an Effect and an id. ' +
+                     'An editor that produced half-built elements would hold ' +
+                     'a document that could not be saved, and a document ' +
+                     'that cannot be saved cannot be evaluated, which is ' +
+                     'when you most want to look at it.' },
+      { action: 'edit-match', operationId: 'editXacmlMatch',
+        summary: 'Change a Match\'s function, value or attribute',
+        description: 'THE DATATYPE FOLLOWS THE FUNCTION. A Match whose ' +
+                     'literal is a string and whose designator is an integer ' +
+                     'does not type-check, so choosing the function sets ' +
+                     'both sides rather than letting them be picked ' +
+                     'independently and refused later.' },
+      { action: 'remove', operationId: 'removeXacmlNode',
+        summary: 'Remove any node from a policy',
+        description: 'By `path`, which is the address GET ' +
+                     '/admin-api/xacml/editor gave you. A path is only valid ' +
+                     'against the document it was read from: remove rule 0 ' +
+                     'and every path naming rule 1 now means rule 0. Re-read ' +
+                     'the tree after each edit rather than reusing paths.' }
+    ] },
+
   { method: 'GET', path: BASE + '/ssf', tag: 'Shared Signals',
     operationId: 'getSsf',
     summary: 'The Shared Signals transmitter: its streams, their subjects, ' +
