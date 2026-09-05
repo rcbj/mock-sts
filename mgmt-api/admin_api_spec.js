@@ -2561,6 +2561,142 @@ const SCHEMAS = {
       }) }
     }),
 
+  XacmlDecision: openObject(
+    'One question put to the PDP, and what the embedded PEP would do with ' +
+    'the answer. TWO DIFFERENT ANSWERS, both here on purpose — the PDP ' +
+    'returns one of four decisions and the PEP turns that into allowed or ' +
+    'refused using its bias and the obligation rule, and a policy that "is ' +
+    'not working" is nearly always one of those two being mistaken for the ' +
+    'other.',
+    {
+      asked: { type: 'boolean',
+        description: 'False when no subject and no resource were given. The ' +
+                     'endpoint does not decide about nobody.' },
+      subject: { type: 'string' },
+      action: { type: 'string' },
+      resource: { type: ['string', 'null'] },
+      decision: { type: 'string',
+        description: 'Permit, Deny, NotApplicable or Indeterminate — the ' +
+                     'four EXTERNAL values. The three Indeterminate ' +
+                     'variants the combining algorithms need are folded ' +
+                     'down once, inside the engine.' },
+      status: { type: 'object', additionalProperties: true },
+      obligations: { type: 'array', items: { type: 'string' } },
+      advice: { type: 'array', items: { type: 'string' } },
+      applicablePolicies: { type: 'array', items: { type: 'string' } },
+      enforcement: openObject('What the EMBEDDED PEP would do.', {
+        allowed: { type: 'boolean' },
+        bias: { type: 'string',
+          description: 'xacml.pepBias. The two biases agree on every Permit ' +
+                       'and every Deny and differ on Indeterminate and ' +
+                       'NotApplicable, which is the case nobody tests.' },
+        why: { type: 'string',
+          description: 'Including the section 7.2 case: a Permit carrying ' +
+                       'an obligation this PEP cannot discharge is a ' +
+                       'REFUSAL, because allowing it and dropping the ' +
+                       'obligation would enforce half a policy and report ' +
+                       'success.' }
+      })
+    }),
+
+  XacmlPeps: openObject(
+    'The REMOTE Policy Enforcement Points that pull this repository and ' +
+    'enforce it in another process. The question this answers is not ' +
+    'whether they are up but whether everybody is deciding with the SAME ' +
+    'policy — `current` is a comparison this service performs, not a claim ' +
+    'the PEP makes about itself.',
+    {
+      enabled: { type: 'boolean',
+        description: 'xacml.remotePeps. When false the three endpoints ' +
+                     'under /xacml/pep answer 501 and the register below is ' +
+                     'untouched.' },
+      syncToken: { type: 'string',
+        description: 'A digest over the documents of every ENABLED policy ' +
+                     'plus which one is the root — that is, over exactly ' +
+                     'the bytes GET /xacml/pep/policies would answer with. ' +
+                     'So a policy edited and edited back does NOT invalidate ' +
+                     'anybody\'s copy, and DISABLING one does.' },
+      staleAfterS: { type: 'integer',
+        description: 'xacml.pepStaleAfterS. How long since the last ' +
+                     'heartbeat before `stale` is true. It changes nothing ' +
+                     'this service does, deliberately: a PEP whose sync has ' +
+                     'stopped is still enforcing whatever it last pulled.' },
+      requiresCertificate: { type: 'boolean',
+        description: 'xacml.pepRequireCertificate. Whether REGISTERING ' +
+                     'needs a client certificate. Pulling policy never ' +
+                     'does.' },
+      current: { type: 'integer',
+        description: 'How many registered PEPs hold the current token.' },
+      stale: { type: 'integer' },
+      notify: openObject('The nudge, and its four bounds.', {
+        on: { type: 'boolean' },
+        allowedHosts: { type: 'array', items: { type: 'string' },
+          description: 'EMPTY MEANS ANY, which is the default.' },
+        allowInsecure: { type: 'boolean' },
+        timeoutMs: { type: 'integer' }
+      }),
+      peps: { type: 'array', items: openObject('One registered PEP.', {
+        name: { type: 'string',
+          description: 'Named from its CLIENT CERTIFICATE when it has one, ' +
+                       'through the same certificatePlan() naming every ' +
+                       'other certificate-borne identity here goes through. ' +
+                       'So one certificate is one row and a PEP that ' +
+                       'restarts updates rather than duplicating.' },
+        dn: { type: 'string' },
+        identity: { type: 'string',
+          description: 'The DN that naming rule produces. NO ENTRY IS ' +
+                       'CREATED THERE — a PEP is a component and ou=users ' +
+                       'counts people.' },
+        certificateSubject: { type: 'string' },
+        thumbprint: { type: 'string',
+          description: 'RFC 8705 x5t#S256, through the same function the ' +
+                       'token endpoint binds a certificate-bound token ' +
+                       'with.' },
+        authenticated: { type: 'boolean',
+          description: 'False when it registered with no client certificate ' +
+                       'because xacml.pepRequireCertificate was off. Such a ' +
+                       'row proved nothing and says so rather than looking ' +
+                       'like one that did.' },
+        notifyUrl: { type: 'string' },
+        notifyProblem: { type: ['string', 'null'],
+          description: 'Why this URL would be refused, computed on the ask ' +
+                       'rather than remembered — so changing the allowlist ' +
+                       'changes what is said about a PEP registered an hour ' +
+                       'ago.' },
+        lastNotify: { type: 'string',
+          description: 'What happened to the last nudge. THE ONLY PLACE A ' +
+                       'FAILED NUDGE IS RECORDED: it is invisible from the ' +
+                       'receiving end by definition.' },
+        bias: { type: 'string',
+          description: 'REPORTED BY THE PEP, never set from here. ' +
+                       'xacml.pepBias governs the EMBEDDED PEP at ' +
+                       '/xacml/protected and nothing else.' },
+        resource: { type: 'string' },
+        version: { type: 'string' },
+        description: { type: 'string' },
+        enabled: { type: 'boolean',
+          description: 'Whether this service NUDGES it. Not whether it is ' +
+                       'enforcing — nothing here can answer that.' },
+        registeredAt: { type: 'string' },
+        lastSeen: { type: 'string' },
+        syncToken: { type: 'string' },
+        policyCount: { type: 'integer' },
+        decisions: { type: 'integer',
+          description: 'The PEP\'s own cumulative count, in its process. A ' +
+                       'PEP that restarts makes this go down, which is ' +
+                       'honest.' },
+        allowed: { type: 'integer' },
+        refused: { type: 'integer' },
+        undischargeable: { type: 'integer',
+          description: 'Refusals that were a Permit carrying an obligation ' +
+                       'the PEP could not discharge (section 7.2) — the one ' +
+                       'enforcement outcome that looks like a bug from the ' +
+                       'client side and is the specification working.' },
+        current: { type: 'boolean' },
+        stale: { type: 'boolean' }
+      }) }
+    }),
+
   Ssf: openObject(
     'The Shared Signals transmitter: the streams it has agreed, who each one ' +
     'is about, what is queued for it, what a receiver refused, and what has ' +

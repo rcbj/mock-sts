@@ -817,6 +817,15 @@ const SECTIONS = [
                    'offer something that will then be refused. There is no ' +
                    'draft state: the policy you are editing is the policy ' +
                    'the PDP is using.' },
+          { path: '/admin/xacml/peps', label: 'Remote PEPs',
+            blurb: 'The Policy Enforcement Points in OTHER processes that ' +
+                   'pull this repository and enforce it there. They hold ' +
+                   'their own copy of the engine, so the question this page ' +
+                   'answers is not whether they are up but whether ' +
+                   'everybody is deciding with the SAME policy &mdash; ' +
+                   'which is the question a distributed authorization ' +
+                   'deployment actually has and the one nothing else here ' +
+                   'can answer. Nothing on it reaches into another process.' },
           { path: '/admin/xacml/decide', label: 'Try a decision',
             blurb: 'Ask the PDP about somebody and see the answer, which ' +
                    'policies applied, what the PIP found on their directory ' +
@@ -12491,18 +12500,26 @@ function setLogoutReader(reader) {
 // spiffe. So the slot is the only arrangement left, and it is the same one SSF
 // and the directory pages already take.
 //
-// IT CARRIES FOUR FUNCTIONS AND IS VALIDATED WHOLE, for `setLogoutReader()`'s
+// IT CARRIES SIX FUNCTIONS AND IS VALIDATED WHOLE, for `setLogoutReader()`'s
 // reason: a filler that installed the views without the action would leave
 // `/admin-api` able to LIST policies and unable to change any of them, which
-// reads as a management API that is working and is not.
+// reads as a management API that is working and is not. It was four until
+// phase five, which added TWO — `peps` for the remote PEP register, and
+// `decide`, which `/admin/xacml/decide` had needed since phase three and had
+// silently gone without (rule 7; `tests/vendored/admin_api.js` reads the
+// console's OWN page list rather than a list in the test, which is why the
+// omission was catchable at all). Both went into THIS set rather than into
+// slots of their own because it is the same module filling it and a second
+// slot would have been a second indirection for no second reason (rule 3e).
 //
-// `actionNames` is the fourth and is not decoration. The refusal sentence for
+// `actionNames` is the seventh and is not decoration. The refusal sentence for
 // an unknown action names every action and counts them, and that sentence is
 // READ by `tests/vendored/admin_api.js` — so the API has to be able to ask the
 // module what its actions are rather than keeping a second list that could
 // disagree.
 // ---------------------------------------------------------------------------
-const XACML_PAGE_PARTS = ['overview', 'policies', 'editor', 'action'];
+const XACML_PAGE_PARTS = ['overview', 'policies', 'editor', 'peps', 'decide',
+                          'action'];
 
 let xacmlPages = null;
 
@@ -12512,7 +12529,7 @@ function setXacmlPages(parts) {
   });
   if (!complete) {
     log.warn('admin: a set of XACML page views was offered that does not ' +
-             'carry all four of ' + XACML_PAGE_PARTS.join(', ') + '. It is ' +
+             'carry all six of ' + XACML_PAGE_PARTS.join(', ') + '. It is ' +
              'refused whole — a partial set would leave /admin-api able to ' +
              'read the policy repository and unable to change it, which ' +
              'reads as a management API that is working and is not.');
@@ -12552,6 +12569,43 @@ function xacmlEditorView(req) {
   return json;
 }
 
+function xacmlPepsView(req) {
+  log.debug('Entering xacmlPepsView().');
+  const json = xacmlPages ? xacmlPages.peps(req) : noXacml();
+  log.debug('Leaving xacmlPepsView().');
+  return json;
+}
+
+function xacmlDecideView(req) {
+  log.debug('Entering xacmlDecideView().');
+  const json = xacmlPages ? xacmlPages.decide(req.query || {}) : noXacml();
+  log.debug('Leaving xacmlDecideView().');
+  return json;
+}
+
+// ---------------------------------------------------------------------------
+// THE CONSOLE SHAPE AND THE API SHAPE ARE NOT THE SAME, AND THIS IS THE
+// BOUNDARY BETWEEN THEM.
+//
+// `xacml_admin.js`'s action functions answer `{ ok, why }` because that is what
+// `respondToAction()` draws on a console page. **EVERY OTHER ACTION RESOURCE ON
+// `/admin-api` ANSWERS `{ ok, errors: [...] }`** — ssf, permissions, realms,
+// spiffe — and `tests/vendored/sts_admin_api_operations.js` reads that array on
+// every one of them: it walks every documented POST resource, sends an unknown
+// action, and requires the refusal SENTENCE to name the actions, because
+// `admin_api.js`'s parity check reads that same sentence to find out what
+// actions a resource has. A resource answering `why` is invisible to both.
+//
+// So the conversion happens HERE, at the one function the management API calls
+// and the console does not — the console's own POST handlers call
+// `combinedAction()` directly. `why` is kept BESIDE `errors` rather than being
+// replaced, because a caller reading it is reading something true and a rename
+// would break it for nothing.
+//
+// It went unnoticed from phase three until phase five for the reason three
+// other XACML defects did: that job is this repository's OWN and had not been
+// run against the branch.
+// ---------------------------------------------------------------------------
 function xacmlAction(body) {
   log.debug('Entering xacmlAction(). action=' + (body || {}).action);
   if (!xacmlPages) {
@@ -12559,6 +12613,10 @@ function xacmlAction(body) {
     return { ok: false, errors: [noXacml().message] };
   }
   const result = xacmlPages.action(body);
+  if (!result.ok && !result.errors && result.why) {
+    log.debug('Leaving xacmlAction(). Refused.');
+    return Object.assign({}, result, { errors: [result.why] });
+  }
   log.debug('Leaving xacmlAction(). ok=' + result.ok);
   return result;
 }
@@ -28192,6 +28250,8 @@ module.exports = {
   xacmlView: xacmlView,
   xacmlPoliciesView: xacmlPoliciesView,
   xacmlEditorView: xacmlEditorView,
+  xacmlPepsView: xacmlPepsView,
+  xacmlDecideView: xacmlDecideView,
   xacmlAction: xacmlAction,
   xacmlActionNames: xacmlActionNames,
   // The JSON counterpart of the block above, so that a page drawn

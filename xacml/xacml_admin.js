@@ -73,6 +73,8 @@ const templates = require('./xacml_templates');
 const validate = require('./xacml_validate');
 const alfa = require('./xacml_alfa');
 const pip = require('./xacml_pip');
+const peps = require('./xacml_pep_registry');
+const pepHttp = require('./xacml_pep_http');
 
 const esc = admin.esc;
 
@@ -316,6 +318,272 @@ app.get('/admin/xacml/policies', function (req, res) {
   admin.respond(req, res, json, 'XACML policies', '/admin/xacml/policies',
                 body, '/admin/xacml');
   log.debug('Leaving the admin XACML policies page.');
+});
+
+// ---------------------------------------------------------------------------
+// /admin/xacml/peps — THE REMOTE ENFORCEMENT POINTS (phase five).
+//
+// A LIST AND THREE CONTROLS, and it is worth saying what it is NOT before
+// what it is: it is not a control panel for those processes. Nothing on this
+// page reaches into another process. Disabling a PEP here stops this service
+// NUDGING it and takes it off the distribution the console reports; it does
+// not stop it enforcing, because a remote PEP holds its own copy of the engine
+// and its own copy of the policy and will go on deciding with them. The page
+// says that out loud on every disabled row, because a control labelled
+// "disable" that leaves the thing running is the single most misleading thing
+// a console can do.
+//
+// WHAT IT IS FOR is the question a distributed authorization deployment
+// actually has, which is not "is the PDP up" but **"is everybody deciding with
+// the same policy"**. Three columns answer it: whether the PEP is CURRENT (a
+// comparison this service performs between the sync token it holds and the one
+// the repository has now), whether it is STALE (nothing heard for
+// `xacml.pepStaleAfterS`), and what happened to the last nudge. A PEP that is
+// stale AND current is fine and idle; one that is fresh and not current is
+// mid-pull; one that is stale and not current is the state worth seeing, and
+// it is invisible from every other page in this console.
+// ---------------------------------------------------------------------------
+function pepsJson() {
+  log.debug('Entering pepsJson().');
+  const rows = peps.all().map(function (row) {
+    const view = Object.assign({}, row);
+    // THE NOTIFY URL'S PROBLEM IS COMPUTED RATHER THAN REMEMBERED, so that
+    // changing `xacml.pepNotifyAllowedHosts` changes what this page says
+    // about a PEP registered an hour ago. A stored verdict would have been
+    // right when it was written and wrong from then on.
+    view.notifyProblem = pepHttp.urlProblem(row.notifyUrl);
+    return view;
+  });
+  const json = {
+    enabled: config.value('xacml.remotePeps') !== false,
+    syncToken: peps.syncToken(),
+    staleAfterS: peps.staleAfterS(),
+    requiresCertificate:
+      config.value('xacml.pepRequireCertificate') !== false,
+    notify: {
+      on: pepHttp.notifyAllowed(),
+      allowedHosts: pepHttp.allowedHosts(),
+      allowInsecure: pepHttp.allowInsecure(),
+      timeoutMs: pepHttp.timeoutMs()
+    },
+    peps: rows,
+    current: rows.filter(function (row) {
+      return row.current;
+    }).length,
+    stale: rows.filter(function (row) {
+      return row.stale;
+    }).length
+  };
+  log.debug('Leaving pepsJson(). ' + rows.length + ' registered PEP(s).');
+  return json;
+}
+
+app.get('/admin/xacml/peps', function (req, res) {
+  log.debug('Entering the admin XACML remote PEPs page.');
+  const json = pepsJson();
+  const writable = admin.mayWrite(req);
+
+  const rows = json.peps.map(function (row) {
+    const state = [];
+    state.push(row.current
+      ? '<span title="This PEP reported holding the repository digest this ' +
+        'service has now.">current</span>'
+      : '<strong title="The sync token this PEP last reported is not the ' +
+        'one the repository has now. It converges on its next poll.">not ' +
+        'current</strong>');
+    state.push(row.stale
+      ? '<strong title="Nothing has been heard from this PEP for longer ' +
+        'than xacml.pepStaleAfterS. It may still be enforcing — this ' +
+        'service cannot tell.">stale</strong>'
+      : 'live');
+    if (!row.enabled) {
+      state.push('<em>not nudged</em>');
+    }
+    // THE AUTHENTICATION IS ON THE ROW AND NOT IN A FOOTNOTE. A registration
+    // that proved nothing must not look the same as one that proved
+    // something, which is the whole reason the flag is stored rather than
+    // inferred from whether a subject happens to be present.
+    const who = row.authenticated
+      ? '<code>' + esc(row.certificateSubject) + '</code>'
+      : '<strong>unauthenticated</strong><div class="sub">Registered with ' +
+        'no client certificate, which xacml.pepRequireCertificate allowed. ' +
+        'Nothing about this row is proven.</div>';
+    const notify = row.notifyUrl
+      ? '<code>' + esc(row.notifyUrl) + '</code>' +
+        (row.notifyProblem
+          ? '<div class="sub" style="color:#b00">' + esc(row.notifyProblem) +
+            '</div>'
+          : '') +
+        (row.lastNotify
+          ? '<div class="sub">' + esc(row.lastNotify) + '</div>'
+          : '')
+      : '<span class="sub">none — never nudged, and it converges on its ' +
+        'own poll anyway</span>';
+    const actions = writable
+      ? '<form method="post" action="/admin/xacml/peps" ' +
+        'style="display:inline">' +
+        hidden('action', row.enabled ? 'disable-pep' : 'enable-pep') +
+        hidden('name', row.name) +
+        '<button type="submit">' + (row.enabled ? 'Stop nudging' : 'Nudge') +
+        '</button></form> ' +
+        '<form method="post" action="/admin/xacml/peps" ' +
+        'style="display:inline">' +
+        hidden('action', 'forget-pep') + hidden('name', row.name) +
+        '<button type="submit">Forget</button></form>'
+      : '<span class="sub">read-only</span>';
+    return '<tr><td><code>' + esc(row.name) + '</code>' +
+      (row.resource ? '<div class="sub">guards ' + esc(row.resource) +
+                      '</div>' : '') +
+      (row.version ? '<div class="sub">' + esc(row.version) + '</div>' : '') +
+      '</td><td>' + who + '</td><td>' + state.join(', ') +
+      '<div class="sub">last seen ' + esc(row.lastSeen || 'never') +
+      '</div></td><td>' + esc(row.bias || 'not reported') +
+      '</td><td>' + row.decisions + ' decided, ' + row.allowed +
+      ' allowed, ' + row.refused + ' refused' +
+      (row.undischargeable
+        ? '<div class="sub">' + row.undischargeable + ' of those refused for ' +
+          'an obligation it could not discharge</div>'
+        : '') +
+      '</td><td>' + notify + '</td><td>' + actions + '</td></tr>';
+  }).join('') ||
+    '<tr><td colspan="7">No remote Policy Enforcement Point has registered. ' +
+    'That does not mean none is running: registering is not what lets a PEP ' +
+    'enforce, and one that only ever pulls <code>/xacml/pep/policies</code> ' +
+    'works perfectly and never appears here.</td></tr>';
+
+  const body = admin.note(
+    '<p>A <strong>remote</strong> Policy Enforcement Point runs in another ' +
+    'process, holds its own copy of this engine, <strong>pulls</strong> the ' +
+    'enabled policies from <code>/xacml/pep/policies</code> and decides ' +
+    'locally. That is the point of having one: a PEP that asked this ' +
+    'service per request would be <code>POST /xacml/pdp</code> with a ' +
+    'network hop in front of every access decision.</p>' +
+    '<p><strong>The pull is the contract.</strong> When the repository ' +
+    'changes this service also POSTs a few bytes to each PEP that gave a ' +
+    'notify URL, saying only that something changed. That is an ' +
+    'optimisation over the polling interval and never a replacement for it ' +
+    '&mdash; a nudge that is refused, blocked or never delivered costs one ' +
+    'polling interval and nothing else, which is why the failure is worth ' +
+    'showing here and not worth alarming about.</p>' +
+    '<p><strong>Nothing on this page reaches into another process.</strong> ' +
+    '&ldquo;Stop nudging&rdquo; stops this service dialling that PEP; it ' +
+    'does not stop it enforcing, because it already holds the engine and ' +
+    'the policy. &ldquo;Forget&rdquo; removes the row. Neither takes a ' +
+    'running enforcement point out of service, and a console that implied ' +
+    'otherwise would be worse than one with no controls at all.</p>' +
+    '<p>Registering is <em>not</em> a permission. An unregistered PEP can ' +
+    'pull and enforce exactly as well; what a row buys is this page and an ' +
+    'address for the nudge.</p>',
+    'What this page is') +
+    '<p>The repository&rsquo;s sync token is <code>' +
+    esc(json.syncToken) + '</code>. ' + json.current + ' of ' +
+    json.peps.length + ' registered PEP(s) hold it; ' + json.stale +
+    ' have not been heard from for ' + json.staleAfterS + 's.</p>' +
+    (json.enabled ? ''
+      : '<p><strong>Remote Policy Enforcement Points are turned off</strong> ' +
+        '(<code>xacml.remotePeps</code>), so the three endpoints under ' +
+        '<code>/xacml/pep</code> answer 501 and nothing here is nudged. The ' +
+        'register below is untouched and comes back when it is turned on.</p>') +
+    (json.notify.on ? ''
+      : '<p><strong>The nudge is turned off</strong> ' +
+        '(<code>xacml.pepNotify</code>), so nothing below is dialled. Every ' +
+        'PEP still converges on its own poll &mdash; that is what makes this ' +
+        'safe to turn off.</p>') +
+    '<table><tr><th>PEP</th><th>Certificate</th><th>State</th>' +
+    '<th>Its bias</th><th>What it enforced</th><th>Notify</th>' +
+    '<th>Actions</th></tr>' + rows + '</table>' +
+    admin.note(
+      '<p>The decision counts are the PEP&rsquo;s own, reported by it, ' +
+      'cumulative in its process. This service did not see one of those ' +
+      'decisions &mdash; that is what a remote PEP is &mdash; so a PEP that ' +
+      'restarts makes its counts go down, which is honest rather than ' +
+      'broken.</p>' +
+      '<p>The bias column is likewise <em>reported</em>. ' +
+      '<code>xacml.pepBias</code> on the settings page governs the ' +
+      '<em>embedded</em> PEP at <code>/xacml/protected</code> and nothing ' +
+      'here; a control that appeared to set a remote PEP&rsquo;s bias would ' +
+      'silently do nothing.</p>',
+      'Where these numbers come from');
+
+  admin.respond(req, res, json, 'Remote PEPs', '/admin/xacml/peps',
+                body, '/admin/xacml');
+  log.debug('Leaving the admin XACML remote PEPs page.');
+});
+
+// ---------------------------------------------------------------------------
+// THE THREE ACTIONS BEHIND THAT PAGE.
+//
+// Named `-pep` rather than reusing `enable`, `disable` and `delete`, and that
+// is not decoration: `combinedAction()` dispatches on the action name across
+// all three of this family's POST endpoints, so a second `disable` would be
+// ambiguous between a policy and a PEP — and the ambiguity would resolve
+// silently in favour of whichever list was tested first.
+// ---------------------------------------------------------------------------
+const PEP_ACTIONS = ['enable-pep', 'disable-pep', 'forget-pep'];
+
+function pepAction(body) {
+  log.debug('Entering pepAction(). action=' + (body || {}).action);
+  const action = String((body || {}).action || '');
+  const name = String((body || {}).name || '');
+  if (!name) {
+    log.debug('Leaving pepAction(). No name.');
+    return { ok: false, why: 'Which registered PEP? Send `name`.' };
+  }
+  const row = peps.read(name);
+  if (!row) {
+    log.debug('Leaving pepAction(). Not registered.');
+    return { ok: false,
+             why: 'No Policy Enforcement Point is registered as "' + name +
+                  '". The register is ou=peps in the embedded directory and ' +
+                  'GET /admin-api/xacml/peps lists it.' };
+  }
+  if (action === 'forget-pep') {
+    const gone = peps.remove(name);
+    audit.audit({ action: 'xacml.pep.forget', actor: '', protocol: 'XACML',
+                  detail: 'Removed the register row for remote PEP "' +
+                          name + '".' });
+    log.debug('Leaving pepAction(). Removed.');
+    return gone
+      ? { ok: true,
+          what: '"' + name + '" is no longer in the register. IT MAY STILL ' +
+                'BE ENFORCING — this removed a row, not a process, and a PEP ' +
+                'that pulls again simply registers again. What has changed ' +
+                'is that this service will not nudge it in the meantime.' }
+      : { ok: false, why: 'The directory would not remove it.' };
+  }
+  const on = action === 'enable-pep';
+  const written = peps.setEnabled(name, on);
+  if (!written) {
+    log.debug('Leaving pepAction(). The directory refused it.');
+    return { ok: false, why: 'The directory refused the change.' };
+  }
+  audit.audit({ action: 'xacml.pep.' + (on ? 'enable' : 'disable'), actor: '',
+                protocol: 'XACML',
+                detail: 'Remote PEP "' + name + '" is ' +
+                        (on ? 'nudged again.' : 'no longer nudged.') });
+  log.debug('Leaving pepAction(). ' + (on ? 'Enabled.' : 'Disabled.'));
+  return { ok: true,
+           what: on
+             ? '"' + name + '" is nudged again when the repository changes.'
+             : '"' + name + '" is no longer nudged. IT HAS NOT STOPPED ' +
+               'ENFORCING: it holds its own copy of the engine and of the ' +
+               'policy, and it will go on pulling and deciding. What this ' +
+               'changed is that this service no longer dials it, so it now ' +
+               'converges only on its own polling interval.' };
+}
+
+app.post('/admin/xacml/peps', function (req, res) {
+  log.debug('Entering the admin XACML remote PEPs action.');
+  const body = parseBody(req);
+  if (!admin.mayWrite(req)) {
+    admin.respondToAction(req, res, '/admin/xacml/peps',
+                          { ok: false, why: 'This console session may read ' +
+                                            'but not write.' });
+    log.debug('Leaving the admin XACML remote PEPs action. Read-only.');
+    return;
+  }
+  admin.respondToAction(req, res, '/admin/xacml/peps', pepAction(body));
+  log.debug('Leaving the admin XACML remote PEPs action.');
 });
 
 // ---------------------------------------------------------------------------
@@ -994,7 +1262,7 @@ const EDITOR_ACTIONS = ['remove', 'add-rule', 'add-target-anyof', 'add-allof',
                         'edit-obligation', 'add-assignment'];
 
 function actionNames() {
-  return POLICY_ACTIONS.concat(EDITOR_ACTIONS);
+  return POLICY_ACTIONS.concat(EDITOR_ACTIONS).concat(PEP_ACTIONS);
 }
 
 function combinedAction(body) {
@@ -1007,6 +1275,10 @@ function combinedAction(body) {
   if (EDITOR_ACTIONS.indexOf(action) >= 0) {
     log.debug('Leaving combinedAction(). An editor action.');
     return editorAction(body);
+  }
+  if (PEP_ACTIONS.indexOf(action) >= 0) {
+    log.debug('Leaving combinedAction(). A remote PEP action.');
+    return pepAction(body);
   }
   // The refusal sentence names every action and counts them, which is the
   // shape `ssf/CLAUDE.md` records two tests as READING — a handler that
@@ -1029,17 +1301,33 @@ if (typeof admin.setXacmlPages === 'function') {
     editor: function (name) {
       return editorJson(name);
     },
+    peps: function () {
+      return pepsJson();
+    },
+    // THE SIXTH VIEW, AND IT WAS MISSING UNTIL PHASE FIVE. Rule 7 says every
+    // console page gets an operation on /admin-api in the same commit, and
+    // /admin/xacml/decide shipped in phase three without one — which
+    // `tests/vendored/admin_api.js` catches by reading the console's own page
+    // list rather than a list in the test, and which nothing noticed because
+    // that job had not been run against this branch. The fix is here rather
+    // than in a route of its own because the parity is about the VIEW.
+    decide: function (query) {
+      return decideJson(query);
+    },
     action: combinedAction,
     actionNames: actionNames
   });
 } else {
   log.warn('xacml: the admin console offers no setXacmlPages(), so ' +
-           '/admin-api cannot mirror the four /admin/xacml pages. The pages ' +
+           '/admin-api cannot mirror the five /admin/xacml pages. The pages ' +
            'themselves are unaffected.');
 }
 
 module.exports = {
   overviewJson: overviewJson,
+  pepsJson: pepsJson,
+  pepAction: pepAction,
+  PEP_ACTIONS: PEP_ACTIONS,
   combinedAction: combinedAction,
   actionNames: actionNames,
   EDITOR_ACTIONS: EDITOR_ACTIONS,

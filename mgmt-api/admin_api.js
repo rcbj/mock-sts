@@ -4472,8 +4472,72 @@ const ROUTES = [
       log.debug("Leaving the management API XACML editor endpoint.");
     } },
 
+  { method: 'GET', path: BASE + '/xacml/decide', tag: 'XACML',
+    operationId: 'getXacmlDecision',
+    summary: 'Ask the PDP about somebody and see the decision, which ' +
+             'policies applied, and what the embedded PEP would do with it',
+    description: 'Everything /admin/xacml/decide draws. `subject`, `action` ' +
+                 'and `resource` are query parameters; with none of them it ' +
+                 'answers `asked: false` rather than deciding about ' +
+                 'nobody.\n\nTHE DECISION AND THE ENFORCEMENT ARE TWO ' +
+                 'DIFFERENT ANSWERS and both are here, which is the whole ' +
+                 'point of the page: the PDP says Permit, Deny, ' +
+                 'NotApplicable or Indeterminate, and the PEP then applies ' +
+                 'its bias and the obligation rule to get to allowed or ' +
+                 'refused. When a policy "is not working" it is nearly ' +
+                 'always because only one of those was being looked ' +
+                 'at.\n\nThis is NOT POST /xacml/pdp. That endpoint takes ' +
+                 'a JSON Profile request and is what a PEP calls; this ' +
+                 'builds a three-category request out of three parameters ' +
+                 'and is what a person asks.',
+    mirrors: 'GET /admin/xacml/decide',
+    responseDescription: 'The decision, what applied, and what the embedded ' +
+                         'PEP would do.',
+    responseSchema: { $ref: '#/components/schemas/XacmlDecision' },
+    handler: function (req, res) {
+      log.debug("Entering the management API XACML decision endpoint.");
+      sendJson(res, 200, admin.xacmlDecideView(req));
+      log.debug("Leaving the management API XACML decision endpoint.");
+    } },
+
+  { method: 'GET', path: BASE + '/xacml/peps', tag: 'XACML',
+    operationId: 'getXacmlPeps',
+    summary: 'The REMOTE Policy Enforcement Points that pull this ' +
+             'repository, and whether they are deciding with the same ' +
+             'policy this service holds',
+    description: 'Everything /admin/xacml/peps draws.\n\nA REMOTE PEP runs ' +
+                 'in another process, holds its own copy of the engine and ' +
+                 'PULLS the enabled policies from GET /xacml/pep/policies. ' +
+                 'The pull is the contract; the nudge this service sends to ' +
+                 '`notifyUrl` when the repository changes is an optimisation ' +
+                 'over the polling interval and never a replacement for it, ' +
+                 'so a PEP that is never nudged still converges.\n\n' +
+                 'REGISTERING IS NOT A PERMISSION. An unregistered PEP can ' +
+                 'pull and enforce exactly as well — GET /xacml/pep/policies ' +
+                 'requires no credential, because a policy is a rule and a ' +
+                 'rule nobody can read is a rule nobody can check. What a ' +
+                 'row buys is this listing and an address for the ' +
+                 'nudge.\n\n`current` is a COMPARISON this service ' +
+                 'performs between `syncToken` on the row and the ' +
+                 'repository\'s own, not a claim the PEP makes; `stale` is ' +
+                 'how long since it was last heard from against ' +
+                 'xacml.pepStaleAfterS and changes nothing this service ' +
+                 'does. The decision counts are the PEP\'s own, cumulative ' +
+                 'in its process — this service saw none of those ' +
+                 'decisions, which is what a remote PEP is — so a PEP that ' +
+                 'restarts makes them go down.',
+    mirrors: 'GET /admin/xacml/peps',
+    responseDescription: 'The register, and what each PEP last reported.',
+    responseSchema: { $ref: '#/components/schemas/XacmlPeps' },
+    handler: function (req, res) {
+      log.debug("Entering the management API XACML remote PEPs endpoint.");
+      sendJson(res, 200, admin.xacmlPepsView(req));
+      log.debug("Leaving the management API XACML remote PEPs endpoint.");
+    } },
+
   { method: 'POST', route: BASE + '/xacml/:action', tag: 'XACML',
-    mirrors: 'POST /admin/xacml/policies and POST /admin/xacml/editor',
+    mirrors: 'POST /admin/xacml/policies, POST /admin/xacml/editor and ' +
+             'POST /admin/xacml/peps',
     handler: function (req, res) {
       log.debug("Entering the management API XACML action endpoint.");
       const body = parseBody(req);
@@ -4496,7 +4560,27 @@ const ROUTES = [
                      'into XML text — so a role called `a"b` cannot produce ' +
                      'a document that will not parse.\n\nThe FIRST policy in ' +
                      'an empty repository becomes the root, because a ' +
-                     'repository with a policy and no root decides nothing.' },
+                     'repository with a policy and no root decides nothing.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            template: { type: 'string',
+                      description: 'Which template. GET ' +
+                                   '/admin-api/xacml/policies lists them with ' +
+                                   'the parameters each takes.' },
+            name: { type: 'string',
+                      description: 'Names the DIRECTORY ENTRY. The PolicyId ' +
+                                   'inside the document is a separate ' +
+                                   'identifier and may be any URI.' }
+          },
+          required: ['template'],
+          examples: [{
+            template: 'rbac',
+            name: 'example-rbac'
+          }],
+          additionalProperties: true
+        } },
       { action: 'import-alfa', operationId: 'importXacmlAlfa',
         summary: 'Create a policy from ALFA',
         description: 'ALFA — the Abbreviated Language For Authorization — is ' +
@@ -4517,34 +4601,149 @@ const ROUTES = [
                      'no schema, no second implementation to disagree with. ' +
                      'The contract offered is the one that can be kept: ' +
                      'anything this service EMITS as ALFA it reads back, and ' +
-                     'the policy decides identically either way.' },
+                     'the policy decides identically either way.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            alfa: { type: 'string',
+                      description: 'The ALFA source. Parsed, converted and ' +
+                                   'stored as XACML XML — the repository holds ' +
+                                   'ONE representation.' },
+            name: { type: 'string',
+                      description: 'Names the directory entry.' }
+          },
+          required: ['alfa', 'name'],
+          examples: [{
+            name: 'example-alfa',
+            alfa: 'namespace example {\n' +
+              '    attribute employeeType {\n' +
+              '        id = "employeeType"\n' +
+              '        type = "string"\n' +
+              '        category = subjectCat\n' +
+              '    }\n' +
+              '    policy exampleAlfa {\n' +
+              '        apply denyUnlessPermit\n' +
+              '        rule allowStaff {\n' +
+              '            permit\n' +
+              '            target clause employeeType == "staff"\n' +
+              '        }\n' +
+              '    }\n' +
+              '}'
+          }],
+          additionalProperties: false
+        } },
       { action: 'enable', operationId: 'enableXacmlPolicy',
         summary: 'Put a policy back into the decision',
-        description: 'Sets `xacmlEnabled` on its directory entry.' },
+        description: 'Sets `xacmlEnabled` on its directory entry.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            name: { type: 'string',
+                      description: 'The policy\'s directory entry name.' }
+          },
+          required: ['name'],
+          examples: [{
+            name: 'my-policy'
+          }],
+          additionalProperties: false
+        } },
       { action: 'disable', operationId: 'disableXacmlPolicy',
         summary: 'Take a policy out of the decision without deleting it',
         description: 'The point of having this separate from delete: a ' +
                      'disabled policy is still there to be read, edited and ' +
                      'put back, which is what you want while working on it — ' +
                      'the editor is LIVE, so a policy being edited is a ' +
-                     'policy the PDP is deciding with unless it is off.' },
+                     'policy the PDP is deciding with unless it is off.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            name: { type: 'string',
+                      description: 'The policy\'s directory entry name.' }
+          },
+          required: ['name'],
+          examples: [{
+            name: 'my-policy'
+          }],
+          additionalProperties: false
+        } },
       { action: 'set-root', operationId: 'setXacmlRootPolicy',
         summary: 'Choose the policy the PDP starts from',
         description: 'Clears the flag on the incumbent first, because the ' +
                      'store refuses a second root. Done in that order ' +
                      'deliberately: a failure then leaves the repository ' +
                      'with NO root rather than with two, which is the ' +
-                     'recoverable one of the two bad states.' },
+                     'recoverable one of the two bad states.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            name: { type: 'string',
+                      description: 'The policy\'s directory entry name.' }
+          },
+          required: ['name'],
+          examples: [{
+            name: 'my-policy'
+          }],
+          additionalProperties: false
+        } },
       { action: 'delete', operationId: 'deleteXacmlPolicy',
         summary: 'Remove a policy from the repository',
         description: 'Deleting the ROOT leaves the repository deciding ' +
                      'nothing, and the reply says so rather than letting it ' +
-                     'be discovered by a Deny.' },
+                     'be discovered by a Deny.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            name: { type: 'string',
+                      description: 'The policy\'s directory entry name.' }
+          },
+          required: ['name'],
+          examples: [{
+            name: 'my-policy'
+          }],
+          additionalProperties: false
+        } },
       { action: 'edit-policy', operationId: 'editXacmlPolicy',
         summary: 'Change a policy\'s id, description or combining algorithm',
         description: 'The combining algorithm is the single most ' +
                      'consequential line in a policy, which is why it is ' +
-                     'here rather than only in the document.' },
+                     'here rather than only in the document.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            id: { type: 'string',
+                      description: 'A new PolicySetId or PolicyId. Any URI.' },
+            description: { type: 'string',
+                      description: 'The document\'s own <Description>.' },
+            combiningAlgId: { type: 'string',
+                      description: 'One of the rule-combining algorithms this ' +
+                                   'editor offers; anything else is refused ' +
+                                   'rather than written. THE SINGLE MOST ' +
+                                   'CONSEQUENTIAL LINE IN A POLICY.' }
+          },
+          required: ['policy'],
+          examples: [{
+            policy: 'my-policy',
+            path: '',
+            id: 'urn:example:policy:staff'
+          }],
+          additionalProperties: false
+        } },
       { action: 'add-rule', operationId: 'addXacmlRule',
         summary: 'Add a rule to a policy',
         description: 'Every element this editor adds arrives COMPLETE AND ' +
@@ -4552,21 +4751,906 @@ const ROUTES = [
                      'An editor that produced half-built elements would hold ' +
                      'a document that could not be saved, and a document ' +
                      'that cannot be saved cannot be evaluated, which is ' +
-                     'when you most want to look at it.' },
+                     'when you most want to look at it.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            effect: { type: 'string',
+                      description: 'Permit or Deny. Defaults to Permit.' }
+          },
+          required: ['policy'],
+          examples: [{
+            policy: 'my-policy',
+            path: '',
+            effect: 'Permit'
+          }],
+          additionalProperties: false
+        } },
       { action: 'edit-match', operationId: 'editXacmlMatch',
         summary: 'Change a Match\'s function, value or attribute',
         description: 'THE DATATYPE FOLLOWS THE FUNCTION. A Match whose ' +
                      'literal is a string and whose designator is an integer ' +
                      'does not type-check, so choosing the function sets ' +
                      'both sides rather than letting them be picked ' +
-                     'independently and refused later.' },
+                     'independently and refused later.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            matchId: { type: 'string',
+                      description: 'The match function. Defaults to ' +
+                                   'string-equal. THE DATATYPE FOLLOWS IT on ' +
+                                   'both sides, so choosing the function ' +
+                                   'settles the literal\'s type and the ' +
+                                   'designator\'s together.' },
+            value: { type: 'string',
+                      description: 'The literal to test against.' },
+            category: { type: 'string',
+                      description: 'The attribute category. Defaults to ' +
+                                   'access-subject.' },
+            attributeId: { type: 'string',
+                      description: 'The attribute to read. A bare name or the ' +
+                                   '`urn:sts-mock:xacml:attribute:` prefix ' +
+                                   'reaches the directory through the PIP; ' +
+                                   'anything else must be in the request.' },
+            mustBePresent: { type: 'boolean',
+                      description: 'Whether an absent attribute is an empty ' +
+                                   'bag (false) or makes the whole expression ' +
+                                   'Indeterminate (true).' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'target.anyOf.0.allOf.0.matches.0',
+            matchId: 'urn:oasis:names:tc:xacml:1.0:function:string-equal',
+            value: 'staff',
+            attributeId: 'employeeType'
+          }],
+          additionalProperties: false
+        } },
       { action: 'remove', operationId: 'removeXacmlNode',
         summary: 'Remove any node from a policy',
         description: 'By `path`, which is the address GET ' +
                      '/admin-api/xacml/editor gave you. A path is only valid ' +
                      'against the document it was read from: remove rule 0 ' +
                      'and every path naming rule 1 now means rule 0. Re-read ' +
-                     'the tree after each edit rather than reusing paths.' }
+                     'the tree after each edit rather than reusing paths.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'rules.0'
+          }],
+          additionalProperties: false
+        } },
+      // ---------------------------------------------------------------
+      // THE REST OF THE EDITOR, AND THE REASON THESE NINETEEN ARRIVED LATE.
+      //
+      // Phase three documented ten of the twenty-nine actions and shipped.
+      // Rule 7 says a control added to the console gets an operation in the
+      // same commit, and `tests/vendored/sts_admin_api_operations.js` is the
+      // check — it compares the actions this document DECLARES against the
+      // ones the handler's refusal sentence NAMES, in both directions,
+      // because that sentence is what `admin_api.js`'s parity check reads to
+      // find out what a resource can do. Nineteen actions the sentence named
+      // and the document did not meant nineteen console controls that could
+      // have lost their operation with nothing failing.
+      //
+      // It went unnoticed until phase five because that job is this
+      // repository's own and had not been run against this branch.
+      //
+      // EVERY ONE OF THESE TAKES A `path`, which is the address
+      // GET /admin-api/xacml/editor gave you, and every one of them is only
+      // valid against the document that reply was read from — remove rule 0
+      // and every path naming rule 1 now means rule 0. Re-read the tree after
+      // each edit rather than reusing paths.
+      // ---------------------------------------------------------------
+      { action: 'add-target-anyof', operationId: 'addXacmlTargetClause',
+        summary: 'Add a Target clause to a policy, a rule or a Target',
+        description: 'A `<Target>` is a list of clauses and **every one of ' +
+                     'them must match** — they are ANDed. Inside a clause ' +
+                     'the alternatives are ORed and inside an alternative ' +
+                     'the Matches are ANDed again, so the quantifier flips ' +
+                     'at each of the three levels.\n\nThat is why the ' +
+                     'element names read backwards from what they do: ' +
+                     '`AnyOf` holds `AllOf` holds `Match`, and the ' +
+                     '`AnyOf`s themselves are ANDed. Getting it wrong ' +
+                     'produces a policy that applies to more or less than ' +
+                     'was meant and never an error.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            matchId: { type: 'string',
+                      description: 'The match function. Defaults to ' +
+                                   'string-equal. THE DATATYPE FOLLOWS IT on ' +
+                                   'both sides, so choosing the function ' +
+                                   'settles the literal\'s type and the ' +
+                                   'designator\'s together.' },
+            value: { type: 'string',
+                      description: 'The literal to test against.' },
+            category: { type: 'string',
+                      description: 'The attribute category. Defaults to ' +
+                                   'access-subject.' },
+            attributeId: { type: 'string',
+                      description: 'The attribute to read. A bare name or the ' +
+                                   '`urn:sts-mock:xacml:attribute:` prefix ' +
+                                   'reaches the directory through the PIP; ' +
+                                   'anything else must be in the request.' }
+          },
+          required: ['policy'],
+          examples: [{
+            policy: 'my-policy',
+            path: '',
+            matchId: 'urn:oasis:names:tc:xacml:1.0:function:string-equal',
+            value: 'staff',
+            category: 'urn:oasis:names:tc:xacml:1.0:subject-category:access-subject',
+            attributeId: 'employeeType'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'add-allof', operationId: 'addXacmlAlternative',
+        summary: 'Add an alternative to a Target clause',
+        description: 'ANY of a clause\'s alternatives matching satisfies it ' +
+                     '— they are ORed. Within one alternative every Match ' +
+                     'must hold.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            matchId: { type: 'string',
+                      description: 'The match function. Defaults to ' +
+                                   'string-equal. THE DATATYPE FOLLOWS IT on ' +
+                                   'both sides, so choosing the function ' +
+                                   'settles the literal\'s type and the ' +
+                                   'designator\'s together.' },
+            value: { type: 'string',
+                      description: 'The literal to test against.' },
+            category: { type: 'string',
+                      description: 'The attribute category. Defaults to ' +
+                                   'access-subject.' },
+            attributeId: { type: 'string',
+                      description: 'The attribute to read. A bare name or the ' +
+                                   '`urn:sts-mock:xacml:attribute:` prefix ' +
+                                   'reaches the directory through the PIP; ' +
+                                   'anything else must be in the request.' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'target.anyOf.0',
+            matchId: 'urn:oasis:names:tc:xacml:1.0:function:string-equal',
+            value: 'admin',
+            attributeId: 'employeeType'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'add-match', operationId: 'addXacmlMatch',
+        summary: 'Add a Match to an alternative',
+        description: 'One attribute tested against one value. It arrives ' +
+                     'COMPLETE AND VALID — a function, a literal and a ' +
+                     'designator — because an editor that produced ' +
+                     'half-built elements would hold a document that cannot ' +
+                     'be saved, and a document that cannot be saved cannot ' +
+                     'be evaluated, which is when you most want to look at ' +
+                     'it. Use edit-match to change any of the three.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            matchId: { type: 'string',
+                      description: 'The match function. Defaults to ' +
+                                   'string-equal. THE DATATYPE FOLLOWS IT on ' +
+                                   'both sides, so choosing the function ' +
+                                   'settles the literal\'s type and the ' +
+                                   'designator\'s together.' },
+            value: { type: 'string',
+                      description: 'The literal to test against.' },
+            category: { type: 'string',
+                      description: 'The attribute category. Defaults to ' +
+                                   'access-subject.' },
+            attributeId: { type: 'string',
+                      description: 'The attribute to read. A bare name or the ' +
+                                   '`urn:sts-mock:xacml:attribute:` prefix ' +
+                                   'reaches the directory through the PIP; ' +
+                                   'anything else must be in the request.' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'target.anyOf.0.allOf.0',
+            matchId: 'urn:oasis:names:tc:xacml:1.0:function:string-equal',
+            value: 'GET',
+            attributeId: 'actionId'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'edit-rule', operationId: 'editXacmlRule',
+        summary: 'Change a rule\'s id, effect or description',
+        description: 'The EFFECT is the consequential one: it is what this ' +
+                     'rule contributes to the combining algorithm when its ' +
+                     'Target and Condition hold, and flipping it between ' +
+                     'Permit and Deny changes what the policy decides ' +
+                     'without changing anything a reader is looking at.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            id: { type: 'string',
+                      description: 'A new RuleId.' },
+            effect: { type: 'string',
+                      description: 'Permit or Deny.' },
+            description: { type: 'string',
+                      description: 'The rule\'s own description.' }
+          },
+          required: ['policy'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'rules.0',
+            effect: 'Deny'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'add-condition', operationId: 'addXacmlCondition',
+        summary: 'Add a Condition to a rule',
+        description: 'A boolean expression evaluated AFTER the Target ' +
+                     'matches. **At most one per rule** — the schema allows ' +
+                     'exactly one, and the editor stops offering this on a ' +
+                     'rule that has one rather than offering it and then ' +
+                     'refusing, because an option that is offered and ' +
+                     'refused teaches a caller that the menu is not to be ' +
+                     'trusted.\n\nIt must evaluate to EXACTLY ONE BOOLEAN. ' +
+                     'A condition returning a bag, or an integer, is a ' +
+                     'static type error and the policy is refused at write ' +
+                     'time rather than going Indeterminate on every ' +
+                     'request.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'rules.0'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'set-expression-apply', operationId: 'setXacmlApply',
+        summary: 'Make an expression a function call',
+        description: 'Replaces whatever is at `path` with an `<Apply>` of ' +
+                     'the function named in `functionId`, with arguments ' +
+                     'the function\'s own signature requires. Every ' +
+                     'expression slot in a policy takes any of the four ' +
+                     'shapes, which is why these are four actions on one ' +
+                     'target rather than four kinds of node.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            functionId: { type: 'string',
+                      description: 'The function to apply. Its arguments are ' +
+                                   'PRE-BUILT to the declared arity and types, ' +
+                                   'so the expression typechecks the moment it ' +
+                                   'exists.' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'rules.0.condition',
+            functionId: 'urn:oasis:names:tc:xacml:1.0:function:string-equal'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'set-expression-value', operationId: 'setXacmlValue',
+        summary: 'Make an expression a literal',
+        description: 'An `<AttributeValue>` of `dataType` with `lexical` in ' +
+                     'it. The lexical form is parsed against the datatype ' +
+                     'when the policy is written, so `2026-13-01` as a date ' +
+                     'is refused there rather than becoming an ' +
+                     'Indeterminate at decision time.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            type: { type: 'string',
+                      description: 'The datatype URI. Defaults to xs:string.' },
+            lexical: { type: 'string',
+                      description: 'The value, in that datatype\'s lexical ' +
+                                   'form.' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'rules.0.condition.args.0',
+            type: 'http://www.w3.org/2001/XMLSchema#string',
+            lexical: 'staff'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'set-expression-designator',
+        operationId: 'setXacmlDesignator',
+        summary: 'Make an expression an attribute reference',
+        description: 'An `<AttributeDesignator>`: reads an attribute out of ' +
+                     'the REQUEST, or out of the directory through the PIP ' +
+                     'when the id is a bare name or carries the ' +
+                     '`urn:sts-mock:xacml:attribute:` prefix.\n\n**IT ' +
+                     'RETURNS A BAG**, always, even when it finds exactly ' +
+                     'one value — which is why `string-one-and-only` exists ' +
+                     'and why most functions need it wrapped. Nothing in ' +
+                     'this engine ever holds a bare value, so there is no ' +
+                     'code path where somebody has to remember to wrap ' +
+                     'one.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            category: { type: 'string',
+                      description: 'The attribute category. Defaults to ' +
+                                   'access-subject.' },
+            attributeId: { type: 'string',
+                      description: 'The attribute to read.' },
+            dataType: { type: 'string',
+                      description: 'The datatype URI. Defaults to xs:string.' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'rules.0.condition.args.1',
+            category: 'urn:oasis:names:tc:xacml:1.0:subject-category:access-subject',
+            attributeId: 'employeeType',
+            dataType: 'http://www.w3.org/2001/XMLSchema#string'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'set-expression-variable', operationId: 'setXacmlVariable',
+        summary: 'Make an expression a variable reference',
+        description: 'A `<VariableReference>` to a `<VariableDefinition>` ' +
+                     'in the same policy. The reference is checked at write ' +
+                     'time, so one naming a variable that is not there is ' +
+                     'refused rather than deciding Indeterminate.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            variableId: { type: 'string',
+                      description: 'The VariableDefinition to reference. It ' +
+                                   'must exist in the same policy — the ' +
+                                   'reference is checked at write time.' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'rules.0.condition.args.0',
+            variableId: 'v1'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'add-argument', operationId: 'addXacmlArgument',
+        summary: 'Add an argument to a function call',
+        description: 'Offered only on an `<Apply>` — every other expression ' +
+                     'is a leaf and may only be REPLACED, which the four ' +
+                     'set-expression actions already do. The argument ' +
+                     'arrives as a literal of the type the function expects ' +
+                     'in that position.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'rules.0.condition'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'edit-apply', operationId: 'editXacmlApply',
+        summary: 'Change which function a call applies',
+        description: 'THE ARGUMENTS ARE RESHAPED TO THE NEW SIGNATURE. A ' +
+                     'function taking two strings changed for one taking ' +
+                     'two integers cannot keep its arguments, and leaving ' +
+                     'them would hold a document that does not typecheck ' +
+                     'and therefore cannot be saved.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            functionId: { type: 'string',
+                      description: 'The function to apply instead. The ' +
+                                   'arguments are reshaped to the new ' +
+                                   'signature.' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'rules.0.condition',
+            functionId: 'urn:oasis:names:tc:xacml:1.0:function:string-equal'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'edit-value', operationId: 'editXacmlValue',
+        summary: 'Change a literal\'s datatype or lexical form',
+        description: 'The lexical form is parsed against the datatype, so a ' +
+                     'value that is not of its type is refused here rather ' +
+                     'than at decision time.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            type: { type: 'string',
+                      description: 'A new datatype URI.' },
+            lexical: { type: 'string',
+                      description: 'A new lexical form, parsed against that ' +
+                                   'datatype.' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'rules.0.condition.args.0',
+            lexical: 'admin'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'edit-designator', operationId: 'editXacmlDesignator',
+        summary: 'Change an attribute reference',
+        description: 'Its category, attribute id, datatype and ' +
+                     '`MustBePresent`. **`MustBePresent` is the one that ' +
+                     'surprises people**: with it false an absent attribute ' +
+                     'is an empty bag, and with it true the whole ' +
+                     'expression is Indeterminate — which the combining ' +
+                     'algorithms then treat quite differently from a Deny.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            category: { type: 'string',
+                      description: 'A new category.' },
+            attributeId: { type: 'string',
+                      description: 'A new attribute id.' },
+            dataType: { type: 'string',
+                      description: 'A new datatype URI.' },
+            mustBePresent: { type: 'boolean',
+                      description: 'False makes an absent attribute an empty ' +
+                                   'bag; true makes the whole expression ' +
+                                   'Indeterminate, which the combining ' +
+                                   'algorithms treat quite differently from a ' +
+                                   'Deny.' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'rules.0.condition.args.1',
+            attributeId: 'department',
+            mustBePresent: false
+          }],
+          additionalProperties: false
+        } },
+      { action: 'add-rule-obligation', operationId: 'addXacmlRuleObligation',
+        summary: 'Add an obligation to a rule',
+        description: 'Fires when this RULE\'s Effect is the decision. An ' +
+                     'obligation is the half of a decision that says "yes, ' +
+                     'AND you must also do this", and section 7.2 makes it ' +
+                     'binding: a PEP that cannot discharge one MUST NOT ' +
+                     'grant the access. Both PEPs here implement that — the ' +
+                     'embedded one at /xacml/protected and the remote ' +
+                     'container — and it is the part implementations ' +
+                     'skip.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            on: { type: 'string',
+                      description: 'Permit or Deny — the effect this fires on. ' +
+                                   'Defaults to Permit. An obligation attached ' +
+                                   'to the wrong effect is silently never ' +
+                                   'discharged.' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'rules.0',
+            on: 'Permit'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'add-policy-obligation',
+        operationId: 'addXacmlPolicyObligation',
+        summary: 'Add an obligation to a policy',
+        description: 'Fires on the POLICY\'s decision rather than on one ' +
+                     'rule\'s. Same binding force — see ' +
+                     'addXacmlRuleObligation.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            on: { type: 'string',
+                      description: 'Permit or Deny. Defaults to Permit.' }
+          },
+          required: ['policy'],
+          examples: [{
+            policy: 'my-policy',
+            path: '',
+            on: 'Deny'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'add-rule-advice', operationId: 'addXacmlRuleAdvice',
+        summary: 'Add advice to a rule',
+        description: 'Something the PEP MAY do. **It is allowed to ignore ' +
+                     'this, and that is the whole difference from an ' +
+                     'obligation** — advice a PEP drops is a PEP behaving ' +
+                     'correctly, where an obligation it drops is half a ' +
+                     'policy enforced and reported as success.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            on: { type: 'string',
+                      description: 'Permit or Deny. Defaults to Permit.' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'rules.0',
+            on: 'Permit'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'add-policy-advice', operationId: 'addXacmlPolicyAdvice',
+        summary: 'Add advice to a policy',
+        description: 'On the policy\'s decision rather than on one rule\'s. ' +
+                     'See addXacmlRuleAdvice for why advice and an ' +
+                     'obligation are not the same thing.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            on: { type: 'string',
+                      description: 'Permit or Deny. Defaults to Permit.' }
+          },
+          required: ['policy'],
+          examples: [{
+            policy: 'my-policy',
+            path: '',
+            on: 'Permit'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'edit-obligation', operationId: 'editXacmlObligation',
+        summary: 'Change an obligation\'s or advice\'s id, or when it fires',
+        description: 'The FULFILL-ON is the consequential field: an ' +
+                     'obligation set to fire on Permit contributes nothing ' +
+                     'to a Deny, and one attached to the wrong effect is ' +
+                     'silently never discharged.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' },
+            id: { type: 'string',
+                      description: 'A new obligation or advice identifier.' },
+            on: { type: 'string',
+                      description: 'Permit or Deny — the effect it fires on.' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'obligations.0',
+            id: 'urn:example:obligation:log',
+            on: 'Permit'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'add-assignment', operationId: 'addXacmlAssignment',
+        summary: 'Add an attribute assignment to an obligation or advice',
+        description: 'A value handed to the PEP along with the obligation ' +
+                     '— what to log, whom to notify, which record to ' +
+                     'stamp. Its expression takes any of the four shapes ' +
+                     'the set-expression actions produce.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            policy: { type: 'string',
+                      description: 'The directory entry name of the policy to ' +
+                                   'edit — the `cn` under ou=policies, not the ' +
+                                   'PolicyId inside the document.' },
+            path: { type: 'string',
+                      description: 'The node\'s address, from GET ' +
+                                   '/admin-api/xacml/editor. ONLY VALID ' +
+                                   'AGAINST THE DOCUMENT IT WAS READ FROM: ' +
+                                   'remove rule 0 and every path naming rule 1 ' +
+                                   'now means rule 0.' }
+          },
+          required: ['policy', 'path'],
+          examples: [{
+            policy: 'my-policy',
+            path: 'obligations.0'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'disable-pep', operationId: 'disableXacmlPep',
+        summary: 'Stop nudging a registered remote PEP',
+        description: 'IT DOES NOT STOP IT ENFORCING, and the reply says so ' +
+                     'rather than letting that be discovered. A remote PEP ' +
+                     'holds its own copy of the engine and its own copy of ' +
+                     'the policy; nothing in this API reaches into another ' +
+                     'process. What changes is that this service no longer ' +
+                     'dials it when the repository changes, so it converges ' +
+                     'only on its own polling interval.\n\nNamed with a ' +
+                     '`-pep` suffix rather than reusing `disable` because ' +
+                     'this endpoint dispatches on the action name across ' +
+                     'the whole family, and a second `disable` would be ' +
+                     'ambiguous between a policy and a PEP.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            name: { type: 'string',
+                      description: 'The registered PEP\'s name.' }
+          },
+          required: ['name'],
+          examples: [{
+            name: 'pep-1'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'enable-pep', operationId: 'enableXacmlPep',
+        summary: 'Nudge a registered remote PEP again',
+        description: 'Puts it back into the set this service dials when the ' +
+                     'repository changes. A PEP that re-registers does NOT ' +
+                     'clear this by itself — a component an administrator ' +
+                     'stopped nudging must not be able to undo that by ' +
+                     'reconnecting.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            name: { type: 'string',
+                      description: 'The registered PEP\'s name, which is the ' +
+                                   'one its client certificate gave it.' }
+          },
+          required: ['name'],
+          examples: [{
+            name: 'pep-1'
+          }],
+          additionalProperties: false
+        } },
+      { action: 'forget-pep', operationId: 'forgetXacmlPep',
+        summary: 'Remove a remote PEP from the register',
+        description: 'Removes the row in ou=peps. THE PROCESS IS ' +
+                     'UNAFFECTED: it may still be pulling and enforcing, ' +
+                     'and the next time it registers it simply appears ' +
+                     'again. Use it for a PEP that is genuinely gone; use ' +
+                     'disable-pep for one that is not.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            name: { type: 'string',
+                      description: 'The registered PEP\'s name.' }
+          },
+          required: ['name'],
+          examples: [{
+            name: 'pep-1'
+          }],
+          additionalProperties: false
+        } }
     ] },
 
   { method: 'GET', path: BASE + '/ssf', tag: 'Shared Signals',

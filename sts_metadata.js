@@ -1267,6 +1267,42 @@ const ENDPOINTS = [
           'is the case nobody tests. An obligation it cannot discharge turns ' +
           'a Permit into a refusal (section 7.2), which is the part ' +
           'implementations skip.' },
+  { path: '/xacml/pep/register', group: 'XACML',
+    name: 'A remote PEP registers', specs: ['xacml30'],
+    what: 'A Policy Enforcement Point in ANOTHER PROCESS says it exists, ' +
+          'over mutual TLS on this same port — server.js already sets ' +
+          'requestCert: true, so this needed no new listener. THE ONE ' +
+          'ENDPOINT IN THIS FAMILY THAT ASKS FOR A CREDENTIAL, and it asks a ' +
+          'different question from /xacml/pdp: not who the decision is ' +
+          'about, but WHICH PEP this is — because a registration writes an ' +
+          'entry and supplies an address this service will later dial. It ' +
+          'is a turnstile like every other gate here (the certificate need ' +
+          'not chain to anything, RFC 8705 section 3\'s argument) and it is ' +
+          'NOT what lets a PEP enforce: an unregistered one pulls and ' +
+          'decides just as well. xacml.pepRequireCertificate turns it off.' },
+  { path: '/xacml/pep/policies', group: 'XACML',
+    name: 'The repository, for a remote PEP to LOAD', specs: ['xacml30'],
+    what: 'Every ENABLED policy and which one is the root, plus a sync ' +
+          'token over exactly those bytes; ?since=<token> answers 304. THE ' +
+          'PULL IS THE CONTRACT — a remote PEP polls this on its own ' +
+          'interval and evaluates locally with its own copy of the engine, ' +
+          'because a PEP that asked per request would be /xacml/pdp with a ' +
+          'network hop in front of every access decision. Requires no ' +
+          'credential, for the same reason /xacml/policies does not: a ' +
+          'policy is a rule, and a rule nobody can read is a rule nobody ' +
+          'can check. A DISABLED policy is left out rather than sent with a ' +
+          'flag, because a PEP that loaded one would enforce a policy this ' +
+          'service does not.' },
+  { path: '/xacml/pep/heartbeat', group: 'XACML',
+    name: 'What a remote PEP has enforced', specs: ['xacml30'],
+    what: 'Its cumulative counters and the sync token it holds — which is ' +
+          'what makes "current" a comparison this service performs rather ' +
+          'than a claim the PEP makes about itself. Those decisions happened ' +
+          'in another process and this service saw none of them, which is ' +
+          'the entire point of a remote PEP. It does NOT create a row: a ' +
+          'heartbeat from something that never registered is refused naming ' +
+          'the registration endpoint, because a row created here would carry ' +
+          'no certificate, no notify URL and no registration date.' },
   { path: '/admin/xacml', group: 'XACML', name: 'The XACML console page',
     specs: ['xacml30'],
     what: 'Settings, and what the PDP currently decides with. The one ' +
@@ -1287,6 +1323,16 @@ const ENDPOINTS = [
           'every control is a form POST and every choice is a round trip. ' +
           'There is no draft state; the policy being edited is the one the ' +
           'PDP is using.' },
+  { path: '/admin/xacml/peps', group: 'XACML',
+    name: 'The remote enforcement points', specs: ['xacml30'],
+    what: 'Which PEPs pull this repository, and whether they are deciding ' +
+          'with the SAME policy this service holds — which is the question ' +
+          'a distributed authorization deployment has and the one nothing ' +
+          'else in this console can answer. NOTHING ON IT REACHES INTO ' +
+          'ANOTHER PROCESS: "stop nudging" stops this service dialling a ' +
+          'PEP and does not stop it enforcing, because it already holds the ' +
+          'engine and the policy. The register is ou=peps in the embedded ' +
+          'directory.' },
   { path: '/admin/xacml/decide', group: 'XACML', name: 'Try a decision',
     specs: ['xacml30'],
     what: 'Ask the PDP about somebody and see the decision, which policies ' +
@@ -1306,13 +1352,30 @@ const ENDPOINTS = [
     name: 'One policy as an editable tree', specs: ['xacml30'],
     what: 'Each node carries the legal moves at that point, so a caller can ' +
           'walk the tree and POST one without a second copy of the grammar.' },
+  { path: '/admin-api/xacml/decide', group: 'XACML',
+    name: 'Ask the PDP a question over JSON', specs: ['xacml30'],
+    what: 'What GET /admin/xacml/decide draws: the decision, which policies ' +
+          'applied, and — separately — what the embedded PEP would do with ' +
+          'it. NOT POST /xacml/pdp, which takes a JSON Profile request and ' +
+          'is what a PEP calls; this builds a request out of three query ' +
+          'parameters and is what a person asks.' },
+  { path: '/admin-api/xacml/peps', group: 'XACML',
+    name: 'The remote enforcement points over JSON', specs: ['xacml30'],
+    what: 'The register, and what each PEP last reported: whether it holds ' +
+          'the current repository, when it was last heard from, the bias it ' +
+          'says it is running with, and what happened to the last nudge — ' +
+          'which is the only place a failed nudge is recorded, because it ' +
+          'is invisible from the receiving end by definition.' },
   { path: '/admin-api/xacml/:action', group: 'XACML',
-    name: 'Change a policy or the repository', specs: ['xacml30'],
-    what: 'The console\'s two POST endpoints as ONE action resource — a ' +
+    name: 'Change a policy, the repository or a remote PEP',
+    specs: ['xacml30'],
+    what: 'The console\'s three POST endpoints as ONE action resource — a ' +
           'caller should not have to work out which page owns "enable". ' +
-          'Twenty-eight actions: five on the repository and the rest the ' +
-          'editor\'s. Rule 7 is why this exists in the same commit as the ' +
-          'pages.' },
+          'The repository\'s, the editor\'s, and the three that end -pep, ' +
+          'which are spelt that way because this endpoint dispatches on the ' +
+          'action name and a second "disable" would be ambiguous between a ' +
+          'policy and an enforcement point. Rule 7 is why this exists in ' +
+          'the same commit as the pages.' },
   { path: '/.well-known/ssf-configuration', group: 'Shared Signals',
     name: 'Transmitter configuration metadata',
     specs: ['ssf'],

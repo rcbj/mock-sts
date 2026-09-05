@@ -49,7 +49,7 @@
 // ---------------------------------------------------------------------------
 
 const app = require('../common/app');
-const { log, xmlEscape, baseUrlOf } = require('../common/helpers');
+const { log, xmlEscape, baseUrlOf, parseBody } = require('../common/helpers');
 const config = require('../common/config');
 const audit = require('../common/audit');
 const model = require('./xacml_model');
@@ -58,6 +58,9 @@ const pdp = require('./xacml_pdp');
 const store = require('./xacml_store');
 const pip = require('./xacml_pip');
 const validate = require('./xacml_validate');
+const mtls = require('../oauth-oidc/mtls');
+const peps = require('./xacml_pep_registry');
+const pepHttp = require('./xacml_pep_http');
 // THE CONSOLE PAGES. Required from here rather than from `server.js` so that
 // the require order has ONE line for this family: this module is 23c and the
 // pages are part of it. `xacml_admin.js` requires `admin-ui/admin` (18) for
@@ -370,6 +373,449 @@ function enforce(answer) {
            undischargeable: undischargeable };
 }
 
+// ===========================================================================
+// PHASE FIVE: THE REMOTE PEP. THREE ENDPOINTS, AND THE PULL IS THE CONTRACT.
+//
+//   POST /xacml/pep/register    a PEP says it exists, over mutual TLS
+//   GET  /xacml/pep/policies    the repository, for a PEP to LOAD and evaluate
+//   POST /xacml/pep/heartbeat   what it has enforced, and what it holds
+//
+// ---------------------------------------------------------------------------
+// WHY THE PEP PULLS AND THIS SERVICE DOES NOT PUSH.
+//
+// A remote PEP holds its own copy of the engine and evaluates locally — which
+// is the whole point of having one, because a PEP that asked this service per
+// request would be `POST /xacml/pdp` with extra steps and would put a network
+// hop in front of every access decision. So something has to move POLICY from
+// here to there, and it could have moved either way.
+//
+// It moves by PULL, for three reasons and the first is this repository's own:
+//
+//   1. **A PUSH WOULD BE AN OUTBOUND REQUEST CARRYING CONTENT.** Outbound
+//      requests are deliberately rare here — federation's and SSF's headers
+//      each argue their own — and a push would make policy DISTRIBUTION depend
+//      on this service being able to dial every PEP. The nudge below is an
+//      outbound request too, and it is affordable precisely because it carries
+//      nothing.
+//   2. **A PEP KNOWS WHEN IT IS BEHIND AND THIS SERVICE DOES NOT.** Under
+//      push, a PEP that was down for a minute has a stale copy and no way to
+//      discover it; under pull, being current is the PEP's own responsibility
+//      and it is checked on every poll. That inverts the failure: a network
+//      partition leaves a pulling PEP knowingly stale rather than unknowingly
+//      wrong.
+//   3. **IT WORKS WHERE A PEP CANNOT BE DIALLED.** Behind NAT, in another
+//      cluster, on a laptop. A PDP that could only serve PEPs it could reach
+//      would be a PDP for one deployment topology.
+//
+// **AND THE NUDGE DOES NOT CHANGE ANY OF THAT.** When the repository changes,
+// this service POSTs a few bytes to each registered PEP that gave a URL,
+// saying "pull now". It is an optimisation over the polling interval and never
+// the mechanism — `xacml_pep_http.js` makes that argument at length, because it
+// is what makes a third outbound requester affordable in this repository.
+//
+// ---------------------------------------------------------------------------
+// WHAT IS AUTHENTICATED HERE, AND WHAT DELIBERATELY IS NOT.
+//
+// `POST /xacml/pdp` authenticates nobody and the header of this file says why:
+// a PDP is not an authorization boundary, and the identity that matters is IN
+// the request rather than on the connection. **THAT IS UNCHANGED, AND SO IS
+// `GET /xacml/pep/policies`** — pulling the repository needs no credential,
+// exactly as `GET /xacml/policies` needs none, because a policy is a RULE and
+// a rule nobody can read is a rule nobody can check.
+//
+// **REGISTERING IS THE ONE THAT ASKS**, and it asks a different question:
+// not who the decision is about, but WHICH PEP IS THIS. That question has an
+// answer worth having, because a registration writes a directory entry, puts a
+// row on the console, and supplies an address this service will later dial. So
+// `xacml.pepRequireCertificate` is on by default and a registration with no
+// client certificate is refused.
+//
+// It is a TURNSTILE like every other gate here. The certificate need not chain
+// to anything — RFC 8705 section 3's argument applies unchanged, that what is
+// proved is that the same key completed the handshake — and the main listener
+// already asks for one (`server.js`: `requestCert: true,
+// rejectUnauthorized: false`), so phase five needed no new socket and no new
+// TLS configuration at all.
+//
+// **AND THE REGISTRATION IS NOT A PERMISSION.** An unregistered PEP can pull
+// and enforce perfectly. What registration buys is visibility and a nudge, and
+// `xacml_pep_registry.js` says so where the register is defined, because the
+// shape looks like an access-control list and is not one.
+// ===========================================================================
+
+function remotePepsEnabled() {
+  return config.value('xacml.remotePeps') !== false;
+}
+
+// The same shape `offCheck()` has one screen up, and a second function rather
+// than a parameter because the two answer different sentences: one says XACML
+// is off here, the other says XACML is on and remote enforcement points are
+// not. A caller told the first when the second was true would go looking in
+// the wrong place.
+function remotePepOffCheck(res) {
+  log.debug('Entering remotePepOffCheck().');
+  if (offCheck(res)) {
+    log.debug('Leaving remotePepOffCheck(). XACML is off.');
+    return true;
+  }
+  if (remotePepsEnabled()) {
+    log.debug('Leaving remotePepOffCheck(). On.');
+    return false;
+  }
+  res.status(501).type('application/json').set('Cache-Control', 'no-store')
+     .send(JSON.stringify({
+       error: 'not_implemented',
+       error_description:
+         'XACML is on, but remote Policy Enforcement Points are turned off ' +
+         'on this service (xacml.remotePeps). The register in ou=peps is ' +
+         'untouched, so a PEP that was registered is still listed and comes ' +
+         'back the moment this is turned on again.'
+     }, null, 2));
+  log.debug('Leaving remotePepOffCheck(). Off.');
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// WHAT A PEP IS TOLD ITS IDENTITY IS.
+//
+// One function, so that the registration and the refusal cannot disagree about
+// what the connection carried. It returns what was presented rather than a
+// verdict — the caller decides what to do about `authenticated: false`,
+// because that is `xacml.pepRequireCertificate`'s decision and not this
+// function's.
+// ---------------------------------------------------------------------------
+function callerIdentity(req) {
+  log.debug('Entering callerIdentity().');
+  const certificate = mtls.peerCertificate(req);
+  if (!certificate) {
+    log.debug('Leaving callerIdentity(). No client certificate.');
+    return { authenticated: false, subject: '', thumbprint: '',
+             dn: '', commonName: '' };
+  }
+  // The DN and the common name come from `certificatePlan()`, across the
+  // register's slot — this service already has exactly one answer to "what
+  // identity is this certificate" and a second one written here would be how
+  // a PEP ends up filed under two names on two pages.
+  const named = peps.certificateIdentity(certificate);
+  const identity = {
+    authenticated: true,
+    subject: named.subject,
+    // RFC 8705 x5t#S256, through the same function the token endpoint binds a
+    // certificate-bound token with, so the two spellings cannot drift.
+    thumbprint: mtls.presentedThumbprint(req),
+    dn: named.dn,
+    commonName: named.commonName
+  };
+  log.debug('Leaving callerIdentity(). dn=' + identity.dn);
+  return identity;
+}
+
+// ---------------------------------------------------------------------------
+// POST /xacml/pep/register
+// ---------------------------------------------------------------------------
+app.post('/xacml/pep/register', function (req, res) {
+  log.debug('Entering POST /xacml/pep/register.');
+  if (remotePepOffCheck(res)) {
+    log.debug('Leaving POST /xacml/pep/register. Off.');
+    return;
+  }
+  const body = parseBody(req);
+  const identity = callerIdentity(req);
+  const required = config.value('xacml.pepRequireCertificate') !== false;
+  if (required && !identity.authenticated) {
+    // THE REFUSAL NAMES THE CAUSE AND THE WAY OUT, and it distinguishes the
+    // two ways to arrive here — because they need opposite fixes and a single
+    // sentence covering both would send half the readers the wrong way. A
+    // plain-HTTP listener cannot carry a certificate at all, however good the
+    // client's; an https one can, and a client that sent none simply did not.
+    const plain = !(req.socket &&
+                    typeof req.socket.getPeerCertificate === 'function');
+    log.debug('Leaving POST /xacml/pep/register. No client certificate.');
+    fail(res, 401, 'invalid_client', plain
+      ? 'This registration arrived on a PLAIN HTTP connection, which cannot ' +
+        'carry a client certificate at all — so there is nothing a better ' +
+        'client could have sent. Either turn on global.https (STS_HTTPS) so ' +
+        'the main listener asks for one, or turn off ' +
+        'xacml.pepRequireCertificate, in which case the registration is ' +
+        'accepted and marked UNAUTHENTICATED on its own row rather than ' +
+        'being quietly indistinguishable from one that proved something. ' +
+        'Note that neither is needed to ENFORCE: GET /xacml/pep/policies ' +
+        'requires no credential and a PEP that never registers still pulls ' +
+        'and decides.'
+      : 'A remote Policy Enforcement Point registers over mutual TLS and ' +
+        'this connection carried no client certificate ' +
+        '(xacml.pepRequireCertificate). The certificate does not have to ' +
+        'chain to anything — what is proved is that the same key completed ' +
+        'the handshake, which is RFC 8705 section 3\'s argument and it holds ' +
+        'here unchanged. Note that registering is not what lets a PEP ' +
+        'enforce: GET /xacml/pep/policies requires no credential, and what ' +
+        'a registration buys is a row on /admin/xacml/peps and an address ' +
+        'for the change nudge.');
+    return;
+  }
+  // THE NAME COMES FROM THE CERTIFICATE WHEN THERE IS ONE, and from the body
+  // only when there is not. A PEP that could name itself while holding a
+  // certificate could register as somebody else's PEP and take over their row
+  // — which is the one thing in this whole family that would be a security
+  // bug rather than a fidelity one.
+  const name = identity.authenticated
+    ? (identity.commonName || identity.dn)
+    : String(body.name || '');
+  const result = peps.register({
+    name: name,
+    identity: identity.dn,
+    certificateSubject: identity.subject,
+    thumbprint: identity.thumbprint,
+    authenticated: identity.authenticated,
+    notifyUrl: String(body.notifyUrl || body.notify_url || ''),
+    bias: String(body.bias || ''),
+    resource: String(body.resource || ''),
+    version: String(body.version || ''),
+    description: String(body.description || '')
+  });
+  if (!result.ok) {
+    log.debug('Leaving POST /xacml/pep/register. Refused.');
+    fail(res, 400, 'invalid_request', result.why);
+    return;
+  }
+  audit.audit({
+    action: 'xacml.pep.register',
+    actor: identity.dn || result.name,
+    protocol: 'XACML',
+    detail: 'Remote PEP "' + result.name + '" ' +
+            (result.created ? 'registered' : 're-registered') +
+            (identity.authenticated ? ' over mutual TLS.'
+                                    : ' with no client certificate.')
+  });
+  const notifyProblem = pepHttp.urlProblem(String(body.notifyUrl ||
+                                                  body.notify_url || ''));
+  res.status(result.created ? 201 : 200).type('application/json')
+     .set('Cache-Control', 'no-store')
+     .send(JSON.stringify({
+       registered: true,
+       name: result.name,
+       created: result.created,
+       authenticated: identity.authenticated,
+       identity: identity.dn,
+       syncToken: peps.syncToken(),
+       policiesUrl: baseUrlOf(req) + '/xacml/pep/policies',
+       heartbeatUrl: baseUrlOf(req) + '/xacml/pep/heartbeat',
+       // SAID BACK IMMEDIATELY, rather than being discovered the first time a
+       // nudge is not delivered. A PEP whose notify URL this service will
+       // never dial should find that out while somebody is still looking at
+       // the deployment, and it costs nothing to answer because the check is
+       // a string test rather than a request.
+       notify: { url: String(body.notifyUrl || body.notify_url || '') || null,
+                 usable: !notifyProblem,
+                 why: notifyProblem || 'This URL will be nudged when the ' +
+                                       'repository changes.' },
+       note: 'THE PULL IS THE CONTRACT. Poll ' + baseUrlOf(req) +
+             '/xacml/pep/policies on your own interval and pass the ' +
+             'syncToken you hold as ?since= — an unchanged repository ' +
+             'answers 304. The nudge is an optimisation over that interval ' +
+             'and never a replacement for it, so a PEP that is never ' +
+             'nudged still converges.'
+     }, null, 2));
+  log.debug('Leaving POST /xacml/pep/register. ' + result.name);
+});
+
+// ---------------------------------------------------------------------------
+// GET /xacml/pep/policies — WHAT A REMOTE PEP LOADS.
+//
+// The ENABLED policies and which one is the root, plus the sync token over
+// exactly those bytes. Three differences from `GET /xacml/policies`, and each
+// is because this answer is for a MACHINE that is about to evaluate it rather
+// than for a person reading:
+//
+//   * DISABLED POLICIES ARE NOT HERE. That page shows them because somebody
+//     wants to see what is in the repository; a PEP that loaded one would
+//     enforce a policy this service does not.
+//   * THE STATIC PROBLEMS ARE NOT HERE either — a document that does not
+//     typecheck cannot be written through the store in the first place, and a
+//     PEP has its own validator and will refuse it again.
+//   * IT CARRIES A SYNC TOKEN AND HONOURS `?since=`, which is what makes
+//     polling cheap enough to be the contract.
+//
+// **NO CREDENTIAL IS REQUIRED**, which is the same decision `GET
+// /xacml/policies` makes and rests on the same sentence: a policy is a rule,
+// and a rule nobody can read is a rule nobody can check. Anything secret that
+// ends up inside a policy document is in the wrong place, and refusing to
+// serve the document would conceal that rather than fix it.
+// ---------------------------------------------------------------------------
+app.get('/xacml/pep/policies', function (req, res) {
+  log.debug('Entering GET /xacml/pep/policies.');
+  if (remotePepOffCheck(res)) {
+    log.debug('Leaving GET /xacml/pep/policies. Off.');
+    return;
+  }
+  const token = peps.syncToken();
+  const since = String(req.query.since || '');
+  // A PEP that reports the name it registered under gets its `lastSeen`
+  // moved by a PULL as well as by a heartbeat, because a PEP that is polling
+  // is plainly alive and a register that called it stale would be reporting
+  // on its own heartbeat interval rather than on the PEP.
+  const asName = peps.nameFrom(String(req.query.pep || ''));
+  if (asName && peps.read(asName)) {
+    peps.heartbeat(asName, {});
+  }
+  if (since && since === token) {
+    // 304 AND NOT 200 WITH A FLAG, because a PEP polling every few seconds is
+    // the ordinary case and this is the answer it gets almost every time. The
+    // token goes in an ETag as well so that an ordinary HTTP cache — or a
+    // client library that already speaks conditional requests — behaves
+    // correctly without knowing anything about XACML.
+    res.status(304).set('Cache-Control', 'no-store').set('ETag', '"' + token + '"')
+       .end();
+    log.debug('Leaving GET /xacml/pep/policies. Unchanged.');
+    return;
+  }
+  const root = store.root();
+  const rows = store.all().filter(function (row) {
+    return row.enabled;
+  }).map(function (row) {
+    return { name: row.name, policyId: row.id, kind: row.kind,
+             version: row.version, combiningAlgId: row.combiningAlgId,
+             isRoot: !!(root && root.name === row.name),
+             description: row.description, document: row.document };
+  });
+  res.status(200).type('application/json').set('Cache-Control', 'no-store')
+     .set('ETag', '"' + token + '"')
+     .send(JSON.stringify({
+       syncToken: token,
+       root: root ? root.name : null,
+       rootNote: root ? undefined
+         : 'No policy is marked as the root, so a PEP loading this decides ' +
+           'NotApplicable to everything — which its bias then turns into a ' +
+           'refusal or an allowance. That is a real state and not an error, ' +
+           'and it is reported rather than hidden.',
+       policies: rows,
+       note: 'Every ENABLED policy. A disabled one is left out rather than ' +
+             'sent with a flag, because a PEP that loaded one would enforce ' +
+             'a policy this service does not.'
+     }, null, 2));
+  log.debug('Leaving GET /xacml/pep/policies. ' + rows.length + ' policy(ies).');
+});
+
+// ---------------------------------------------------------------------------
+// POST /xacml/pep/heartbeat — WHAT A REMOTE PEP REPORTS.
+//
+// Its counters, and the sync token it is holding. The second is what makes
+// "current" a comparison this service can perform rather than a claim the PEP
+// makes about itself, and the first is the only way the enforcement a remote
+// PEP does is visible here at all — those decisions happened in another
+// process and this service did not see one of them, which is the entire point
+// of a remote PEP.
+//
+// IT DOES NOT CREATE A ROW. A heartbeat from something that never registered
+// is refused naming the registration endpoint, because a row created here
+// would carry no certificate, no notify URL and no registration date.
+// ---------------------------------------------------------------------------
+app.post('/xacml/pep/heartbeat', function (req, res) {
+  log.debug('Entering POST /xacml/pep/heartbeat.');
+  if (remotePepOffCheck(res)) {
+    log.debug('Leaving POST /xacml/pep/heartbeat. Off.');
+    return;
+  }
+  const body = parseBody(req);
+  const identity = callerIdentity(req);
+  // A CERTIFICATE, WHERE THERE IS ONE, OVERRIDES THE NAME IN THE BODY —
+  // the same rule the registration follows and for the same reason: a PEP
+  // holding a certificate must not be able to file its counters against
+  // somebody else's row.
+  const name = peps.nameFrom(identity.authenticated
+    ? (identity.commonName || identity.dn)
+    : String(body.name || ''));
+  if (!name) {
+    log.debug('Leaving POST /xacml/pep/heartbeat. Nameless.');
+    fail(res, 400, 'invalid_request',
+         'A heartbeat says which PEP it is from — by the client certificate ' +
+         'it arrives with, or by `name` when it carries none.');
+    return;
+  }
+  const result = peps.heartbeat(name, {
+    syncToken: body.syncToken === undefined ? undefined : body.syncToken,
+    policyCount: body.policyCount,
+    decisions: body.decisions,
+    allowed: body.allowed,
+    refused: body.refused,
+    undischargeable: body.undischargeable,
+    bias: body.bias,
+    resource: body.resource,
+    version: body.version,
+    notifyUrl: body.notifyUrl === undefined ? body.notify_url : body.notifyUrl
+  });
+  if (!result.ok) {
+    log.debug('Leaving POST /xacml/pep/heartbeat. Refused.');
+    fail(res, 404, 'invalid_request', result.why);
+    return;
+  }
+  const row = peps.read(name);
+  res.status(200).type('application/json').set('Cache-Control', 'no-store')
+     .send(JSON.stringify({
+       acknowledged: true,
+       name: name,
+       syncToken: result.current,
+       // TOLD RATHER THAN LEFT TO BE COMPARED. A PEP that has to diff two
+       // strings to find out it is behind is a PEP that will get it wrong
+       // once; this service has both values in front of it here.
+       current: !!row && row.current,
+       action: row && row.current ? 'nothing — your copy is the current one'
+         : 'pull GET /xacml/pep/policies; your copy is not the current one'
+     }, null, 2));
+  log.debug('Leaving POST /xacml/pep/heartbeat. ' + name);
+});
+
+// ---------------------------------------------------------------------------
+// THE NUDGE, FIRED WHEN THE REPOSITORY CHANGES.
+//
+// Installed as `xacml_store.js`'s change observer, which is an inverted hook
+// for a mechanical reason that file states: the register requires the store
+// for the sync token, so a require in the obvious direction closes a cycle.
+//
+// **NOTHING WAITS ON THIS.** The promise is deliberately not returned and not
+// awaited: the console form that saved a policy has finished its work whether
+// or not four PEPs answered, and a save that blocked on somebody else's web
+// server would be exactly the mistake `saml/CLAUDE.md` records about not
+// dialling a service provider's metadata URL while issuing. What each PEP
+// answered is recorded on its own row and read on /admin/xacml/peps.
+// ---------------------------------------------------------------------------
+function nudgeRegisteredPeps(what) {
+  log.debug('Entering nudgeRegisteredPeps(). what=' + what);
+  if (!pepHttp.notifyAllowed() || !remotePepsEnabled()) {
+    log.debug('Leaving nudgeRegisteredPeps(). Turned off.');
+    return;
+  }
+  const rows = peps.notifiable();
+  if (!rows.length) {
+    log.debug('Leaving nudgeRegisteredPeps(). Nobody to nudge.');
+    return;
+  }
+  log.info('xacml: ' + what + '; nudging ' + rows.length +
+           ' registered PEP(s) to pull. The nudge is an optimisation — every ' +
+           'one of them would converge on its next poll without it.');
+  pepHttp.nudgeAll(rows, '', peps.recordNotify).then(function (results) {
+    const failed = results.filter(function (one) {
+      return !one.ok;
+    });
+    if (failed.length) {
+      log.warn('xacml: ' + failed.length + ' of ' + results.length +
+               ' nudge(s) were not delivered. Each is recorded on that PEP\'s ' +
+               'row at /admin/xacml/peps. No policy change is lost by this: ' +
+               'those PEPs converge on their next poll.');
+    }
+  }).catch(function (error) {
+    // `nudgeAll()` resolves rather than rejects for every ordinary failure, so
+    // reaching here means a defect in this file rather than an unreachable
+    // PEP. Logged and swallowed regardless: a policy that was written stays
+    // written.
+    log.warn('xacml: the nudge dispatcher threw, which is a bug here rather ' +
+             'than a PEP being unreachable: ' + error.message);
+  });
+  log.debug('Leaving nudgeRegisteredPeps(). Dispatched.');
+}
+
+store.setChangeObserver(nudgeRegisteredPeps);
+
 // ---------------------------------------------------------------------------
 // GET /xacml — what this surface is.
 // ---------------------------------------------------------------------------
@@ -390,6 +836,27 @@ function description(req) {
     },
     pep: { embeddedAt: baseUrlOf(req) + '/xacml/protected',
            bias: config.value('xacml.pepBias') },
+    // THE EMBEDDED PEP'S BIAS IS NOT REPORTED HERE FOR THE REMOTE ONES, and
+    // the omission is deliberate: `xacml.pepBias` governs the endpoint above
+    // and nothing else. A remote PEP is a separate process with its own
+    // configuration and reports the bias it is actually running with on every
+    // heartbeat, which is what /admin/xacml/peps shows.
+    remotePeps: {
+      enabled: remotePepsEnabled(),
+      registerAt: baseUrlOf(req) + '/xacml/pep/register',
+      policiesAt: baseUrlOf(req) + '/xacml/pep/policies',
+      heartbeatAt: baseUrlOf(req) + '/xacml/pep/heartbeat',
+      requiresCertificate:
+        config.value('xacml.pepRequireCertificate') !== false,
+      syncToken: peps.syncToken(),
+      registered: peps.all().length,
+      notify: pepHttp.notifyAllowed(),
+      contract: 'THE PULL IS THE CONTRACT. A PEP polls the policies ' +
+                'endpoint on its own interval with ?since=<syncToken>; an ' +
+                'unchanged repository answers 304. The nudge this service ' +
+                'sends on a change is an optimisation over that interval ' +
+                'and never a replacement for it.'
+    },
     pip: { source: 'the embedded directory, access-subject category only',
            attributePrefix: pip.ATTRIBUTE_PREFIX,
            available: pip.available() },
@@ -402,12 +869,16 @@ function description(req) {
       { method: 'GET', path: '/xacml/policies',
         what: 'the repository as the PDP sees it, documents included' },
       { method: 'GET', path: '/xacml/protected',
-        what: 'the embedded PEP: a resource guarded by this PDP' }
+        what: 'the embedded PEP: a resource guarded by this PDP' },
+      { method: 'POST', path: '/xacml/pep/register',
+        what: 'a remote PEP registers, over mutual TLS' },
+      { method: 'GET', path: '/xacml/pep/policies',
+        what: 'the enabled policies for a remote PEP to LOAD and evaluate; ' +
+              '?since=<syncToken> answers 304 when nothing changed' },
+      { method: 'POST', path: '/xacml/pep/heartbeat',
+        what: 'what a remote PEP has enforced, and which repository it holds' }
     ],
     notYetHere: [
-      'the PAP console pages and /admin-api operations (phase three)',
-      'ALFA (phase four)',
-      'the remote PEP, its registration and policy push (phase five)',
       'AttributeSelector and the XPath functions — a policy using one is ' +
         'Indeterminate rather than silently empty'
     ]
@@ -462,6 +933,24 @@ app.get('/xacml', function (req, res) {
     'Indeterminate and NotApplicable, which is the case worth looking at. ' +
     'An obligation it cannot discharge turns a Permit into a refusal, which ' +
     'is section 7.2 and is the part implementations skip.</p>' +
+    '<h2>Remote enforcement points</h2>' +
+    '<p>' + (info.remotePeps.enabled
+      ? 'A Policy Enforcement Point in another process registers at ' +
+        '<code>/xacml/pep/register</code>, <strong>pulls</strong> the ' +
+        'enabled policies from <code>/xacml/pep/policies</code> and ' +
+        'evaluates them itself with its own copy of this engine. ' +
+        info.remotePeps.registered + ' registered. The repository&rsquo;s ' +
+        'sync token is <code>' + xmlEscape(info.remotePeps.syncToken) +
+        '</code>; pass it as <code>?since=</code> and an unchanged ' +
+        'repository answers 304.'
+      : 'Remote Policy Enforcement Points are <strong>off</strong> ' +
+        '(<code>xacml.remotePeps</code>); those three endpoints answer 501.') +
+    '</p>' +
+    '<p>The pull <em>is</em> the contract. When the repository changes this ' +
+    'service also POSTs a few bytes to each registered PEP that gave a ' +
+    'notify URL, saying only that something changed &mdash; an optimisation ' +
+    'over the polling interval and never a replacement for it, so a PEP ' +
+    'that is never nudged still converges.</p>' +
     '<h2>Not here yet</h2><ul>' + later + '</ul>' +
     '<p><a href="?format=json">This document as JSON</a></p>' +
     '</body></html>');

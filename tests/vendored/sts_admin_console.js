@@ -1343,6 +1343,45 @@ function actionValuesIn(form) {
 // Every path the console registers a POST on, read off the service's own
 // endpoint list rather than listed here. /admin/sts-metadata is built by
 // walking the live Express router, so this is the router's own answer.
+// ---------------------------------------------------------------------------
+// EVERY CONSOLE CONTROL AN OPERATION SAYS IT MIRRORS.
+//
+// `mirrors` is prose written for a person — "POST /admin/ssf",
+// "POST /admin/xacml/policies, POST /admin/xacml/editor and POST
+// /admin/xacml/peps" — and this is the one place it is parsed, so the two
+// readers below cannot disagree about what it said.
+//
+// **IT FINDS ALL OF THEM, AND IT USED TO FIND THE FIRST.** One API resource
+// legitimately mirrors several console controls: `/admin-api/xacml/{action}`
+// dispatches on the action name across three pages, which is the arrangement
+// that stops a caller having to work out which page owns "enable". With only
+// the first match read, the other two were absent from the route list — so
+// every form on them was either passed over or, once the list was punctuated
+// with a comma, reported as posting to a path that is not a route.
+//
+// **AND THE TRAILING PUNCTUATION IS STRIPPED**, which is the specific thing
+// that broke: `\S*` is greedy over non-whitespace, so "POST /admin/x," yields
+// a path with a comma on the end and matches no route. A sentence listing two
+// controls with " and " between them happened not to have any; a sentence
+// listing three has one, and nothing about a prose field promises otherwise.
+// ---------------------------------------------------------------------------
+function consolePostPathsIn(mirrors) {
+  log.debug("Entering consolePostPathsIn().");
+  const paths = [];
+  const pattern = /POST\s+(\/admin[^\s,;]*)/g;
+  let found = pattern.exec(String(mirrors || ""));
+  while (found) {
+    const path = found[1].replace(/[.,;]+$/, "")
+                         .replace(/\/:.*$/, "").split("?")[0];
+    if (path && paths.indexOf(path) < 0) {
+      paths.push(path);
+    }
+    found = pattern.exec(String(mirrors || ""));
+  }
+  log.debug("Leaving consolePostPathsIn(). " + paths.length + " path(s).");
+  return paths;
+}
+
 async function postRoutesOfTheConsole() {
   log.debug("Entering postRoutesOfTheConsole().");
   // The API's index names, for each operation, the console control it MIRRORS.
@@ -1355,13 +1394,11 @@ async function postRoutesOfTheConsole() {
     "GET /admin-api should answer its index; it answered " + index.status);
   const routes = [];
   (index.body.operations || []).forEach(function (operation) {
-    const found = String(operation.mirrors || "").match(/^POST\s+(\/admin\S*)/);
-    if (found) {
-      const path = found[1].replace(/\/:.*$/, "").split("?")[0];
+    consolePostPathsIn(operation.mirrors).forEach(function (path) {
       if (routes.indexOf(path) < 0) {
         routes.push(path);
       }
-    }
+    });
   });
   assert.ok(routes.length > 5,
     "the API index should name the console paths its operations mirror; it " +
@@ -1385,16 +1422,24 @@ async function actionsByConsolePath() {
     "GET /admin-api should answer its index; it answered " + index.status);
   const out = {};
   for (const operation of index.body.operations || []) {
-    const mirrors = String(operation.mirrors || "");
-    const found = mirrors.match(/^POST\s+(\/admin\S*)/);
-    if (!found) {
+    // EVERY console control the operation names, not just the first. One
+    // resource legitimately mirrors several — /admin-api/xacml/{action} is
+    // three — and all of them dispatch on the same action switch, so they all
+    // get the same table.
+    const paths = consolePostPathsIn(operation.mirrors);
+    if (!paths.length) {
       continue;
     }
-    const consolePath = found[1].replace(/\/:.*$/, "").split("?")[0];
-    if (Object.prototype.hasOwnProperty.call(out, consolePath)) {
-      continue;
+    let table = null;
+    for (const consolePath of paths) {
+      if (Object.prototype.hasOwnProperty.call(out, consolePath)) {
+        continue;
+      }
+      if (table === null) {
+        table = await actionsKnownAt(operation.path);
+      }
+      out[consolePath] = table;
     }
-    out[consolePath] = await actionsKnownAt(operation.path);
   }
   log.debug("Leaving actionsByConsolePath(). " +
             Object.keys(out).length + " console path(s) take a POST.");

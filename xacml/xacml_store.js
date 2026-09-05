@@ -107,6 +107,59 @@ const SCHEMA = {
 let directory = null;
 let warnedAboutNoDirectory = false;
 
+// ---------------------------------------------------------------------------
+// THE CHANGE OBSERVER, FILLED BY `xacml.js`, AND IT IS AN INVERTED HOOK FOR A
+// REASON THAT IS PURELY MECHANICAL.
+//
+// A repository change is what nudges a registered remote PEP (phase five), and
+// the nudge lives in `xacml_pep_http.js` behind the register in
+// `xacml_pep_registry.js` — which requires THIS module, for the sync token it
+// computes over the repository's content. So a require in the obvious
+// direction closes a cycle, and node answers a cycle with a half-initialised
+// module rather than with an error.
+//
+// **IT IS ALSO NOT THE MECHANISM, AND THAT IS WHY THERE IS EXACTLY ONE OF
+// THEM.** Every door that writes a policy through this module moves it — the
+// console, the editor, a template, an ALFA import, `/admin-api` — and one door
+// does NOT: an `ldapmodify` on 389 changes `xacmlPolicyDocument` without ever
+// entering this file. That is a gap in the NUDGE and not in the design, for
+// the reason `xacml_pep_http.js` argues at length: a PEP pulls on its own
+// interval and converges regardless, so the worst an unhooked door can cost is
+// one polling interval. A second hook down in the directory to close it would
+// be buying nothing with a dependency.
+// ---------------------------------------------------------------------------
+let changeObserver = null;
+
+function setChangeObserver(fn) {
+  log.debug('Entering setChangeObserver().');
+  changeObserver = typeof fn === 'function' ? fn : null;
+  log.debug('Leaving setChangeObserver(). ' +
+            (changeObserver ? 'Installed.' : 'Cleared.'));
+}
+
+// Called AFTER a successful write or removal, never before and never on a
+// refusal — a nudge sent for a policy the store then rejected would have every
+// PEP re-pull an unchanged repository, which is the one way an optimisation
+// can cost more than it saves. It must not throw into its caller: a PEP that
+// cannot be nudged is not a reason for a policy save to fail.
+function changed(what) {
+  log.debug('Entering changed(). what=' + what);
+  if (!changeObserver) {
+    log.debug('Leaving changed(). Nobody is watching.');
+    return;
+  }
+  try {
+    changeObserver(what);
+  } catch (error) {
+    // Swallowed on purpose and logged: the observer's whole job is to dial
+    // somebody else, and a failure there must not turn a successful policy
+    // write into a 500 for the person who made it.
+    log.warn('xacml: the repository change observer threw and the change ' +
+             'itself was fine: ' + error.message);
+  }
+  log.debug('Leaving changed().');
+}
+
 // Parsed policies, keyed by the SHA-256 of the document text. Keyed by content
 // rather than by policy id or DN precisely so that a change made through any
 // door — the console, `/admin-api`, an `ldapmodify` on 389, an LDIF restore —
@@ -118,6 +171,18 @@ function setDirectory(fns) {
   directory = fns || null;
   log.debug('Leaving setDirectory(). The repository ' +
             (directory ? 'has its container.' : 'has none.'));
+}
+
+// WHAT IS CURRENTLY INSTALLED, so that a test which stubs the slot can put
+// back WHAT WAS THERE rather than `null`. `tests/CLAUDE.md` records why that
+// distinction is not pedantry: `run.js` runs every file in one process, so
+// this is one reference shared by the whole run, and restoring `null` is only
+// correct in a process where `ldap/ldap_server.js` was never loaded — which is
+// a fact about the file list rather than about the test. Nothing in the
+// service calls this, exactly as nothing calls
+// `applications.directoryInstalled()`.
+function directoryInstalled() {
+  return directory;
 }
 
 function haveDirectory() {
@@ -374,6 +439,9 @@ function write(name, document, options) {
     attributes.description = String(settings.description);
   }
   const written = directory.writePolicy(name, attributes);
+  if (written) {
+    changed('policy "' + name + '" was written');
+  }
   log.debug('Leaving write(). ' + (written ? 'Written.' : 'Refused.'));
   return written ? { ok: true, id: described.id, kind: described.kind }
                  : { ok: false, why: 'The directory refused the entry. The ' +
@@ -387,6 +455,9 @@ function remove(name) {
     return false;
   }
   const removed = directory.deletePolicy(name);
+  if (removed) {
+    changed('policy "' + name + '" was removed');
+  }
   log.debug('Leaving remove(). ' + (removed ? 'Removed.' : 'Not there.'));
   return removed;
 }
@@ -513,6 +584,8 @@ module.exports = {
   SEED_DOCUMENT: SEED_DOCUMENT,
   seed: seed,
   setDirectory: setDirectory,
+  directoryInstalled: directoryInstalled,
+  setChangeObserver: setChangeObserver,
   all: all,
   read: read,
   root: root,

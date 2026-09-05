@@ -131,7 +131,7 @@
 const crypto = require('crypto');
 const ldap = require('ldapjs');
 const app = require('../common/app');
-const { log, xmlEscape } = require('../common/helpers');
+const { log, xmlEscape, dnRfc4514 } = require('../common/helpers');
 const config = require('../common/config');
 // THE TRUST REALM REGISTRY, and this module is the one place in this service
 // that needs more of it than the ambient value. It reads `currentId()` to build
@@ -185,6 +185,7 @@ const scimMap = require('../scim/scim_map');
 // in the other direction would drag every /ldap route into the router at
 // whatever point those files were first loaded.
 const xacmlStore = require('../xacml/xacml_store');
+const xacmlPepRegistry = require('../xacml/xacml_pep_registry');
 const xacmlPip = require('../xacml/xacml_pip');
 // The audit log. A plain require and it cannot become anything else: audit.js
 // requires helpers.js and config.js only, so it can be reached from the deepest
@@ -396,6 +397,18 @@ function policiesDn() {
   return 'ou=policies,' + baseDn();
 }
 
+// ou=peps is the register of REMOTE Policy Enforcement Points — the processes
+// that pull this repository and enforce it somewhere else. A container of its
+// own rather than a corner of ou=policies, and the reason is the one that
+// decides every container split here: a policy is a RULE and a PEP is a
+// PARTY, and the question "which policies do I have" and the question "who is
+// enforcing them" are different questions that a single container could only
+// answer by making every reader filter. `xacml/xacml_pep_registry.js` owns the
+// schema.
+function pepsDn() {
+  return 'ou=peps,' + baseDn();
+}
+
 // The fourth and fifth, and they are `spiffe_registry.js`'s store the way
 // ou=applications is `applications.js`'s. TWO containers rather than one,
 // because they hold different KINDS of thing: an entry under ou=entries is
@@ -460,6 +473,10 @@ function maxFederations() {
 
 function maxPolicies() {
   return config.value('xacml.maxPolicies');
+}
+
+function maxPeps() {
+  return config.value('xacml.maxPeps');
 }
 
 function maxSearchResults() {
@@ -1303,6 +1320,17 @@ function seed() {
       'is derived from that document at write time, so where the two ' +
       'disagree the document wins. xacml/xacml_store.js holds the schema.'
   }, { origin: 'seed' });
+  putEntry(pepsDn(), {
+    objectClass: ['top', 'organizationalUnit'],
+    ou: 'peps',
+    description: 'Remote XACML Policy Enforcement Points that have ' +
+      'registered with this PDP. A ROW HERE IS A RECORD AND NOT A ' +
+      'PERMISSION: a PEP that never registers can still pull ' +
+      'GET /xacml/pep/policies and enforce, because a policy is a rule and a ' +
+      'rule nobody can read is a rule nobody can check. What a row buys is a ' +
+      'place on /admin/xacml/peps and an address for the change nudge. ' +
+      'xacml/xacml_pep_registry.js holds the schema.'
+  }, { origin: 'seed' });
   putEntry(spiffeDn(), {
     objectClass: ['top', 'organizationalUnit'],
     ou: 'spiffe',
@@ -1915,6 +1943,16 @@ function existingUserEntry(name) {
 // the certificate itself stays where it is already published in full: the TLS
 // listener's own report.
 // ---------------------------------------------------------------------------
+// **PRECONDITION: `subject` AND `issuer` ARRIVE AS STRINGS.** This function
+// does `String()` on both, and node's own `getPeerCertificate()` hands back
+// NULL-PROTOTYPE OBJECTS of RDN types — on which `String()` does not produce a
+// DN, it throws "Cannot convert object to primitive value". Every caller here
+// has always satisfied that by putting them through `helpers.dnRfc4514()`
+// first, so the requirement was real and written down nowhere; phase five's
+// PEP registration met it twice, once per field. Written here rather than
+// defended against inside, because the conversion is also what makes two
+// spellings of one DN impossible: `dnRfc4514()` is the single spelling in this
+// service and a fallback here would quietly become a second one.
 function certificatePlan(info) {
   log.debug('Entering certificatePlan().');
   const certificate = info.certificate || {};
@@ -4350,6 +4388,76 @@ if (typeof xacmlStore.setDirectory === 'function') {
            'everything. The directory itself is unaffected.');
 }
 
+// ---------------------------------------------------------------------------
+// THE REMOTE PEP REGISTER: A THIRD SLOT ON A THIRD XACML MODULE, and it is
+// three rather than two for the reason the comment above gives about two —
+// what crosses a slot is the smallest thing that works. `xacml_store.js` needs
+// ou=policies, `xacml_pip.js` needs to find a person, and this one needs
+// ou=peps and ONE MORE THING that neither of the others could be given without
+// handing it a function it must not use.
+//
+// **THAT ONE MORE THING IS `certificateIdentity`, AND IT IS THE WHOLE REASON
+// THE REGISTER DOES NOT INVENT A NAMING RULE OF ITS OWN.** A remote PEP is
+// identified by its client certificate, and this service already has exactly
+// one answer to "what identity is this certificate" — `certificatePlan()`,
+// which every verified client certificate on 8443, 9443 and 636 goes through.
+// A second mapping written in `xacml_pep_registry.js` would be a second answer
+// to that question, and two answers is how one component ends up filed under
+// two names on two pages.
+//
+// WHAT CROSSES IS THE NAMING AND NOT THE ENTRY CREATION. This returns the DN
+// and the common name and writes nothing: a registration does not put a PEP
+// into ou=users, because a PEP is a component rather than a person and
+// /admin/users counts people. That is the same line `spiffe_registry.js` had
+// to draw between an ISSUANCE and an AUTHENTICATION, and getting it wrong
+// there made an agent holding a stream open read as hundreds of sign-ins.
+if (typeof xacmlPepRegistry.setDirectory === 'function') {
+  xacmlPepRegistry.setDirectory({
+    allPeps: allPeps,
+    writePep: writePep,
+    deletePep: deletePep,
+    certificateIdentity: function (certificate) {
+      log.debug('Entering certificateIdentity().');
+      // **THE SUBJECT HAS TO BE A STRING BEFORE IT GETS HERE, AND NODE HANDS
+      // BACK AN OBJECT.** `getPeerCertificate()` returns `subject` as a
+      // null-prototype object of RDN types, and `certificatePlan()` does
+      // `String(certificate.subject || ...)` on it — which does not produce a
+      // DN, it THROWS "Cannot convert object to primitive value", because a
+      // null-prototype object has no toString. The registration then answered
+      // 500 with a stack in it.
+      //
+      // `helpers.dnRfc4514()` is the one spelling of that conversion in this
+      // service — `tls_server.js` puts every client certificate's subject and
+      // issuer through it before recording either — and using it here is what
+      // makes a PEP's `x509subject` byte-for-byte the string the same
+      // certificate would write arriving on 8443 or 636. Two spellings of one
+      // DN is two identities, which `spiffe/CLAUDE.md` lists as an assertion a
+      // test should make.
+      // BOTH DN FIELDS, not just the subject: `certificatePlan()` does the
+      // same `String()` on `certificate.issuer` a few lines further down, so
+      // fixing one of them moved the throw rather than removing it.
+      const given = certificate || {};
+      const subject = typeof given.subject === 'string'
+        ? given.subject : dnRfc4514(given.subject);
+      const issuer = typeof given.issuer === 'string'
+        ? given.issuer : dnRfc4514(given.issuer);
+      const plan = certificatePlan({
+        certificate: Object.assign({}, given,
+                                   { subject: subject, issuer: issuer })
+      });
+      const common = (plan.attributes.cn || [])[0] || '';
+      log.debug('Leaving certificateIdentity(). dn=' + plan.dn);
+      return { dn: plan.dn, commonName: common, subject: subject };
+    }
+  });
+} else {
+  log.warn('ldap: xacml_pep_registry.js offers no setDirectory(), so no ' +
+           'remote Policy Enforcement Point can register and ' +
+           '/admin/xacml/peps is empty. Policy DISTRIBUTION is unaffected — ' +
+           'a PEP pulls GET /xacml/pep/policies without registering — so ' +
+           'what is lost is the register and the nudge, not the mechanism.');
+}
+
 // `locateEntry` and nothing else. It is the function that already resolves all
 // three shapes of identity this service files a person under — a bare name, a
 // DN, and a TLS client certificate's subject — so the PIP gets that behaviour
@@ -6758,6 +6866,102 @@ function deletePolicy(name) {
   touchDirectory();
   auditPolicyDirectory('entry.delete', stored.dn, stored.attributes, false);
   log.debug('Leaving deletePolicy(). ' + entries.size + ' entry/entries left.');
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// ou=peps AS A STORE.
+//
+// The same three functions again, and one difference from ou=policies worth
+// knowing: a PEP entry is named from its CLIENT CERTIFICATE rather than from a
+// label somebody chose, so the name is not free text and a re-registration
+// lands on the entry that is already there. `xacml_pep_registry.js` does that
+// folding — it is the module that knows what a certificate common name may
+// contain — and this file is handed a name that is already an entry name.
+// ---------------------------------------------------------------------------
+function pepDn(name) {
+  return 'cn=' + escapeDnValue(String(name)) + ',' + pepsDn();
+}
+
+function pepEntry(name) {
+  log.debug('Entering pepEntry(). name=' + name);
+  const direct = getEntry(pepDn(name));
+  log.debug('Leaving pepEntry(). ' + (direct ? 'Found.' : 'Not here.'));
+  return direct || null;
+}
+
+function pepCount() {
+  let n = 0;
+  eachEntryInRealm(function (stored) {
+    if (isUnder(stored.dn, pepsDn()) &&
+        normalizeDn(stored.dn) !== normalizeDn(pepsDn())) {
+      n++;
+    }
+  });
+  return n;
+}
+
+function allPeps() {
+  log.debug('Entering allPeps().');
+  const rows = [];
+  eachEntryInRealm(function (stored) {
+    if (isUnder(stored.dn, pepsDn()) &&
+        normalizeDn(stored.dn) !== normalizeDn(pepsDn())) {
+      const object = entryObject(stored);
+      object.name = (stored.attributes.cn || [])[0] ||
+                    stored.dn.split(',')[0].replace(/^cn=/i, '');
+      rows.push(object);
+    }
+  });
+  log.debug('Leaving allPeps(). ' + rows.length + ' registered PEP(s).');
+  return rows;
+}
+
+// Create or REPLACE, for writePolicy()'s reason and one of its own: the record
+// being written was read from this entry a moment ago and changed, and the
+// value somebody most wants to be able to clear here is a notify URL — a PEP
+// that re-registers without one has stopped wanting to be nudged, and a merge
+// would keep dialling the address it used to have.
+function writePep(name, attributes) {
+  log.debug('Entering writePep(). name=' + name);
+  const existing = pepEntry(name);
+  const dn = existing ? existing.dn : pepDn(name);
+  if (!existing && pepCount() >= maxPeps()) {
+    log.warn('ldap: not creating ' + dn + '; ou=peps holds its maximum of ' +
+             maxPeps() + ' entry/entries (xacml.maxPeps).');
+    log.debug('Leaving writePep(). The container is full.');
+    return false;
+  }
+  if (totalEntries() >= maxEntries() && !existing) {
+    log.warn('ldap: not creating ' + dn + '; the directory holds its ' +
+             'maximum of ' + maxEntries() + ' entries.');
+    log.debug('Leaving writePep(). The directory is full.');
+    return false;
+  }
+  const created = existing ? existing.createdAt : generalizedTime();
+  const stored = putEntry(dn, Object.assign({ cn: String(name) }, attributes),
+                          { origin: existing ? existing.origin : 'xacml' });
+  stored.createdAt = created;
+  stored.attributes.createtimestamp = [created];
+  stored.attributes.modifytimestamp = [generalizedTime()];
+  auditPolicyDirectory(existing ? 'entry.update' : 'entry.create', dn,
+                       stored.attributes, !existing);
+  log.debug('Leaving writePep(). The entry was ' +
+            (existing ? 'updated.' : 'created.'));
+  return true;
+}
+
+function deletePep(name) {
+  log.debug('Entering deletePep(). name=' + name);
+  const stored = pepEntry(name);
+  if (!stored) {
+    log.debug('Leaving deletePep(). It was not here.');
+    return false;
+  }
+  entries.delete(normalizeDn(stored.dn));
+  touchDirectory();
+  auditPolicyDirectory('entry.delete', stored.dn, stored.attributes, false);
+  log.debug('Leaving deletePep(). ' + entries.size + ' entry/entries left.');
   return true;
 }
 
