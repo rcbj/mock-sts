@@ -12,9 +12,10 @@ family here and the first one that TALKS BACK.
 | `ssf_streams.js` | The streams, their subjects and their queues, per trust realm. A LIBRARY. |
 | `ssf_http.js` | **THE SECOND OUTBOUND REQUEST IN THIS REPOSITORY.** RFC 8935 push delivery. A LIBRARY. |
 | `ssf_auth.js` | Who may drive a stream: two schemes and two scopes. A LIBRARY. |
-| `caep.js` | **CAEP's session register**: what state CAEP believes each session is in, and how many events of which type have been sent about it. A LIBRARY, and the one file here that is not vocabulary. |
+| `caep.js` | **CAEP's session register**: what state CAEP believes each session is in, and how many events of which type have been sent about it. A LIBRARY, and one of the two files here that are not vocabulary. |
+| `risc.js` | **RISC's account register**: the three states RISC tracks per account, the opt-out gate, and how many events of which type have been sent. A LIBRARY, and `caep.js`'s SIBLING rather than a generalization of it — see below. |
 
-Six of the seven register nothing (rule 3), so their position in the route
+Seven of the eight register nothing (rule 3), so their position in the route
 order is not a position. `ssf.js` is required at **23b in `server.js`** — after
 `admin-ui/admin.js`, whose eighth slot it fills, and before `sts_metadata.js`,
 which is last for everybody.
@@ -40,15 +41,31 @@ about a person:
   nothing has happened lately.
 
 The vocabularies are **CAEP** (what happened to a SESSION) and **RISC** (what
-happened to an ACCOUNT). **CAEP has been here since 2026-09-03 and RISC has
-not.**
+happened to an ACCOUNT). **CAEP has been here since 2026-09-03 and RISC since
+2026-09-04.** The family is complete.
 
-**THE PROMISE THIS FILE MADE WAS KEPT, AND IT IS WORTH SAYING WHAT THAT COST.**
-The claim was that adding a vocabulary would be rows in `ssf_events.js`'s table
-and nothing else, because the envelope, the subject grammar, the delivery, the
-queues, the stream management, the console page and the management API are all
-vocabulary-independent. Eight event types later, the things outside that table
-that had to change are:
+**THE PROMISE THIS FILE MADE WAS KEPT TWICE, AND THE SECOND TIME IS THE ONE
+THAT PROVES IT.** The claim was that adding a vocabulary would be rows in
+`ssf_events.js`'s table and nothing else, because the envelope, the subject
+grammar, the delivery, the queues, the stream management, the console page and
+the management API are all vocabulary-independent. CAEP tested it once and
+this file then recorded four things outside the table that had to change.
+**RISC changed NONE of those four.** `checkMember()` grew not one value type;
+`transmit()`'s subject refusal was already written against the ROW and did not
+move; `streamCoversSubject()`'s complex-subject rule is CAEP's and RISC's
+subjects are plain, so it was not touched. Fourteen event types cost the
+catalogue's machinery nothing at all, which is the only kind of evidence a
+claim like that can have.
+
+What RISC did add outside the table is one thing CAEP also added and one
+genuinely new: a REGISTER of its own (`risc.js` — an account is not a session)
+and an observer on a DIFFERENT store. CAEP watches `authn.js`; RISC watches
+`ldap_server.js`. That is not a second copy of one mechanism, it is the
+provisioning layer and the authentication layer, and the whole difference
+between the two profiles is which of them the sentence is about.
+
+Eight event types later, the things outside that table that had to change
+were:
 
 * **`caep.js`**, which is not vocabulary. A row says what an event MEANS; that
   file holds what the events are ABOUT — a session, the state CAEP believes it
@@ -67,13 +84,185 @@ that had to change are:
   own machinery and not a branch naming an event type.
 
 Nothing else. If a function anywhere in this directory grows a branch that
-names one of SSF's own two event types, or one of CAEP's eight, that is the
-design going wrong and it will have to be undone again for RISC.
+names one of SSF's own two event types, one of CAEP's eight or one of RISC's
+fourteen, that is the design going wrong.
 
-RISC's prefix is written down in `ssf_events.js` already, because it is the
-thing most likely to be typed from memory and got subtly wrong — there is no
-"unknown event type" error in this protocol, so a receiver silently ignores
-what it does not recognise.
+---
+
+## WHAT RISC COST, AND WHY `risc.js` IS `caep.js`'s SIBLING AND NOT ITS
+## GENERALIZATION
+
+* `ssf/ssf_events.js` — fourteen rows, three common members written once and
+  used on ONE of them, one shared `CREDENTIAL_TYPES` array (RISC 1.0 section
+  2.7 defines `credential_type` BY REFERENCE to CAEP's, so the two lists are
+  one list and not two alike ones), a `subjectFormats` column, a `deprecated`
+  column, `subjectAdvice()` and `nearestMember()`. **No new value type in
+  `checkMember()`.**
+* `ssf/risc.js` — the register, three state machines and the opt-out gate.
+  NEW, and a LIBRARY.
+* `ssf/ssf.js` — the require, `risc.noteTransmitted()` beside CAEP's,
+  `riscAutoEmit()`, `sendOneRiscEvent()`, the observer installation and the
+  tenth admin slot's filler.
+* `ldap/ldap_server.js` — **`setAccountObserver()`, an INVERTED HOOK**, on the
+  same terms as `authn.setSessionObserver()` and with five call sites rather
+  than one. See below.
+* `common/config.js` — a `RISC` group of eleven, `env/defaults.js`
+  regenerated.
+* `common/audit.js` — four actions in the existing `signals` category.
+* `admin-ui/admin.js` — the tenth slot, `/admin/risc`, `/admin/risc-accounts`
+  and `/admin/risc-accounts/account`, `riscAccountChooser()`, two `SECTIONS`
+  rows, two `LIST_PARAMS` rows and a `SETTING_HOMES` row.
+* `mgmt-api/admin_api.js` — two GETs and a POST with three actions;
+  `mgmt-api/admin_api_spec.js` — the `Risc` schema.
+* `sts_metadata.js` — one `SPECS` entry and **six** `ENDPOINTS` rows, three
+  admin and three management API — which is the count the CAEP block's own
+  note warns about: a family's protocol endpoints are obvious and the CONSOLE
+  and MANAGEMENT API rows it also costs are the ones a checklist forgets.
+* `tests/risc_register.js` — the three state machines, the gate and the
+  register in process.
+
+**WHY THE REGISTER IS A SECOND FILE.** A session and an account are not the
+same kind of thing. A session begins, is used and ends, and there are many of
+them per person; an account IS the person, has no beginning this service can
+see, and outlives every session on it. A register serving both would have one
+row that is sometimes one and sometimes the other. Three further differences
+each fall out of that and none of them is a preference:
+
+* **`observe()` answers with a LIST.** A session act is one act. A directory
+  write is not: one `PUT /Users/:id` can set `active` to false AND change a
+  mail address, which is two RISC events about one write, and an observer that
+  returned the first would drop the second with nothing anywhere saying so.
+* **The register is keyed on the PERSON and not on the subject.** A RISC
+  subject is composed in whichever format `risc.subjectFormat` names, and the
+  two identifier events ignore that setting and use `email` — so one account
+  legitimately produces two different `subjectKey()`s, and a register keyed on
+  the subject would split one person into two rows *at exactly the moment
+  their identifier changed*, which is the one moment the row is worth having.
+* **The state is three things.** A lifecycle, an opt-out state and a
+  credential standing, moving independently: an account can be opted out and
+  perfectly healthy, or compromised and still enabled. A CAEP row has one
+  `state` because a session is alive or it is not.
+
+---
+
+## THE OPT-OUT GATE, AND THE EXCEPTION WITHOUT WHICH IT IS A TRAP
+
+RISC section 2.8 gives an account three states — `opt-in`,
+`opt-out-initiated`, `opt-out` — and says the last means it is NOT
+participating in event exchange. `risc.honourOptOut` is on by default because
+that is the conforming behaviour, and a suppressed event is counted on the row
+(`suppressed`), which is the one number in this console that says a receiver
+heard nothing **on purpose**.
+
+**The four opt-out events are never suppressed**, and that exception is the
+whole rule rather than a convenience:
+
+* `opt-out-effective` is the event that ANNOUNCES the account has reached the
+  silent state. Gating it would enter that state without telling anybody, so a
+  receiver would see the signals simply stop — indistinguishable at the far end
+  from a transmitter that has gone down.
+* `opt-in` is sent FROM the opt-out state by definition. It is the only way a
+  receiver ever learns the account came back, and gating it would make the
+  opt-out permanent for every receiver in the world.
+
+The middle state exchanges everything, and the specification says why: it
+exists to stop a hijacker from opting out the moment they take an account over
+and silencing the very events that would report them.
+
+**One more asymmetry, and it looks like a bug until it is stated.** A
+suppressed AUTOMATIC event still moves the register and a suppressed HAND
+EMISSION does not. In `observe()` the directory really changed — somebody was
+deleted, `active` really did go false — so the register follows the act whether
+or not anybody was told. In `riscEmit()` the act IS the emission: nothing
+happened except that somebody asked this service to say something and it did
+not, and applying the state would leave a register asserting that an account
+was purged on the strength of a message never sent.
+
+---
+
+## THE FOUR ACTS THIS SERVICE CAN OBSERVE IN ITS DIRECTORY, AND THE TEN IT
+## CANNOT
+
+| Act | Event | Where it is noticed |
+|---|---|---|
+| a person is deleted | `account-purged` | `deletePerson()` and the LDAP delete handler |
+| `scimActive` goes false | `account-disabled` | `writePerson()` and the LDAP modify handler |
+| `scimActive` goes true | `account-enabled` | the same |
+| `mail` / `telephoneNumber` / `mobile` moves | `identifier-changed` | the same |
+
+**THE OBSERVER SITS ON THE STORE AND NOT ON A DOOR**, which is why there are
+five call sites in `ldap_server.js` rather than one in `scim.js`. The same act
+reaches this directory over SCIM, over LDAP and from the console, and a RISC
+feature that only noticed the SCIM one would report a deprovisioning done with
+a PATCH and stay silent about one done with an `ldapmodify`. That is not a
+smaller feature; it is a transmitter that lies by omission about half its own
+traffic — **which is precisely the defect CAEP shipped with for one revision**
+(`session-presented` from the OAuth2 authorization endpoint alone) and it took
+a test naming every protocol to find, because a count of zero is also what
+*nobody asked for that type* looks like.
+
+**AND IT IS HANDED THE ATTRIBUTES BEFORE AND AFTER, AND `risc.js` DECIDES.**
+The directory knows what a write is; it does not know that `scimActive` going
+false is an `account-disabled`. That is RISC's reading and it belongs in RISC's
+file — a version of `ldap_server.js` that answered "a disable happened" would
+be the vocabulary leaking into the store.
+
+**AN ABSENT ATTRIBUTE IS NOT A FALSE ONE.** `activeIn()` answers `null` for a
+write that says nothing about `active`, because *nobody has ever said* and
+*somebody said no* are two different facts and reading the first as the second
+would emit an `account-disabled` for every person created without the
+attribute.
+
+**AND `active` STILL DEACTIVATES NOBODY HERE.** No endpoint reads it, no bind
+is refused and no token is withheld; `scim_map.js` says so, because a mock that
+silently pretended would teach a provisioning client that its deprovisioning
+path works. What changed is that this service now SAYS so, over RISC — which is
+exactly the division the profile draws: a transmitter reports and a receiver
+decides.
+
+The other ten describe things nothing here does — no breach corpus is searched
+by this service and no recovery flow runs in it — so they are emitted by hand
+from `/admin/risc` or `POST /admin-api/risc/emit`. **Four of those ten change
+real state when they go**, because RISC section 2.8 defines each opt-out event
+as *"the account is in the X state"* rather than as a report that it moved.
+
+---
+
+## THREE THINGS ABOUT RISC'S ROWS THAT SURPRISE SOMEBODY WHO KNOWS CAEP
+
+* **Eleven of the fourteen have no payload members at all**, and only
+  `credential-compromise` has a required one. **The subject carries the entire
+  message**, so a subject naming the wrong person is not a partly wrong event —
+  it is a wholly wrong one with nothing else in it to notice by. That is what
+  makes `risc.subjectFormat` the consequential setting in the group.
+* **The four common claims are not common here.** CAEP section 2 gives four to
+  all eight of its events. RISC gives THREE — no `initiating_entity` — and
+  gives them to exactly ONE of its fourteen. A reader porting CAEP's
+  `withCommon()` across would attach four members to fourteen rows and produce
+  thirteen events carrying members their specification does not define, which
+  nothing would report.
+* **One member name in the whole of Shared Signals uses a hyphen**, and it is
+  `identifier-changed`'s `new-value`. `new_value` typed from habit produces an
+  event that is well-formed, delivers, and tells the receiver nothing.
+  `nearestMember()` in `ssf_events.js` names the near miss, and the generator
+  deliberately does **not** silently correct it: a mock that quietly repaired
+  the commonest mistake in an event type would be a mock that hid it.
+
+**AND ONE OF THE FOURTEEN IS DEPRECATED BY ITS OWN SPECIFICATION.**
+`sessions-revoked` — plural, every session the account has — is replaced by
+CAEP's `session-revoked` — singular, the one the subject names. It is offered
+by default and warned about on every event, because a transmitter that cannot
+produce a deprecated event cannot be used to find out what a receiver does with
+one, and receivers in the field still send and expect it.
+
+**RISC SECTION 3.1 IS THE ONLY DELIBERATE DEFECT IN THIS SERVICE THAT A
+SPECIFICATION ASKS FOR BY NAME.** Google's production RISC transmitter spells a
+subject identifier's discriminator `subject_type` rather than `format`; the
+specification records this, says the usage is deprecated, says new services
+MUST NOT use it, and then tells relying parties they need code to work around
+it anyway. `risc.googleSubjectType` renames the member on every RISC subject
+this service sends, and on nothing else: CAEP and SSF's own events keep
+`format`, because their specifications never had the problem.
 
 ---
 

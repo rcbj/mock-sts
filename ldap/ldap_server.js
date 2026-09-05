@@ -5143,7 +5143,11 @@ server.add('', function (req, res, next) {
   req.attributes.forEach(function (attr) {
     attributes[attr.type] = attr.values.slice(0);
   });
-  putEntry(dn, attributes, { origin: 'ldap add' });
+  const addedEntry = putEntry(dn, attributes, { origin: 'ldap add' });
+  if (isPersonEntry(addedEntry)) {
+    noteAccountChange('created', addedEntry.dn, {},
+                      attributeSnapshot(addedEntry));
+  }
   log.info('ldap: added ' + dn + ' with ' + Object.keys(attributes).length +
            ' attribute(s).');
   // What KIND of thing was created is decided by PLACEMENT and not by the
@@ -5184,8 +5188,15 @@ server.del('', function (req, res, next) {
     log.debug('Leaving the LDAP delete handler. It is not a leaf.');
     return next(new ldap.NotAllowedOnNonLeafError(dn));
   }
+  const deletedPerson = isPersonEntry(stored);
+  const deletedAttributes = attributeSnapshot(stored);
+  const deletedName = usernameOfEntry(stored);
   entries.delete(normalizeDn(dn));
   touchDirectory();
+  if (deletedPerson) {
+    noteAccountChange('deleted:' + deletedName, stored.dn, deletedAttributes,
+                      {});
+  }
   // Note what is NOT done here: the DN is left in any group that lists it as a
   // member. See the header — referential integrity is a directory feature and
   // not a protocol rule, and hiding the dangling member would hide the thing a
@@ -5242,6 +5253,10 @@ server.modify('', function (req, res, next) {
   Object.keys(stored.attributes).forEach(function (name) {
     working[name] = stored.attributes[name].slice(0);
   });
+  // The same snapshot writePerson() takes, and for the same reason: `working`
+  // becomes `stored.attributes` below, so anything captured by reference would
+  // read back as unchanged.
+  const beforeModify = attributeSnapshot(stored);
   for (let i = 0; i < req.changes.length; i++) {
     const change = req.changes[i];
     const operation = String(change.operation || '').toLowerCase();
@@ -5291,6 +5306,10 @@ server.modify('', function (req, res, next) {
   stored.attributes = working;
   touchDirectory();
   stored.modifiedAt = working.modifytimestamp[0];
+  if (isPersonEntry(stored)) {
+    noteAccountChange('updated', stored.dn, beforeModify,
+                      attributeSnapshot(stored));
+  }
   log.info('ldap: modified ' + dn + '.');
   // Recorded AFTER the working copy has replaced the stored one, and that is
   // not incidental: a modify is atomic (RFC 4511 section 4.6, which is why the
@@ -7073,6 +7092,107 @@ function readPerson(dn) {
   return entryObject(stored);
 }
 
+// ---------------------------------------------------------------------------
+// THE ACCOUNT OBSERVER, AND IT IS AN INVERTED HOOK FOR THE REASON
+// `authn.setSessionObserver()` IS ONE.
+//
+// RISC is a vocabulary about ACCOUNTS, and the acts it reports — an account
+// disabled, enabled, purged, an identifier changed — happen HERE, in the
+// directory, and nowhere else. `ssf/risc.js` is what turns one into a Security
+// Event Token, and it cannot be required from this file: this module is loaded
+// early enough to bind port 389 and `ssf/` is 23b in the require order, so a
+// require in that direction would drag every `/ssf` route ahead of the
+// management API's. The hook goes the other way, exactly as CAEP's does.
+//
+// **IT SITS ON THE STORE AND NOT ON A DOOR**, which is the whole reason there
+// are five call sites below rather than one in `scim.js`. The same act reaches
+// this directory over SCIM, over LDAP and from the console, and a RISC feature
+// that only noticed the SCIM one would report a deprovisioning to a receiver
+// when it was done with a PATCH and stay silent when it was done with an
+// `ldapmodify` — which is not a smaller feature, it is a transmitter that lies
+// by omission about half its own traffic. That is precisely the defect CAEP
+// shipped with for one revision (`session-presented` from the OAuth2
+// authorization endpoint alone) and it took a test naming every protocol to
+// find, because a count of zero is also what "nobody asked for that type"
+// looks like.
+//
+// **IT IS HANDED THE ATTRIBUTES BEFORE AND AFTER, AND IT DECIDES.** This file
+// knows what a write is; it does not know that `scimActive` going false is an
+// `account-disabled` and that `mail` moving is an `identifier-changed`. Those
+// are RISC's readings and they belong in RISC's file — a version of this that
+// answered "a disable happened" would be the vocabulary leaking into the
+// store, and the third vocabulary would have had to undo it.
+//
+// **AND IT NEVER THROWS INTO A WRITE.** The observer signs a JWS and POSTs it
+// to somebody else's endpoint; an `ldapmodify` that failed because a receiver's
+// TLS handshake did would be a directory whose writes depend on a third party
+// being up.
+// ---------------------------------------------------------------------------
+let accountObserver = null;
+
+function setAccountObserver(fn) {
+  log.debug('Entering setAccountObserver().');
+  accountObserver = typeof fn === 'function' ? fn : null;
+  log.debug('Leaving setAccountObserver(). ' +
+            (accountObserver ? 'Installed.' : 'Cleared.'));
+}
+
+// A snapshot of one entry's attributes, deep enough to survive the write that
+// follows. A shallow copy would hand the observer the SAME arrays the modify
+// handler is about to rewrite in place, so every "before" would equal its
+// "after" and nothing would ever look changed — which is a feature that is
+// silently off rather than one that fails.
+function attributeSnapshot(stored) {
+  log.debug('Entering attributeSnapshot().');
+  const out = {};
+  if (stored && stored.attributes) {
+    Object.keys(stored.attributes).forEach(function (name) {
+      out[name] = (stored.attributes[name] || []).slice(0);
+    });
+  }
+  log.debug('Leaving attributeSnapshot(). ' + Object.keys(out).length +
+            ' attribute(s).');
+  return out;
+}
+
+function noteAccountChange(kind, dn, before, after) {
+  log.debug('Entering noteAccountChange(). ' + kind + ' ' + dn);
+  if (!accountObserver) {
+    log.debug('Leaving noteAccountChange(). Nobody is observing.');
+    return;
+  }
+  try {
+    accountObserver({ kind: String(kind), dn: String(dn),
+      username: canonicalUsernameOfDn(dn), realm: realmFor(dn).id,
+      before: before || {}, after: after || {} });
+  } catch (e) {
+    log.error('ldap: the account observer threw and the write stands: ' +
+              e.message);
+  }
+  log.debug('Leaving noteAccountChange().');
+}
+
+// What a person is CALLED, from a DN alone, for a register that is keyed on
+// people rather than on entries. It reads the stored entry where there is one
+// — `usernameOfEntry()` is the directory's own rule and a second one here
+// would mean RISC naming somebody one thing while a create of that name
+// collided with them under another — and falls back to the RDN value for an
+// entry that has just been deleted and is no longer there to read.
+function canonicalUsernameOfDn(dn) {
+  log.debug('Entering canonicalUsernameOfDn().');
+  const stored = getEntry(dn);
+  if (stored) {
+    const name = usernameOfEntry(stored);
+    log.debug('Leaving canonicalUsernameOfDn(). From the entry.');
+    return name;
+  }
+  const rdn = splitRdns(String(dn || ''))[0] || '';
+  const pairs = rdnPairs(rdn);
+  const value = pairs.length ? String(pairs[0].value || '') : '';
+  log.debug('Leaving canonicalUsernameOfDn(). From the RDN.');
+  return value;
+}
+
 // WHERE A NEW PERSON GOES IS NOT DECIDED HERE, and there used to be a
 // personDnFor() on this line that decided it.
 //
@@ -7099,6 +7219,9 @@ function readPerson(dn) {
 function writePerson(dn, attributes) {
   log.debug('Entering writePerson(). dn=' + dn);
   const existing = getEntry(dn);
+  // Taken BEFORE putEntry() replaces the attributes, because this function is
+  // a REPLACE and the observer's whole question is what moved.
+  const before = attributeSnapshot(existing);
   if (existing && !isPersonEntry(existing)) {
     log.debug('Leaving writePerson(). ' + dn + ' is not under ' + usersDn() + '.');
     return { ok: false, reason: 'notAPerson', dn: dn };
@@ -7122,6 +7245,8 @@ function writePerson(dn, attributes) {
   stored.createdAt = created;
   stored.attributes.createtimestamp = [created];
   stored.attributes.modifytimestamp = [generalizedTime()];
+  noteAccountChange(existing ? 'updated' : 'created', stored.dn, before,
+                    attributeSnapshot(stored));
   log.debug('Leaving writePerson(). The entry was ' + (existing ? 'updated.' : 'created.'));
   return { ok: true, created: !existing, dn: stored.dn, entry: entryObject(stored) };
 }
@@ -7142,8 +7267,14 @@ function deletePerson(dn) {
     log.debug('Leaving deletePerson(). It has children.');
     return { ok: false, reason: 'notLeaf', dn: stored.dn };
   }
+  const goneAttributes = attributeSnapshot(stored);
+  const goneName = usernameOfEntry(stored);
   entries.delete(normalizeDn(stored.dn));
   touchDirectory();
+  // AFTER the entry is gone, so a RISC account-purged reports a purge that
+  // actually happened; and with the name carried, because
+  // canonicalUsernameOfDn() can no longer read an entry that is not there.
+  noteAccountChange('deleted:' + goneName, stored.dn, goneAttributes, {});
   log.debug('Leaving deletePerson(). ' + entries.size + ' entry/entries left.');
   return { ok: true, dn: stored.dn, dangling: membershipsNaming(stored.dn) };
 }
@@ -8009,6 +8140,11 @@ module.exports = {
   // block above boundConnections().
   boundConnections: boundConnections,
   dropConnectionsFor: dropConnectionsFor,
+  // THE ACCOUNT OBSERVER, filled by ssf/risc.js's host ssf/ssf.js at require
+  // time. See setAccountObserver()'s header: this is the only direction that
+  // works, and it is on the STORE rather than on any one door because the
+  // same act reaches this directory over SCIM, over LDAP and from the console.
+  setAccountObserver: setAccountObserver,
   // The DN-syntax rule, shared with createUser() above so that the three doors
   // that create something named cannot disagree about what a name may be.
   nameUsableInDn: nameUsableInDn,

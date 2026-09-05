@@ -813,11 +813,14 @@ const SECTIONS = [
                'Security Event Token nobody asked for, at the moment ' +
                'something happens. <strong>SSF is the pipe and not the ' +
                'vocabulary</strong>: it defines two events of its own, both ' +
-               'about the pipe, and the vocabularies are CAEP and RISC. ' +
-               'Since 2026-09-03 one thing here DOES generate an event ' +
-               'on its own: the CAEP profile, where a session starting, ' +
-               'being presented or ending sends a Security Event Token with ' +
-               'nobody having asked. See <a href="/admin/caep">CAEP</a>.' },
+               'about the pipe, and the vocabularies are ' +
+               '<a href="/admin/caep">CAEP</a> (what happened to a SESSION) ' +
+               'and <a href="/admin/risc">RISC</a> (what happened to an ' +
+               'ACCOUNT). TWO things here generate an event on their own ' +
+               'now, and they watch different registers: CAEP, where a ' +
+               'session starting, being presented or ending sends a ' +
+               'Security Event Token with nobody having asked, and RISC, ' +
+               'where a change to the DIRECTORY does.' },
 
       // BESIDE Shared Signals rather than a section of it, and the argument
       // is the same one that made CAEP rows in `ssf_events.js` rather than a
@@ -846,6 +849,32 @@ const SECTIONS = [
                'does &mdash; no device reports compliance to this service ' +
                'and no risk engine talks to it &mdash; so this page carries ' +
                'the form that emits one by hand.' },
+
+      // AND RISC BESIDE IT, for the reason CAEP is beside Shared Signals
+      // rather than inside it: they are two specifications answering two
+      // questions. CAEP is about a SESSION and RISC is about an ACCOUNT, and
+      // a reader looking for "what has been said about that person's account"
+      // is not looking for "what has been said about that session of theirs"
+      // — which is the whole of the other page.
+      { path: '/admin/risc', label: 'RISC',
+        blurb: 'The <strong>Risk Incident Sharing and Coordination</strong> ' +
+               'profile (OpenID RISC Profile Specification 1.0, published 29 ' +
+               'August 2025 and final on 2 September 2025): the ACCOUNT ' +
+               'vocabulary spoken over <a href="/admin/ssf">Shared ' +
+               'Signals</a>, and the second of the two. Fourteen event types ' +
+               '&mdash; account disabled, enabled and purged, credential ' +
+               'change required, credential compromise, identifier changed ' +
+               'and recycled, the four opt-out events, recovery activated ' +
+               'and recovery information changed, and one that RISC itself ' +
+               'deprecates in favour of a CAEP event. <strong>Eleven of them ' +
+               'carry no payload members at all</strong>, so the subject is ' +
+               'the entire message, which is what makes ' +
+               '<code>risc.subjectFormat</code> the most consequential ' +
+               'setting on the page. With <code>risc.autoEmit</code> on, a ' +
+               'person deleted from the directory, an account marked ' +
+               'inactive and a changed mail address each send an event ' +
+               '&mdash; a DIFFERENT observer from CAEP\'s, watching the ' +
+               'directory rather than the sessions.' },
 
       // UNGROUPED, beside SCIM, and the placement needed the same argument the
       // delegation page needed. Federation spans FIVE protocol families, so
@@ -1154,6 +1183,28 @@ const SECTIONS = [
                'streams would take a CAEP event at all &mdash; because a ' +
                'count of zero almost always means nobody asked for that ' +
                'type, and SSF gives a receiver no other notice of that.' },
+
+      // And the ACCOUNT register beside the session one. Two pages rather
+      // than two tables on one, because a session and an account are not the
+      // same kind of thing: a session begins, is used and ends and there are
+      // many per person, and an account IS the person and outlives every
+      // session on it. One page would have had a first column that was
+      // sometimes one and sometimes the other.
+      { path: '/admin/risc-accounts', label: 'RISC accounts',
+        blurb: 'One row per account this service has been told anything ' +
+               'about, <strong>including accounts that no longer ' +
+               'exist</strong>, with the three states RISC tracks: the ' +
+               'lifecycle (active, disabled, purged), the opt-out state, and ' +
+               'whether a credential has been reported compromised. They ' +
+               'move independently &mdash; an account can be opted out and ' +
+               'perfectly healthy &mdash; which is why they are three ' +
+               'columns rather than one word. The register outliving the ' +
+               'account is starker than the CAEP one outliving a session: a ' +
+               'purged account is gone from the directory entirely, so the ' +
+               'row is the only remaining evidence that anybody was told. ' +
+               'Beside the counts, the events this transmitter built and ' +
+               'deliberately did NOT send, because the account had opted ' +
+               'out.' },
 
       // Beside Delegation and not inside it, and the argument is the one both
       // of that page's pictures rest on: every row there is about two
@@ -1467,6 +1518,10 @@ const SETTING_HOMES = [
   // of the first. The MONITORING page beneath it edits nothing, so it is not
   // named here — this table is about where a setting is EDITED.
   { group: 'CAEP', pages: ['/admin/caep'] },
+  // RISC, on the CAEP group's terms: the second vocabulary over SSF is a
+  // second specification and not a corner of the first, and the MONITORING
+  // page beneath it edits nothing so it is not named here.
+  { group: 'RISC', pages: ['/admin/risc'] },
   // The claim itself is an OAuth2/OIDC and SAML concern, but what it NAMES is a
   // directory group and what decides whether somebody is in one is the Groups
   // page. Somebody asking "why is this group not in my token" is looking at
@@ -1661,6 +1716,15 @@ const LIST_PARAMS = {
   // pagingOf()'s reason — that page carries a second table (the streams) and
   // a bare `page` could not serve both. `per` is shared, as it is everywhere
   // a page holds more than one list.
+  // The RISC pages, on exactly the CAEP pair's terms. `acctq2` is the
+  // chooser's search on the settings page and `acctq` the search on the
+  // monitoring one — two names because the two are different controls on two
+  // pages, and a shared name would carry a chooser's offset into a table's
+  // filter. `rappq` and `rapplicationsPage` are the per-receiver section's,
+  // named apart from the CAEP page's `appq` for the same reason.
+  '/admin/risc': ['acctq2', 'acctfrom'],
+  '/admin/risc-accounts': ['acctq', 'per', 'accountsPage',
+                           'rappq', 'rapplicationsPage'],
   '/admin/caep-sessions': ['sessq', 'per', 'sessionsPage',
                           // The per-receiver section's own search and page
                           // (2026-09-04). Carried for the reason every other
@@ -10117,6 +10181,68 @@ function caepSessionChooser(here, sessions, selectedId) {
       'stays on <a href="/admin/caep-sessions">the sessions page</a> as ' +
       'evidence and is deliberately not offered here, because the state ' +
       'machine refuses a session-presented about a session that has ended.'
+  });
+}
+
+
+// ---------------------------------------------------------------------------
+// THE RISC ACCOUNT CHOOSER, and the one place it is deliberately more
+// permissive than the CAEP session chooser beside it.
+//
+// That control offers only LIVE sessions, because emitting about a revoked one
+// is the CAEP register's single hard refusal and a chooser that offered rows
+// the next click would refuse is a control inviting a mistake. **This one
+// offers every row, including purged accounts**, and the reason is what the
+// two events mean: a session that has ended cannot be presented, and an
+// account that has been purged can perfectly well have a credential of its
+// discovered in a breach corpus afterwards. Only `account-enabled` on a purged
+// account is refused, and that is one event type rather than a whole row.
+//
+// **AND THE FORM ACCEPTS A NAME THAT IS IN NO ROW AT ALL**, which the CAEP
+// form does not. That is the specifications' difference and not an
+// inconsistency: a CAEP event names a SESSION, and a session identifier this
+// service never minted is one it can compose no subject from. A RISC event
+// names a PERSON, this service can name any person, and RISC is aimed ACROSS
+// providers — so the account a receiver is being warned about is usually one
+// it has never seen. This pane is therefore a convenience over the text field
+// below it rather than the only way in.
+//
+// The search reaches `formerIdentifiers` for the reason riscAccountsState()'s
+// does: the address a reader is holding is routinely the one the account no
+// longer has, because `identifier-changed` is an event about the key itself.
+// ---------------------------------------------------------------------------
+function riscAccountChooser(here, accounts, selectedId) {
+  log.debug("Entering riscAccountChooser().");
+  const query = (here && here.query) || {};
+  const carry = pageParamsOf(query);
+  delete carry.acctq2;
+  const entries = (accounts || []).map(function (row) {
+    const who = String(row.username || row.accountId || '(unnamed)');
+    const id = String(row.accountId || '');
+    return {
+      key: id,
+      names: [who, id, String(row.sub || ''), String(row.email || '')]
+        .concat(row.formerIdentifiers || []),
+      label: who + (row.email && row.email !== who ? ' — ' + row.email : ''),
+      detail: String(row.lifecycle || 'active') + ', ' +
+        String(row.optOut || 'opt-in') +
+        (row.total ? ', ' + row.total + ' event(s) sent' : ', nothing sent') +
+        (row.suppressed ? ', ' + row.suppressed + ' suppressed' : ''),
+      href: '/admin/risc' + queryWith(carry, { acctq2: id }) + '#find-acctq2'
+    };
+  });
+  log.debug("Leaving riscAccountChooser(). " + entries.length + " account(s).");
+  return chooserPane({
+    here: here, param: 'acctq2', fromParam: 'acctfrom',
+    label: 'Find an account',
+    placeholder: 'part of a username, a subject or an email address',
+    entries: entries, selectedKey: selectedId,
+    nothing: 'No tracked account matches that. This register holds one row ' +
+      'per account this service has been told anything about &mdash; ' +
+      'including ones that no longer exist &mdash; and it will be empty ' +
+      'until the directory changes or somebody emits an event by hand. You ' +
+      'can type an account name into the form below regardless: a RISC ' +
+      'event names a person, and this service can name any person at all.'
   });
 }
 
@@ -23873,6 +23999,1052 @@ app.get('/admin/caep-sessions/session', function (req, res) {
             (row.events || []).length + " event(s).");
 });
 
+
+// ---------------------------------------------------------------------------
+// THE TENTH SLOT, filled by `../ssf/risc.js`'s host `../ssf/ssf.js` at its own
+// require time, for exactly the reasons the eighth and ninth exist and with
+// the same test answering yes in both directions:
+//
+//   * a require from THIS file to `../ssf/ssf.js` would CLOSE A CYCLE;
+//   * a require from `mgmt-api/admin_api.js` would MOVE ROUTES.
+//
+// **A THIRD SLOT RATHER THAN MORE MEMBERS ON THE NINTH.** The signals reporter
+// answers *what streams exist and what is on them*; the CAEP one answers *what
+// has been said about which SESSION*; this one answers *what has been said
+// about which ACCOUNT*. Those are three questions with five pages between
+// them, and the reason they are three objects rather than one is the reason
+// `setSignalsReporter()` refuses a partial filler: an object carrying all
+// three would mean /admin/ssf failing whole when the RISC half was not
+// installed.
+//
+// It is also the honest shape of the two registers behind them. A session and
+// an account are not the same thing — a session begins, is used and ends,
+// there are many per person, and an account IS the person and outlives every
+// session on it — so a reporter that served both would be one object whose row
+// is sometimes one and sometimes the other.
+// ---------------------------------------------------------------------------
+let riscReporter = null;
+
+function setRiscReporter(reporter) {
+  log.debug("Entering setRiscReporter().");
+  const needed = ['report', 'action', 'actions', 'eventTypes'];
+  const missing = needed.filter(function (name) {
+    return !reporter || reporter[name] === undefined;
+  });
+  if (missing.length) {
+    log.error('admin: setRiscReporter() was given something without ' +
+              missing.join(', ') + ', and was ignored whole. /admin/risc and ' +
+              '/admin/risc-accounts will say the reporter is not installed ' +
+              'rather than half working.');
+    log.debug("Leaving setRiscReporter(). Refused.");
+    return;
+  }
+  riscReporter = reporter;
+  log.debug("Leaving setRiscReporter(). Installed.");
+}
+
+// The whole report, for both pages and for `GET /admin-api/risc`. ONE
+// function, so the two pages and the API cannot come to disagree about what
+// this transmitter has said — rule 7's entire subject.
+function riscJson(req) {
+  log.debug("Entering riscJson().");
+  if (!riscReporter) {
+    log.debug("Leaving riscJson(). Not installed.");
+    return { installed: false, enabled: false, accounts: [], eventTypes: [],
+             streams: [], totals: {}, tracked: 0,
+             settings: configSettingsJson('/admin/risc'),
+             note: 'ssf/ssf.js is not loaded in this process, so nothing ' +
+                   'here can report on the Risk Incident Sharing and ' +
+                   'Coordination profile.' };
+  }
+  const report = riscReporter.report(req);
+  report.installed = true;
+  report.catalogue = riscReporter.eventTypes();
+  report.settings = configSettingsJson('/admin/risc');
+  log.debug("Leaving riscJson(). " + report.tracked + " account(s).");
+  return report;
+}
+
+function riscAction(body) {
+  log.debug("Entering riscAction().");
+  const asked = body || {};
+  if (!riscReporter) {
+    log.debug("Leaving riscAction(). Not installed.");
+    return Promise.resolve({ ok: false, errors: [
+      'ssf/ssf.js is not loaded in this process, so there is nothing to ' +
+      'act on.'] });
+  }
+  const name = String(asked.action || '');
+  log.debug("Leaving riscAction(). " + name);
+  return riscReporter.action(name, asked, null);
+}
+
+// The short name of every RISC event type, in catalogue order, so that the
+// count columns on the monitoring table are in the same order as the emit
+// form's menu. Derived from the reporter rather than written out.
+function riscShortNames(json) {
+  log.debug("Entering riscShortNames().");
+  const out = (json.eventTypes || []).map(function (row) {
+    return row.short;
+  });
+  log.debug("Leaving riscShortNames(). " + out.length + ".");
+  return out;
+}
+
+// A RISC event type's column heading, which has to be SHORT and has to stay
+// distinguishable — and those two pull against each other harder here than
+// they do for CAEP. Four of the fourteen begin `opt-out-` and three begin
+// `account-`, so dropping a common prefix the way the CAEP table drops
+// `session-` would leave three columns headed `-in`, `-initiated` and
+// `-cancelled`. The rule is therefore: drop `account-`, which leaves four
+// distinct words, and keep everything else whole. The whole URI is the title.
+function riscColumnLabel(short) {
+  log.debug("Entering riscColumnLabel(). " + short);
+  const out = String(short || '').replace(/^account-/, '');
+  log.debug("Leaving riscColumnLabel(). " + out);
+  return out;
+}
+
+// What an account's RISC lifecycle is called on the screen, with the class
+// that colours it. `purged` is the one that must not read as ordinary: RISC
+// defines it as permanently deleted and it is the only terminal state in the
+// vocabulary.
+function riscLifecycleCell(state) {
+  log.debug("Entering riscLifecycleCell(). " + state);
+  const cls = (state === 'purged' || state === 'disabled') ? 'state-invalid'
+    : 'sub';
+  const out = '<td class="' + cls + '">' + esc(state) + '</td>';
+  log.debug("Leaving riscLifecycleCell().");
+  return out;
+}
+
+// And its opt-out state, which is a SECOND dimension and not a variant of the
+// first. An account can be opted out and perfectly healthy, or compromised and
+// still exchanging — so the two are two columns, and folding them into one
+// word would mean choosing which of the two questions this page answers.
+function riscOptCell(state) {
+  log.debug("Entering riscOptCell(). " + state);
+  const cls = state === 'opt-out' ? 'state-invalid'
+    : (state === 'opt-out-initiated' ? '' : 'sub');
+  const title = state === 'opt-out'
+    ? 'RISC section 2.8: this account is not participating in event ' +
+      'exchange, so nothing but an opt-out event is sent about it while ' +
+      'risc.honourOptOut is on.'
+    : (state === 'opt-out-initiated'
+        ? 'The person asked to stop and exchange CARRIES ON for a while. ' +
+          'That delay exists to stop a hijacker opting out the moment they ' +
+          'take an account over and silencing the events that would report ' +
+          'them.'
+        : 'Participating in RISC event exchange.');
+  const out = '<td class="' + cls + '" title="' + esc(title) + '">' +
+    esc(state) + '</td>';
+  log.debug("Leaving riscOptCell().");
+  return out;
+}
+
+// ONE ROW OF THE ACCOUNTS TABLE, and its first cell is the way in — the
+// arrangement /admin/caep-sessions has, for its reason.
+function riscAccountRow(row, shorts, prefix, listView, back) {
+  log.debug("Entering riscAccountRow().");
+  const counts = shorts.map(function (short) {
+    const n = row.counts[prefix + short] || 0;
+    return '<td class="' + (n ? '' : 'sub') + '">' + esc(String(n)) + '</td>';
+  }).join('');
+  const href = '/admin/risc-accounts/account' +
+    queryWith(listView || {}, { id: row.accountId });
+  const out = '<tr>' +
+    '<td><a href="' + esc(href) + '" title="' +
+    esc('Everything that has been said about this account, in order') +
+    '"><code>' + esc(row.accountId) + '</code></a>' +
+    (row.email
+      ? '<div class="sub">' + esc(row.email) + '</div>' : '') + '</td>' +
+    '<td class="sub">' + esc(row.subject || '—') + '</td>' +
+    riscLifecycleCell(row.lifecycle) +
+    riscOptCell(row.optOut) +
+    '<td class="' + (row.credentialStanding === 'compromised'
+      ? 'state-invalid' : 'sub') + '">' +
+    esc(row.credentialStanding || '—') + '</td>' +
+    counts +
+    '<td><strong>' + esc(String(row.total)) + '</strong></td>' +
+    '<td class="' + (row.suppressed ? 'state-invalid' : 'sub') + '" title="' +
+    esc('Events this transmitter built and did NOT send, because the ' +
+        'account is in the RISC opt-out state. A count here is the one ' +
+        'number on this page that says a receiver heard nothing ON PURPOSE.') +
+    '">' + esc(String(row.suppressed)) + '</td>' +
+    // IT POSTS TO /admin/risc AND NOT TO THE PAGE IT IS ON, for the reason
+    // the CAEP table's Reset does: there is one RISC action handler and one
+    // operation on /admin-api over it, and moving a form is not moving an
+    // action.
+    '<td><form method="post" action="/admin/risc">' +
+    '<input type="hidden" name="action" value="reset-account">' +
+    '<input type="hidden" name="account_id" value="' +
+    esc(row.accountId) + '">' +
+    '<input type="hidden" name="from" value="accounts">' +
+    '<input type="hidden" name="back" value="' + esc(back || '') + '">' +
+    '<button class="secondary">Reset</button></form></td>' +
+    '</tr>';
+  log.debug("Leaving riscAccountRow().");
+  return out;
+}
+
+function riscEventRow(one) {
+  return '<tr><td class="sub">' + esc(one.at) + '</td>' +
+    '<td>' + esc(one.name) + '</td>' +
+    '<td><code>' + esc(one.jti) + '</code></td>' +
+    '<td><code>' + esc(one.streamId || '(none)') + '</code></td>' +
+    '<td class="sub">' + esc((one.warnings || []).join(' ') || '—') +
+    '</td></tr>';
+}
+
+// The facts about one account that are not events. It is longer than the CAEP
+// equivalent by exactly the amount RISC's model is larger: a session has one
+// state and an account has three that move independently, and the identifiers
+// it has been known by are a list rather than a value — because
+// `identifier-changed` is an event about the key itself.
+function riscAccountFacts(row) {
+  log.debug("Entering riscAccountFacts().");
+  function line(label, value, cls) {
+    return '<tr><th>' + esc(label) + '</th><td' +
+      (cls ? ' class="' + cls + '"' : '') + '>' + value + '</td></tr>';
+  }
+  const out = '<table>' +
+    line('Account', '<code>' + esc(row.accountId) + '</code>') +
+    line('Subject', '<span class="sub">' + esc(row.subject || '—') +
+      '</span>') +
+    line('Issuer', '<span class="sub"><code>' + esc(row.iss || '—') +
+      '</code></span>') +
+    line('Directory entry', '<span class="sub"><code>' + esc(row.dn || '—') +
+      '</code></span>') +
+    line('Lifecycle', esc(row.lifecycle),
+      (row.lifecycle === 'purged' || row.lifecycle === 'disabled')
+        ? 'state-invalid' : 'sub') +
+    line('Opt-out state', esc(row.optOut),
+      row.optOut === 'opt-out' ? 'state-invalid' : 'sub') +
+    line('Credential standing', esc(row.credentialStanding || '—'),
+      row.credentialStanding === 'compromised' ? 'state-invalid' : 'sub') +
+    line('Credential change required', row.credentialChangeRequired
+      ? 'yes' : '<span class="sub">no</span>') +
+    line('Recovery activated', row.recoveryActivated
+      ? 'yes' : '<span class="sub">no</span>') +
+    line('Email', '<span class="sub">' + esc(row.email || '—') + '</span>') +
+    line('Phone', '<span class="sub">' + esc(row.phone || '—') + '</span>') +
+    ((row.formerIdentifiers || []).length
+      ? line('Known by, formerly', '<span class="sub" title="' +
+        esc('An event naming one of these still counts against this row. ' +
+            'That is what keeps identifier-changed from splitting one ' +
+            'person into two rows at the moment their identifier moves.') +
+        '">' + esc(row.formerIdentifiers.join(', ')) + '</span>')
+      : '') +
+    line('First seen', '<span class="sub">' + esc(row.createdAt) +
+      '</span>') +
+    line('Last changed', '<span class="sub">' + esc(row.updatedAt) +
+      '</span>') +
+    line('Suppressed', esc(String(row.suppressed || 0)),
+      row.suppressed ? 'state-invalid' : 'sub') +
+    ((row.identifierChanges || []).length
+      ? line('Identifier changes', '<span class="sub">' +
+        esc(row.identifierChanges.map(function (one) {
+          return (one.from || '(none)') + ' → ' + (one.to || '(not said)');
+        }).join(', ')) + '</span>')
+      : '') +
+    ((row.credentials || []).length
+      ? line('Compromised credentials', '<span class="sub">' +
+        esc(row.credentials.map(function (one) {
+          return one.credentialType || '(unstated)';
+        }).join(', ')) + '</span>')
+      : '') +
+    ((row.notes || []).length
+      ? line('Notes', '<span class="sub">' + esc(row.notes.join(' ')) +
+        '</span>')
+      : '') +
+    '</table>';
+  log.debug("Leaving riscAccountFacts().");
+  return out;
+}
+
+// What has been said about this account PER TYPE, written the long way round.
+// It carries a DEPRECATED column that the CAEP equivalent has no need of: one
+// of RISC's fourteen is deprecated by its own specification in favour of a
+// CAEP event, and a count in that row is a fact about the receiver's future
+// rather than about this account.
+function riscAccountCounts(row, types) {
+  log.debug("Entering riscAccountCounts().");
+  const rows = types.map(function (type) {
+    const n = row.counts[type.uri] || 0;
+    return '<tr><td>' + esc(type.name) + '</td>' +
+      '<td class="sub"><code>' + esc(type.short) + '</code></td>' +
+      '<td class="' + (type.deprecated ? 'state-invalid' : 'sub') + '">' +
+      (type.deprecated
+        ? 'deprecated &mdash; use <code>' +
+          esc(String(type.deprecated).split('/').pop()) + '</code>'
+        : '&mdash;') + '</td>' +
+      '<td class="' + (n ? '' : 'sub') + '">' + esc(String(n)) + '</td></tr>';
+  }).join('');
+  log.debug("Leaving riscAccountCounts(). " + types.length + " type(s).");
+  return '<table><tr><th>Event type</th><th>Short name</th><th></th>' +
+    '<th>Sent</th></tr>' + rows + '</table>';
+}
+
+// ---------------------------------------------------------------------------
+// PROTOCOLS -> RISC. The settings, the catalogue, and the form that emits the
+// ten event types nothing here can cause.
+//
+// It is the CONFIGURATION page of this pair and /admin/risc-accounts is the
+// MONITORING one, which is the same division /admin/caep and
+// /admin/caep-sessions have and for the same reason: a settings page and an
+// observation are two different things, and the sidebar says so by putting
+// them in two different sections.
+// ---------------------------------------------------------------------------
+app.get('/admin/risc', function (req, res) {
+  log.debug("Entering the admin RISC page.");
+  const json = riscJson(req);
+
+  const catalogue = (json.catalogue || []).map(function (row) {
+    const members = row.members.map(function (member) {
+      return '<tr><td><code>' + esc(member.name) + '</code></td>' +
+        '<td class="' + (member.required ? '' : 'sub') + '">' +
+        (member.required ? 'required' : 'optional') + '</td>' +
+        '<td class="sub"><code>' + esc(member.type) + '</code>' +
+        (member.values.length
+          ? ' ' + esc(member.values.join(' | ')) : '') + '</td>' +
+        '<td class="sub">' + esc(member.what) + '</td></tr>';
+    }).join('');
+    return '<div class="card"><h3>' + esc(row.name) + ' &mdash; <code>' +
+      esc(row.short) + '</code>' +
+      (row.offered ? '' : ' <span class="state-invalid">not offered</span>') +
+      (row.deprecated
+        ? ' <span class="state-invalid">deprecated</span>' : '') +
+      '</h3><div class="sub">' + esc(row.what) + '</div>' +
+      ((row.subjectFormats || []).length
+        ? '<div class="sub"><strong>Its subject must be</strong> <code>' +
+          esc(row.subjectFormats.join('</code> or <code>')) +
+          '</code>, and it carries the OLD value.</div>'
+        : '') +
+      (members
+        ? '<table><tr><th>Member</th><th></th><th>Type</th>' +
+          '<th>What it is</th></tr>' + members + '</table>'
+        : '<div class="sub">No payload members at all. The subject carries ' +
+          'the entire message.</div>') +
+      '</div>';
+  }).join('');
+
+  // WHICH ACCOUNT THE FORM WILL EMIT ABOUT. Off the query string, like the
+  // CAEP page's session — see riscAccountChooser(), and note the one place
+  // this page is deliberately more permissive than that one.
+  const here = { path: '/admin/risc', query: req.query };
+  const wantedAccount = queryOne(here.query, 'acctq2').trim();
+  let picked = null;
+  (json.accounts || []).forEach(function (row) {
+    if (String(row.accountId || '') === wantedAccount) {
+      picked = row;
+    }
+  });
+  const accountChooser = riscAccountChooser(here, json.accounts || [],
+      picked ? picked.accountId : '');
+
+  const typeOptions = (json.catalogue || []).map(function (row) {
+    return '<option value="' + esc(row.short) + '">' + esc(row.name) +
+      (row.deprecated ? ' (deprecated)' : '') + '</option>';
+  }).join('');
+
+  const inner = messagesOf(req) +
+    (!json.installed
+      ? '<div class="err"><strong>Shared Signals is not loaded in this ' +
+        'process</strong>, so RISC has nothing to run on. RISC is a ' +
+        'VOCABULARY over SSF rather than a family of its own: its events ' +
+        'travel on SSF streams, are signed by the SSF signer and are ' +
+        'delivered by the two SSF deliveries.</div>'
+      : '') +
+    (json.installed && !json.enabled
+      ? warn('<strong>RISC is turned off</strong> ' +
+        '(<code>risc.enabled</code>). The fourteen event types are dropped ' +
+        'from <code>events_supported</code>, so a stream asking for one ' +
+        'gets it back missing from <code>events_delivered</code> &mdash; ' +
+        'which is the only notice SSF gives. SSF and CAEP are unaffected.')
+      : '') +
+
+    note('<strong>RISC</strong> (OpenID RISC Profile Specification 1.0, ' +
+    'published 29 August 2025 and final on 2 September 2025) is the ' +
+    '<strong>account</strong> vocabulary spoken over ' +
+    '<a href="/admin/ssf">Shared Signals</a>, and the second of the two. ' +
+    '<a href="/admin/caep">CAEP</a> says <em>this session is no longer ' +
+    'trustworthy</em>; RISC says <em>this account is no longer ' +
+    'trustworthy</em>. Those are two different sentences and the second is ' +
+    'the larger by orders of magnitude &mdash; a revoked session is one ' +
+    'sign-in at one relying party, and a purged account is every session ' +
+    'that person has anywhere, for ever. CAEP is aimed WITHIN an enterprise ' +
+    'and RISC ACROSS providers: its origin is a consumer provider noticing ' +
+    'an account has been taken over and telling every site that account ' +
+    'signs in to.') +
+
+    warn('<strong>Eleven of the fourteen carry no payload members at all, ' +
+    'so the subject IS the message.</strong> <code>account-purged</code> ' +
+    'says nothing but its own type and who it is about &mdash; which means ' +
+    'a subject naming the wrong person is not a partly wrong event, it is a ' +
+    'completely wrong one with nothing else in it to notice by. ' +
+    '<code>risc.subjectFormat</code> below is therefore the most ' +
+    'consequential setting on this page.') +
+
+    warn('<strong>This service emits RISC events when its own DIRECTORY ' +
+    'changes</strong>, which is a different observer from CAEP\'s. With ' +
+    '<code>risc.autoEmit</code> on, a person deleted emits ' +
+    '<code>account-purged</code>, <code>active</code> going false or true ' +
+    'emits <code>account-disabled</code> or <code>account-enabled</code>, ' +
+    'and a changed mail address or telephone number emits ' +
+    '<code>identifier-changed</code>. Those acts reach this directory over ' +
+    '<a href="/admin/scim">SCIM</a>, over <a href="/admin/ldap">LDAP</a> ' +
+    'and from the console alike, because the observer sits on the WRITE ' +
+    'rather than on any one door.') +
+
+    note('<strong>Setting <code>active</code> to false still deactivates ' +
+    'nobody here</strong>, and that has not changed. No endpoint reads the ' +
+    'attribute, no bind is refused and no token is withheld &mdash; ' +
+    '<a href="/admin/scim">the SCIM page</a> says so, because a mock that ' +
+    'silently pretended would teach a provisioning client that its ' +
+    'deprovisioning path works. What is new is that this service now SAYS ' +
+    'so, over RISC, which is exactly the division the profile draws: a ' +
+    'transmitter reports and a receiver decides.') +
+
+    '<div class="tiles">' +
+    tile(json.tracked || 0, 'accounts tracked') +
+    tile((json.eventTypes || []).length, 'event types') +
+    tile(Object.keys(json.totals || {}).reduce(function (n, uri) {
+      return n + json.totals[uri];
+    }, 0), 'events sent') +
+    tile((json.autoEmitActs || []).length, 'acts emit on their own') +
+    '</div>' +
+
+    (json.installed && json.googleSubjectType
+      ? warn('<code>risc.googleSubjectType</code> is on, so every RISC ' +
+        'subject leaving here spells its discriminator ' +
+        '<code>subject_type</code> rather than <code>format</code>. That is ' +
+        'RISC section 3.1\'s own compatibility note about a production ' +
+        'transmitter in the field: the specification says new services MUST ' +
+        'NOT use the name and then tells relying parties they need code to ' +
+        'work around it anyway. This is how a receiver finds out whether it ' +
+        'has that code. CAEP and SSF events are untouched.')
+      : '') +
+
+    (json.installed
+      ? '<h2>Emit one by hand</h2>' +
+        note('Ten of the fourteen describe things nothing here does &mdash; ' +
+        'no breach corpus is searched by this service and no recovery flow ' +
+        'runs in it &mdash; so this form is the only way they are ever ' +
+        'produced. <strong>Four of those ten CHANGE REAL STATE when they ' +
+        'go</strong>: RISC section 2.8 defines each opt-out event as ' +
+        '<em>the account is in this state</em> rather than as a report that ' +
+        'it moved, so emitting one here IS the transition. The subject is ' +
+        'composed from the account you pick, in the format ' +
+        '<code>risc.subjectFormat</code> names &mdash; except for the two ' +
+        'identifier events, which use an email address regardless, because ' +
+        'for those two the identifier is the message.') +
+        accountChooser +
+        (picked
+          ? '<p class="note">Emitting about <strong>' +
+            esc(String(picked.username || picked.accountId)) +
+            '</strong> &mdash; <code>' + esc(picked.subject || '') +
+            '</code>. Its lifecycle is <code>' + esc(picked.lifecycle) +
+            '</code> and its opt-out state is <code>' + esc(picked.optOut) +
+            '</code>.</p>'
+          : note('Pick an account above, or type one below. <strong>An ' +
+            'account this service has never held is accepted</strong>, ' +
+            'which is the opposite of what the CAEP form does with an ' +
+            'unknown session and is the specification\'s difference rather ' +
+            'than an inconsistency: a session identifier this service never ' +
+            'minted is one it can compose no subject from, and an account ' +
+            'is a person. RISC is aimed ACROSS providers, so the account a ' +
+            'receiver is warned about is usually one it has never seen.')) +
+        '<form method="post" action="/admin/risc"><div class="formrow">' +
+        '<input type="hidden" name="action" value="emit">' +
+        '<label>Account <input type="text" name="account_id" size="24" ' +
+        'value="' + esc(picked ? picked.accountId : '') + '"></label> ' +
+        '<label>Event <select name="type">' + typeOptions +
+        '</select></label>' +
+        '</div><div class="formrow">' +
+        '<label>Payload (JSON, optional) ' +
+        '<input type="text" name="payload" size="60" ' +
+        'placeholder="{&quot;reason&quot;:&quot;hijacking&quot;}">' +
+        '</label>' +
+        '</div><div class="formrow">' +
+        '<label>reason_admin <input type="text" name="reason_admin" ' +
+        'size="40"></label> ' +
+        '<label>reason_user <input type="text" name="reason_user" ' +
+        'size="40"></label>' +
+        '</div>' +
+        note('The two reason fields reach the wire for ONE of the fourteen ' +
+        'types. RISC gives <code>reason_admin</code>, ' +
+        '<code>reason_user</code> and <code>event_timestamp</code> to ' +
+        '<code>credential-compromise</code> and to nothing else &mdash; ' +
+        'where CAEP gives four claims to all eight of its own &mdash; so ' +
+        'on any other type they are composed and dropped by the catalogue ' +
+        'rather than sent as members the specification does not define.') +
+        '<div class="formrow"><button>Emit</button></div></form>'
+      : '') +
+
+    // Folded and closed by default, for the reason the CAEP catalogue is:
+    // fourteen cards is seven screens of REFERENCE between the controls
+    // above and the settings below.
+    (json.installed
+      ? '<details class="fold section"><summary>The fourteen event types' +
+        '</summary><div class="foldbody">' +
+        note('<strong>Only one of the fourteen has a required ' +
+        'member</strong> &mdash; <code>credential-compromise</code>\'s ' +
+        '<code>credential_type</code>, which RISC defines BY REFERENCE to ' +
+        'CAEP\'s <code>credential-change</code>, so the two lists are the ' +
+        'same list rather than two alike ones. Eleven have no members at ' +
+        'all. And one member name in the whole of Shared Signals uses a ' +
+        'HYPHEN: <code>identifier-changed</code>\'s <code>new-value</code>, ' +
+        'where everything else in all three vocabularies is snake_case, so ' +
+        '<code>new_value</code> typed from habit produces an event that ' +
+        'delivers and says nothing.') +
+        catalogue +
+        '</div></details>'
+      : '') +
+
+    configFormsFor('/admin/risc') +
+
+    note('<a href="/admin/risc-accounts">The accounts and what has been ' +
+    'said about them</a> &middot; ' +
+    '<a href="/admin/caep">the other vocabulary</a> &middot; ' +
+    '<a href="/admin/ssf">the streams it all goes out on</a> &middot; ' +
+    '<a href="/admin/risc?format=json">this page as JSON</a> &middot; ' +
+    '<a href="/admin-api/risc">the same over the management API</a>');
+
+  respond(req, res, json, 'RISC', '/admin/risc', inner);
+  log.debug("Leaving the admin RISC page.");
+});
+
+app.post('/admin/risc', function (req, res) {
+  log.debug("Entering the admin RISC action endpoint.");
+  const body = parseBody(req);
+  // THE ONE RISC ACTION HANDLER, AND THREE PAGES POST TO IT: this one, the
+  // accounts table and the one-account drill-down. `from` says which, read as
+  // an ENUM and never as a path.
+  const back = riscAccountsBackTo(body);
+  riscAction(body).then(function (result) {
+    respondToAction(req, res, back, result);
+    log.debug("Leaving the admin RISC action endpoint.");
+  }).catch(function (e) {
+    log.error('admin: the RISC action threw: ' + e.message);
+    respondToAction(req, res, back,
+      { ok: false, errors: ['The action failed: ' + e.message] });
+    log.debug("Leaving the admin RISC action endpoint. Threw.");
+  });
+});
+
+// WHERE A RISC ACTION ANSWERS BACK TO. The same enum-not-a-path rule
+// caepSessionsBackTo() follows, for its reason.
+function riscAccountsBackTo(body) {
+  log.debug("Entering riscAccountsBackTo().");
+  const from = String((body || {}).from || '');
+  if (from === 'account') {
+    const target = '/admin/risc-accounts/account' +
+      queryWith(listViewFromBack('/admin/risc-accounts', body.back),
+                { id: String(body.account_id || '') });
+    log.debug("Leaving riscAccountsBackTo(). " + target);
+    return target;
+  }
+  if (from === 'accounts') {
+    const target = '/admin/risc-accounts' +
+      queryWith(listViewFromBack('/admin/risc-accounts', body.back), {});
+    log.debug("Leaving riscAccountsBackTo(). " + target);
+    return target;
+  }
+  log.debug("Leaving riscAccountsBackTo(). The RISC page.");
+  return '/admin/risc';
+}
+
+// ---------------------------------------------------------------------------
+// MONITORING -> RISC ACCOUNTS.
+//
+// **THE REGISTER OUTLIVES THE ACCOUNT, AND MORE STARKLY THAN THE CAEP ONE
+// OUTLIVES A SESSION.** That register keeps a row for a session the session
+// store has forgotten. This one keeps a row for an account that has been
+// DELETED FROM THE DIRECTORY ENTIRELY — the row whose lifecycle says `purged`
+// is the only remaining evidence anywhere that this service ever told anybody
+// the account was purged, and *"did anything go out when I deleted that
+// person?"* is the entire question this page answers.
+//
+// It is under Monitoring rather than beside the settings for the reason
+// /admin/caep-sessions is: that section's heading says *what this service has
+// done*, and this is an OBSERVATION.
+// ---------------------------------------------------------------------------
+// THE SEARCH AND THE SLICE, as one pure function called twice — by the page
+// and by the management API — for the reason caepSessionsState() is one.
+//
+// The search reaches `formerIdentifiers` as well as the current ones, and that
+// is not thoroughness: an `identifier-changed` is an event ABOUT the key, so
+// the address a reader arrives holding — out of a log, off an event they are
+// chasing — is routinely the one the account no longer has. A search that
+// matched only the current spelling would hide exactly the row somebody came
+// to find.
+function riscAccountsState(req, report) {
+  log.debug("Entering riscAccountsState().");
+  const wanted = queryOne(req.query, 'acctq').trim();
+  const matched = (report.accounts || []).filter(function (row) {
+    return chooserMatches([row.accountId, row.username, row.sub, row.email,
+                           row.phone, row.subject, row.dn].concat(
+                           row.formerIdentifiers || []), wanted);
+  });
+  const page = pagedRows(req.query, matched,
+    { name: 'accounts', noun: 'accounts' });
+  log.debug("Leaving riscAccountsState(). " + page.shown.length + " of " +
+            matched.length + ".");
+  return { wanted: wanted, matched: matched, page: page };
+}
+
+function riscApplicationsState(req, report) {
+  log.debug("Entering riscApplicationsState().");
+  const wanted = queryOne(req.query, 'rappq').trim();
+  const matched = (report.applications || []).filter(function (row) {
+    return chooserMatches([row.identifier, row.name, row.audiences.join(' ')],
+                          wanted);
+  });
+  const page = pagedRows(req.query, matched,
+    { name: 'rapplications', noun: 'receivers' });
+  log.debug("Leaving riscApplicationsState(). " + page.shown.length + " of " +
+            matched.length + ".");
+  return { wanted: wanted, matched: matched, page: page };
+}
+
+function riscApplicationRow(row, shorts, prefix) {
+  log.debug("Entering riscApplicationRow(). " + row.identifier);
+  const counts = shorts.map(function (short) {
+    const n = row.counts[prefix + short] || 0;
+    return '<td class="' + (n ? '' : 'sub') + '">' + esc(String(n)) + '</td>';
+  }).join('');
+  const who = row.registered
+    ? '<a href="' + esc('/admin/applications' +
+        queryWith({ application: row.identifier }, {})) + '">' +
+      esc(row.name || row.identifier) + '</a>' +
+      (row.name && row.name !== row.identifier
+        ? '<div class="sub"><code>' + esc(row.identifier) + '</code></div>'
+        : '')
+    : '<span class="sub">' + esc(row.name || row.identifier) + '</span>';
+  const streams = row.streamCount
+    ? esc(String(row.streamCount)) +
+      (row.enabled === row.streamCount
+        ? ''
+        : ' <span class="state-invalid">(' + esc(String(row.enabled)) +
+          ' enabled)</span>') +
+      '<div class="sub">' + esc(row.deliveries.join(', ')) + '</div>'
+    : '<span class="state-none" title="' +
+      esc('Declared for Shared Signals and no stream has been agreed.') +
+      '">none</span>';
+  const audience = row.audiences.length
+    ? (row.audiences.length === 1 && row.audiences[0] === row.identifier
+        ? '<span class="sub">the same</span>'
+        : shortened(row.audiences.join(', '), 20))
+    : '<span class="sub">&mdash;</span>';
+  const out = '<tr>' +
+    '<td>' + who + '</td>' +
+    '<td>' + streams + '</td>' +
+    '<td class="sub">' + audience + '</td>' +
+    '<td class="' + (row.takes.length ? '' : 'state-invalid') + '">' +
+    esc(row.takes.length ? String(row.takes.length) + ' of 14'
+                         : 'none of RISC\'s fourteen') + '</td>' +
+    counts +
+    '<td><strong>' + esc(String(row.total)) + '</strong></td>' +
+    '<td class="sub">' + esc(String(row.accounts)) + '</td>' +
+    '<td class="sub">' + esc(String(row.delivered)) + ' / ' +
+    '<span class="' + (row.failed ? 'state-invalid' : 'sub') + '">' +
+    esc(String(row.failed)) + '</span>' +
+    (row.lastPushError
+      ? '<div class="sub" title="' + esc(row.lastPushError) + '">last error ' +
+        'recorded</div>'
+      : '') + '</td>' +
+    '</tr>';
+  log.debug("Leaving riscApplicationRow().");
+  return out;
+}
+
+// The reply BOTH doors answer with. `/admin/risc-accounts?format=json` and
+// GET /admin-api/risc/accounts are the same document — rule 7 — and the
+// drill-down is `?account=`, one operation answering two shapes for the reason
+// the CAEP pair gives: they are the same question at two scales and the
+// console draws them from one register.
+function riscAccountsJson(req) {
+  log.debug("Entering riscAccountsJson().");
+  const json = riscJson(req);
+  const asked = String(req.query.account || '').trim();
+  if (asked) {
+    const row = (json.accounts || []).filter(function (one) {
+      return String(one.accountId) === asked;
+    })[0] || null;
+    const eventPage = pagedRows(req.query, (row && row.events) || [],
+      { name: 'events', noun: 'events' });
+    log.debug("Leaving riscAccountsJson(). One account.");
+    return { installed: json.installed, id: asked, account: row,
+             eventTypes: json.eventTypes || [],
+             events: eventPage.shown,
+             paging: { events: pagingJson(eventPage.paging) } };
+  }
+  const state = riscAccountsState(req, json);
+  const appState = riscApplicationsState(req, json);
+  log.debug("Leaving riscAccountsJson(). The list.");
+  return Object.assign({}, json, {
+    filter: { accounts: state.wanted || null,
+              applications: appState.wanted || null },
+    paging: { accounts: pagingJson(state.page.paging),
+              applications: pagingJson(appState.page.paging) }
+  });
+}
+
+app.get('/admin/risc-accounts', function (req, res) {
+  log.debug("Entering the admin RISC accounts page.");
+  const json = riscJson(req);
+  const shorts = riscShortNames(json);
+  const prefix = 'https://schemas.openid.net/secevent/risc/event-type/';
+
+  const headers = shorts.map(function (short) {
+    return '<th title="' + esc(prefix + short) + '">' +
+      esc(riscColumnLabel(short)) + '</th>';
+  }).join('');
+
+  const state = riscAccountsState(req, json);
+  const appState = riscApplicationsState(req, json);
+  const navParams = pageParamsOf(req.query);
+  const acctNav = pageNavPair('/admin/risc-accounts', navParams,
+                              state.page.paging);
+  const appNav = pageNavPair('/admin/risc-accounts', navParams,
+                             appState.page.paging);
+  const listView = listViewOf('/admin/risc-accounts', req.query);
+  const back = queryWith(listView, {});
+
+  const rows = state.page.shown.length
+    ? state.page.shown.map(function (row) {
+        return riscAccountRow(row, shorts, prefix, listView, back);
+      }).join('')
+    : '<tr><td colspan="' + (shorts.length + 8) + '">' +
+      (state.wanted
+        ? 'No tracked account matches <code>' + esc(state.wanted) +
+          '</code>. ' +
+          ((json.accounts || []).length
+            ? (json.accounts || []).length + ' account(s) are tracked under ' +
+              'other names.'
+            : 'None is tracked at all yet.')
+        : 'No accounts are tracked. Change one in the directory &mdash; ' +
+          'delete a person, set <code>active</code> to false over ' +
+          '<a href="/admin/scim">SCIM</a>, change a mail address with an ' +
+          '<code>ldapmodify</code> &mdash; and a row appears here whether ' +
+          'or not any stream is agreed, which is what makes &ldquo;nothing ' +
+          'arrived&rdquo; traceable to &ldquo;nobody asked&rdquo;.') +
+      '</td></tr>';
+
+  const streamRows = (json.streams || []).length
+    ? json.streams.map(function (row) {
+        return '<tr><td><code>' + esc(row.stream_id) + '</code></td>' +
+          '<td class="sub">' + esc(row.aud) + '</td>' +
+          '<td class="' + (row.status === 'enabled' ? 'state-valid' : 'sub') +
+          '">' + esc(row.status) + '</td>' +
+          '<td class="sub">' + esc(row.delivery) + '</td>' +
+          '<td class="sub">' + esc(String(row.subjects)) + '</td>' +
+          '<td class="' + (row.takes.length ? '' : 'state-invalid') + '">' +
+          esc(row.takes.length ? row.takes.join(', ')
+            : 'none of RISC\'s fourteen') + '</td></tr>';
+      }).join('')
+    : '<tr><td colspan="6">No streams. Nothing this service says about an ' +
+      'account has anywhere to go, and every row above will show a count of ' +
+      'zero however much the directory changes.</td></tr>';
+
+  const inner = messagesOf(req) +
+    (!json.installed
+      ? '<div class="err"><strong>Shared Signals is not loaded in this ' +
+        'process</strong>, so no account state is tracked.</div>'
+      : '') +
+    (json.installed && !json.enabled
+      ? warn('<strong>RISC is turned off</strong> ' +
+        '(<code>risc.enabled</code>), so nothing new is being recorded ' +
+        'here. What is below is what was recorded before it was turned ' +
+        'off.')
+      : '') +
+    (json.installed && json.enabled && !json.autoEmit
+      ? warn('<strong>Automatic emission is off</strong> ' +
+        '(<code>risc.autoEmit</code>). Accounts still appear here and their ' +
+        'state still follows what really happens in the directory, and ' +
+        'nothing goes out unless somebody emits it from ' +
+        '<a href="/admin/risc">the RISC page</a>.')
+      : '') +
+
+    note('One row per account this service has been told anything about, ' +
+    '<strong>including accounts that no longer exist</strong>. That is ' +
+    'deliberate and it is the whole reason this page exists: a purged ' +
+    'account is gone from the directory entirely, so a row whose lifecycle ' +
+    'is <code>purged</code> is the only remaining evidence that this ' +
+    'service ever told anybody it was. The counts are per event type and ' +
+    'they never forget; WHICH events those were is ' +
+    '<a href="/admin/risc-accounts/account">each account\'s own page</a>.') +
+
+    note('<strong>The lifecycle and the opt-out state are two columns and ' +
+    'not one.</strong> They move independently: an account can be opted out ' +
+    'and perfectly healthy, or compromised and still exchanging. A CAEP ' +
+    'session has one state because a session is alive or it is not; an ' +
+    'account has three that a receiver acts on differently.') +
+
+    (json.installed && json.honourOptOut
+      ? note('<code>risc.honourOptOut</code> is on, so an account in the ' +
+        '<code>opt-out</code> state has its events SUPPRESSED and the ' +
+        '<em>Suppressed</em> column counts them &mdash; the one number on ' +
+        'this page that says a receiver heard nothing on purpose. The four ' +
+        'opt-out events themselves are never suppressed: ' +
+        '<code>opt-out-effective</code> is an event announcing that there ' +
+        'will be no more events, and <code>opt-in</code> is the only way a ' +
+        'receiver ever learns the account came back.')
+      : warn('<code>risc.honourOptOut</code> is OFF, so events go out about ' +
+        'accounts that have opted out of RISC exchange. RISC section 2.8 ' +
+        'says an opted-out account is not participating; this is how a ' +
+        'receiver that ignores an opt-out gets to be shown doing it.')) +
+
+    '<div class="tiles">' +
+    tile(json.tracked || 0, 'accounts') +
+    tile((json.accounts || []).filter(function (row) {
+      return row.lifecycle === 'purged';
+    }).length, 'purged') +
+    tile((json.accounts || []).filter(function (row) {
+      return row.lifecycle === 'disabled';
+    }).length, 'disabled') +
+    tile((json.accounts || []).filter(function (row) {
+      return row.optOut !== 'opt-in';
+    }).length, 'opted out') +
+    tile(Object.keys(json.totals || {}).reduce(function (n, uri) {
+      return n + json.totals[uri];
+    }, 0), 'events sent') +
+    tile((json.streams || []).filter(function (row) {
+      return row.takes.length;
+    }).length, 'streams taking RISC') +
+    '</div>' +
+
+    '<h2>Accounts</h2>' +
+    note('<strong>Every identifier in the first column opens that account ' +
+    'on its own page</strong> &mdash; what has actually been sent about it, ' +
+    'in order, with what the register noticed as each one was applied.') +
+    sectionSearchForm({
+      path: '/admin/risc-accounts', query: req.query,
+      param: 'acctq', pageParam: 'accountsPage',
+      label: 'Narrow to an account',
+      placeholder: 'a username, a subject, an email address or a DN',
+      what: 'It matches the account identifier, the <code>sub</code>, the ' +
+        'email address, the telephone number, the SSF subject as a receiver ' +
+        'was sent it, the directory DN &mdash; and every identifier this ' +
+        'account has been known by FORMERLY. That last one is not ' +
+        'thoroughness: <code>identifier-changed</code> is an event about ' +
+        'the key itself, so the address a reader arrives holding is ' +
+        'routinely the one the account no longer has.'
+    }) +
+    perPageForm('/admin/risc-accounts', 'acctq', state.wanted,
+                state.page.paging.perPage,
+                'Only the accounts table is paged.', {}) +
+    acctNav.head +
+    '<table><tr><th>Account</th><th>Subject</th><th>Lifecycle</th>' +
+    '<th>Opt-out</th><th>Credential</th>' + headers +
+    '<th>Total</th><th>Suppressed</th><th></th></tr>' + rows + '</table>' +
+    acctNav.foot +
+
+    '<h2>Where a RISC event could go</h2>' +
+    note('An account with a count of zero almost always means <strong>no ' +
+    'stream asked for that type</strong> rather than anything being wrong. ' +
+    'SSF has no refusal for an event type a transmitter will not deliver ' +
+    '&mdash; its absence from <code>events_delivered</code> is the only ' +
+    'notice a receiver gets &mdash; so this table is where that shows up.') +
+    '<table><tr><th>Stream</th><th>aud</th><th>Status</th><th>Delivery</th>' +
+    '<th>Subjects</th><th>RISC types it takes</th></tr>' + streamRows +
+    '</table>' +
+
+    '<h2>Per application</h2>' +
+    note('<strong>What this transmitter has said to each receiver, across ' +
+    'every account.</strong> The table above this one is per STREAM and the ' +
+    'one above that is per ACCOUNT; this is the third question, and it is ' +
+    'the one somebody arrives with once more than one receiver exists.') +
+    sectionSearchForm({
+      path: '/admin/risc-accounts', query: req.query,
+      param: 'rappq', pageParam: 'rapplicationsPage',
+      label: 'Narrow to a receiver',
+      placeholder: 'an application name, an identifier or an aud',
+      what: 'It matches the application name, the identifier it ' +
+        'authenticated as, and the <code>aud</code> on its streams. It does ' +
+        'NOT match the event types: a receiver that takes none of the ' +
+        'fourteen is exactly the row somebody is looking for when they ask ' +
+        'why nothing arrived.'
+    }) +
+    appNav.head +
+    '<table><tr><th>Receiver</th><th>Streams</th><th>aud</th><th>Takes</th>' +
+    headers + '<th>Total</th><th>Accounts</th><th>Delivered / failed</th>' +
+    '</tr>' +
+    (appState.page.shown.length
+      ? appState.page.shown.map(function (row) {
+          return riscApplicationRow(row, shorts, prefix);
+        }).join('')
+      : '<tr><td colspan="' + (shorts.length + 7) + '">' +
+        (appState.wanted
+          ? 'No receiver matches <code>' + esc(appState.wanted) + '</code>.'
+          : 'No application here supports Shared Signals yet. An entry ' +
+            'appears the moment a receiver creates a stream at ' +
+            '<code>/ssf/stream</code>.') +
+        '</td></tr>') +
+    '</table>' +
+    appNav.foot +
+
+    (json.installed
+      ? '<form method="post" action="/admin/risc">' +
+        '<div class="formrow">' +
+        '<input type="hidden" name="action" value="clear">' +
+        '<input type="hidden" name="from" value="accounts">' +
+        '<input type="hidden" name="back" value="' + esc(back) + '">' +
+        '<button class="secondary">Clear the register</button>' +
+        '</div></form>' +
+        note('Clearing forgets the RECORD. <strong>Nobody is disabled, ' +
+        'nobody is deleted and no directory entry is touched</strong> ' +
+        '&mdash; this page is what has been SAID about these accounts, and ' +
+        'a control here that purged one would be a monitoring page with a ' +
+        'weapon on it.')
+      : '') +
+
+    note('<a href="/admin/risc">The settings, the catalogue and the ' +
+    'by-hand emit form</a> &middot; ' +
+    '<a href="/admin/caep-sessions">what has been said about ' +
+    'SESSIONS</a> &middot; ' +
+    '<a href="/admin/ssf">the streams</a> &middot; ' +
+    '<a href="/admin/users">the people themselves</a> &middot; ' +
+    '<a href="/admin/risc-accounts?format=json">this page as JSON</a>');
+
+  respond(req, res, Object.assign({}, json, {
+            filter: { accounts: state.wanted || null,
+                      applications: appState.wanted || null },
+            paging: { accounts: pagingJson(state.page.paging),
+                      applications: pagingJson(appState.page.paging) }
+          }), 'RISC accounts', '/admin/risc-accounts', inner);
+  log.debug("Leaving the admin RISC accounts page.");
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/risc-accounts/account?id=… — WHAT HAS BEEN SAID ABOUT ONE
+// ACCOUNT. A drill-down of /admin/risc-accounts, hung under it exactly as
+// /admin/caep-sessions/session hangs under its list and for that page's
+// reasons.
+//
+// **AN ACCOUNT THIS REGISTER NO LONGER HOLDS IS NOT A 404.** The register is
+// capped and drops the oldest, and `Clear the register` empties it outright.
+// It says which of the two states it is in instead of answering with a status
+// code that says neither.
+// ---------------------------------------------------------------------------
+app.get('/admin/risc-accounts/account', function (req, res) {
+  log.debug("Entering the admin RISC one-account page.");
+  const json = riscJson(req);
+  const asked = String(req.query.id || '').trim();
+  const row = (json.accounts || []).filter(function (one) {
+    return String(one.accountId) === asked;
+  })[0] || null;
+
+  const listView = listViewOf('/admin/risc-accounts', req.query);
+  const up = upTo('/admin/risc-accounts',
+                  row ? (row.username || row.accountId) : 'One account',
+                  listView);
+  const backLink = note('<a class="btn" href="' + esc(up.href) +
+    '">&larr; Back to the accounts table</a>');
+  const back = queryWith(listView, {});
+
+  if (!row) {
+    const inner = messagesOf(req) + backLink +
+      note(asked
+        ? '<strong>No tracked account is called <code>' + esc(asked) +
+          '</code>.</strong> That is not necessarily a wrong link. This ' +
+          'register is capped at <code>risc.maxAccountsTracked</code> ' +
+          'accounts and drops the oldest, and the <em>Clear the ' +
+          'register</em> button on the accounts table empties it outright. ' +
+          'What it does NOT mean is that the account was never real: ' +
+          'nothing here is deleted because a person was, and a person who ' +
+          'was deleted is exactly what this register is for keeping.'
+        : '<strong>Name an account.</strong> This page draws ONE of them ' +
+          'and the way to it is a link on <a href="' + esc(up.href) +
+          '">the accounts table</a>.');
+    respond(req, res, { installed: json.installed, id: asked || null,
+                        account: null },
+            'RISC accounts — one account', '/admin/risc-accounts', inner, up);
+    log.debug("Leaving the admin RISC one-account page. Nothing found.");
+    return;
+  }
+
+  const eventPage = pagedRows(req.query, row.events || [],
+    { name: 'events', noun: 'events' });
+  const eventNav = pageNavPair('/admin/risc-accounts/account',
+                               pageParamsOf(req.query), eventPage.paging);
+
+  const eventRows = eventPage.shown.length
+    ? eventPage.shown.map(riscEventRow).join('')
+    : '<tr><td colspan="5">Nothing has been said about this account. That ' +
+      'is the ordinary case when no stream asked for the type, and it is ' +
+      'the answer to &ldquo;why did nothing arrive&rdquo; nine times out of ' +
+      'ten &mdash; <a href="/admin/risc-accounts">the streams table</a> is ' +
+      'where that shows up.</td></tr>';
+
+  const inner = messagesOf(req) + backLink +
+
+    note('<strong>Everything this transmitter has said about one ' +
+    'account.</strong> The accounts table counts HOW MANY events of each ' +
+    'type went out; this says WHICH, in order, with what the register ' +
+    'noticed as each one was applied. They are separate on purpose &mdash; ' +
+    'the state machine and the counters answer different questions, and ' +
+    '<code>ssf/risc.js</code> argues why.') +
+
+    '<h2>The account</h2>' +
+    riscAccountFacts(row) +
+
+    '<h2>What has been said about it</h2>' +
+    note('A <strong>warning</strong> in the last column is this register\'s ' +
+    'own reading of an event it had just applied &mdash; a state change ' +
+    'that RISC section 2.8\'s diagram has no arrow for, a payload member ' +
+    'the type does not define &mdash; and not something a receiver was ' +
+    'told. SSF has no channel for that: an event either goes out or does ' +
+    'not.') +
+    perPageForm('/admin/risc-accounts/account', 'id', asked,
+                eventPage.paging.perPage,
+                'It applies to the event list below.', listView) +
+    eventNav.head +
+    '<table><tr><th>When</th><th>Event</th><th>jti</th><th>Stream</th>' +
+    '<th>What the register noticed</th></tr>' + eventRows + '</table>' +
+    eventNav.foot +
+
+    '<h2>Per event type</h2>' +
+    note('The same fourteen columns the accounts table carries, written out ' +
+    'with room for each type\'s whole name. A count of zero almost always ' +
+    'means <strong>no stream asked for that type</strong>.') +
+    riscAccountCounts(row, json.eventTypes || []) +
+
+    '<h2>Reset this account\'s RISC state</h2>' +
+    '<form method="post" action="/admin/risc">' +
+    '<input type="hidden" name="action" value="reset-account">' +
+    '<input type="hidden" name="account_id" value="' + esc(row.accountId) +
+    '">' +
+    '<input type="hidden" name="from" value="account">' +
+    '<input type="hidden" name="back" value="' + esc(back) + '">' +
+    '<div class="formrow"><button class="secondary">Reset</button></div>' +
+    '</form>' +
+    note('It forgets what has been SAID about this account and puts its ' +
+    'state back to where it started. <strong>The directory entry is ' +
+    'untouched</strong> &mdash; nobody is enabled, disabled or restored, ' +
+    'and a control on a monitoring page that did any of those would be a ' +
+    'monitoring page with a weapon on it.') +
+
+    note('<a href="/admin/risc-accounts">Every account</a> &middot; ' +
+    '<a href="' + esc('/admin/risc' + queryWith({ acctq2: row.accountId },
+                                                {})) +
+    '">emit an event about this account</a> &middot; ' +
+    '<a href="/admin/risc">the settings and the catalogue</a> &middot; ' +
+    '<a href="/admin/ssf">the streams</a> &middot; ' +
+    '<a href="' + esc('/admin/risc-accounts/account' +
+      queryWith(pageParamsOf(req.query), { format: 'json' })) +
+    '">this page as JSON</a>');
+
+  respond(req, res, { installed: json.installed, id: asked, account: row,
+                      eventTypes: json.eventTypes || [],
+                      events: eventPage.shown,
+                      paging: { events: pagingJson(eventPage.paging) } },
+          'RISC accounts — ' + (row.username || row.accountId),
+          '/admin/risc-accounts', inner, up);
+  log.debug("Leaving the admin RISC one-account page. " +
+            (row.events || []).length + " event(s).");
+});
+
 // ONE ROW OF THE INDEX: a group, its size, what is overridden in it, and the
 // page that edits it. Built from `config.groups()` and SETTING_HOMES together,
 // which is what makes a group with no home visible here rather than merely
@@ -26959,6 +28131,10 @@ module.exports = {
   // object carrying both would make /admin/ssf fail whole when the CAEP half
   // was not installed. See the block above setCaepReporter().
   setCaepReporter: setCaepReporter,
+  // THE TENTH SLOT, filled by the same module for RISC. See
+  // setRiscReporter()'s header on why it is a third object rather than
+  // more members on the ninth.
+  setRiscReporter: setRiscReporter,
   // The CAEP view and its three actions, for admin_api.js. Rule 7: the API
   // calls exactly these. `caepAction` RESOLVES, like `ssfAction` and for the
   // same reason — emitting a CAEP event signs a JWS and POSTs it.
@@ -26976,6 +28152,17 @@ module.exports = {
   caepAction: caepAction,
   caepActionNames: function () {
     return caepReporter ? caepReporter.actions.slice() : [];
+  },
+  // The RISC view and its three actions, on exactly the CAEP pair's terms.
+  // `riscAction` RESOLVES for the same reason: emitting a RISC event signs a
+  // JWS and POSTs it.
+  riscView: riscJson,
+  // The account register as /admin/risc-accounts draws it — the list, or one
+  // account with `?account=`.
+  riscAccountsView: riscAccountsJson,
+  riscAction: riscAction,
+  riscActionNames: function () {
+    return riscReporter ? riscReporter.actions.slice() : [];
   },
   // The crypto report, for admin_api.js. One function, so the page and the API
   // cannot disagree about what this service's cryptography is.
