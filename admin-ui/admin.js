@@ -788,6 +788,52 @@ const SECTIONS = [
                    'configuration — this service wrote all of it when the ' +
                    'agent attested — which is why nothing on an agent is ' +
                    'editable and the ban is the only control.' } ] },
+      // A GROUP OF FOUR, and the heading names more than any one page does —
+      // which is the test the SAML group set and the one SCIM fails, so SCIM
+      // is ungrouped one row below and this is not. XACML here is a decision
+      // point, a repository, an editor and a way to try the thing; a reader
+      // looking for "why was that request refused" wants the last of those and
+      // would not find it filed under a settings page.
+      { title: 'XACML',
+        what: 'Authorization: what this service DECIDES, the policies it ' +
+              'decides with, and how to write one.',
+        items: [
+          { path: '/admin/xacml', label: 'XACML settings',
+            blurb: 'What the Policy Decision Point is, whether it is on, and ' +
+                   'the one setting that belongs to the Policy ENFORCEMENT ' +
+                   'point rather than to the PDP — a deny-biased PEP refuses ' +
+                   'an Indeterminate and a permit-biased one allows it, and ' +
+                   'they agree on everything else.' },
+          { path: '/admin/xacml/policies', label: 'Policies',
+            blurb: 'The repository, which IS ou=policies in the embedded ' +
+                   'directory rather than a copy of it. Enable a policy, ' +
+                   'disable it without deleting it, choose which one is the ' +
+                   'ROOT the PDP starts from, and create one from an RBAC or ' +
+                   'ABAC template.' },
+          { path: '/admin/xacml/editor', label: 'Policy editor',
+            blurb: 'The guided editor. Every element offers exactly what ' +
+                   'XACML allows at that point — computed on the server by ' +
+                   'the same code that validates the result, so it cannot ' +
+                   'offer something that will then be refused. There is no ' +
+                   'draft state: the policy you are editing is the policy ' +
+                   'the PDP is using.' },
+          { path: '/admin/xacml/peps', label: 'Remote PEPs',
+            blurb: 'The Policy Enforcement Points in OTHER processes that ' +
+                   'pull this repository and enforce it there. They hold ' +
+                   'their own copy of the engine, so the question this page ' +
+                   'answers is not whether they are up but whether ' +
+                   'everybody is deciding with the SAME policy &mdash; ' +
+                   'which is the question a distributed authorization ' +
+                   'deployment actually has and the one nothing else here ' +
+                   'can answer. Nothing on it reaches into another process.' },
+          { path: '/admin/xacml/decide', label: 'Try a decision',
+            blurb: 'Ask the PDP about somebody and see the answer, which ' +
+                   'policies applied, what the PIP found on their directory ' +
+                   'entry, and — separately — what the embedded PEP would do ' +
+                   'with it. The last two are different answers, and when a ' +
+                   'policy "is not working" it is nearly always because only ' +
+                   'one of them was being looked at.' }
+        ] },
       { path: '/admin/scim', label: 'SCIM',
         blurb: 'The provisioning endpoint at <code>/scim/v2</code>: what it ' +
                'requires of a caller, which of RFC 7644 section 2\'s six ' +
@@ -1452,6 +1498,7 @@ const SETTING_HOMES = [
   { group: 'Admin console', pages: ['/admin/rbac'] },
   { group: 'Applications', pages: ['/admin/applications'] },
   { group: 'Federation', pages: ['/admin/federation'] },
+  { group: 'XACML', pages: ['/admin/xacml'] },
   // Two pages, deliberately. See the header above.
   { group: 'SAML', pages: ['/admin/saml2', '/admin/saml11'] },
   { group: 'SAML 2.0', pages: ['/admin/saml2'] },
@@ -12440,6 +12487,145 @@ function setLogoutReader(reader) {
 // function in this file returns, so `respond()` and the API read them the same
 // way.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// THE TENTH SLOT, `setXacmlPages()`, FILLED BY `xacml/xacml_admin.js`, AND IT
+// IS THE SIXTH TO PASS RULE 3e's TEST BOTH WAYS ROUND.
+//
+// A require from THIS file to `xacml/xacml_admin.js` would CLOSE A CYCLE — it
+// requires this one for the shell, the settings block, the gate and the action
+// responder. And a require from `mgmt-api/admin_api.js` (19) to it would MOVE
+// ROUTES: every `/xacml` endpoint and all four `/admin/xacml*` pages would be
+// registered ahead of the management API's own, and ahead of ldap, scim and
+// spiffe. So the slot is the only arrangement left, and it is the same one SSF
+// and the directory pages already take.
+//
+// IT CARRIES SIX FUNCTIONS AND IS VALIDATED WHOLE, for `setLogoutReader()`'s
+// reason: a filler that installed the views without the action would leave
+// `/admin-api` able to LIST policies and unable to change any of them, which
+// reads as a management API that is working and is not. It was four until
+// phase five, which added TWO — `peps` for the remote PEP register, and
+// `decide`, which `/admin/xacml/decide` had needed since phase three and had
+// silently gone without (rule 7; `tests/vendored/admin_api.js` reads the
+// console's OWN page list rather than a list in the test, which is why the
+// omission was catchable at all). Both went into THIS set rather than into
+// slots of their own because it is the same module filling it and a second
+// slot would have been a second indirection for no second reason (rule 3e).
+//
+// `actionNames` is the seventh and is not decoration. The refusal sentence for
+// an unknown action names every action and counts them, and that sentence is
+// READ by `tests/vendored/admin_api.js` — so the API has to be able to ask the
+// module what its actions are rather than keeping a second list that could
+// disagree.
+// ---------------------------------------------------------------------------
+const XACML_PAGE_PARTS = ['overview', 'policies', 'editor', 'peps', 'decide',
+                          'action'];
+
+let xacmlPages = null;
+
+function setXacmlPages(parts) {
+  const complete = parts && XACML_PAGE_PARTS.every(function (name) {
+    return typeof parts[name] === 'function';
+  });
+  if (!complete) {
+    log.warn('admin: a set of XACML page views was offered that does not ' +
+             'carry all six of ' + XACML_PAGE_PARTS.join(', ') + '. It is ' +
+             'refused whole — a partial set would leave /admin-api able to ' +
+             'read the policy repository and unable to change it, which ' +
+             'reads as a management API that is working and is not.');
+    return;
+  }
+  xacmlPages = parts;
+  log.debug('The XACML page views were installed; /admin-api mirrors them.');
+}
+
+function noXacml() {
+  return { xacml: false,
+           message: 'The XACML module is not loaded in this process, so ' +
+                    'there is no policy repository to report. ' +
+                    'xacml/xacml_admin.js fills this reader when it is ' +
+                    'required.' };
+}
+
+function xacmlView(req) {
+  log.debug('Entering xacmlView().');
+  const json = xacmlPages ? xacmlPages.overview(req) : noXacml();
+  log.debug('Leaving xacmlView().');
+  return json;
+}
+
+function xacmlPoliciesView(req) {
+  log.debug('Entering xacmlPoliciesView().');
+  const json = xacmlPages ? xacmlPages.policies(req) : noXacml();
+  log.debug('Leaving xacmlPoliciesView().');
+  return json;
+}
+
+function xacmlEditorView(req) {
+  log.debug('Entering xacmlEditorView().');
+  const json = xacmlPages
+    ? xacmlPages.editor(String((req.query || {}).policy || '')) : noXacml();
+  log.debug('Leaving xacmlEditorView().');
+  return json;
+}
+
+function xacmlPepsView(req) {
+  log.debug('Entering xacmlPepsView().');
+  const json = xacmlPages ? xacmlPages.peps(req) : noXacml();
+  log.debug('Leaving xacmlPepsView().');
+  return json;
+}
+
+function xacmlDecideView(req) {
+  log.debug('Entering xacmlDecideView().');
+  const json = xacmlPages ? xacmlPages.decide(req.query || {}) : noXacml();
+  log.debug('Leaving xacmlDecideView().');
+  return json;
+}
+
+// ---------------------------------------------------------------------------
+// THE CONSOLE SHAPE AND THE API SHAPE ARE NOT THE SAME, AND THIS IS THE
+// BOUNDARY BETWEEN THEM.
+//
+// `xacml_admin.js`'s action functions answer `{ ok, why }` because that is what
+// `respondToAction()` draws on a console page. **EVERY OTHER ACTION RESOURCE ON
+// `/admin-api` ANSWERS `{ ok, errors: [...] }`** — ssf, permissions, realms,
+// spiffe — and `tests/vendored/sts_admin_api_operations.js` reads that array on
+// every one of them: it walks every documented POST resource, sends an unknown
+// action, and requires the refusal SENTENCE to name the actions, because
+// `admin_api.js`'s parity check reads that same sentence to find out what
+// actions a resource has. A resource answering `why` is invisible to both.
+//
+// So the conversion happens HERE, at the one function the management API calls
+// and the console does not — the console's own POST handlers call
+// `combinedAction()` directly. `why` is kept BESIDE `errors` rather than being
+// replaced, because a caller reading it is reading something true and a rename
+// would break it for nothing.
+//
+// It went unnoticed from phase three until phase five for the reason three
+// other XACML defects did: that job is this repository's OWN and had not been
+// run against the branch.
+// ---------------------------------------------------------------------------
+function xacmlAction(body) {
+  log.debug('Entering xacmlAction(). action=' + (body || {}).action);
+  if (!xacmlPages) {
+    log.debug('Leaving xacmlAction(). No XACML module.');
+    return { ok: false, errors: [noXacml().message] };
+  }
+  const result = xacmlPages.action(body);
+  if (!result.ok && !result.errors && result.why) {
+    log.debug('Leaving xacmlAction(). Refused.');
+    return Object.assign({}, result, { errors: [result.why] });
+  }
+  log.debug('Leaving xacmlAction(). ok=' + result.ok);
+  return result;
+}
+
+function xacmlActionNames() {
+  return xacmlPages && xacmlPages.actionNames
+    ? xacmlPages.actionNames() : [];
+}
+
 const DIRECTORY_PAGE_NAMES = ['service', 'directory', 'applications',
                               'federations', 'spiffe'];
 
@@ -28051,6 +28237,31 @@ module.exports = {
   // page SAYS is entirely that module's.
   respond: respond,
   page: page,
+  // AND FOR A SECOND MODULE SINCE THE XACML WORK: `xacml/xacml_admin.js`
+  // draws the four /admin/xacml pages the way `ldap/ldap_server.js` draws its
+  // five. Those two helpers were private only because nothing outside this
+  // file had needed them — a page drawn elsewhere still wants the settings
+  // block for its own group, and still has to answer a form POST the way every
+  // other action here does. Keeping them private would have meant a second
+  // settings renderer and a second redirect-or-JSON rule, and two of either is
+  // how a console starts behaving differently on different pages.
+  configFormsFor: configFormsFor,
+  setXacmlPages: setXacmlPages,
+  xacmlView: xacmlView,
+  xacmlPoliciesView: xacmlPoliciesView,
+  xacmlEditorView: xacmlEditorView,
+  xacmlPepsView: xacmlPepsView,
+  xacmlDecideView: xacmlDecideView,
+  xacmlAction: xacmlAction,
+  xacmlActionNames: xacmlActionNames,
+  // The JSON counterpart of the block above, so that a page drawn
+  // elsewhere can answer ?format=json with the SAME settings it just
+  // rendered. `protocolSettingsJsonFor()` is not that function — it is
+  // keyed by PROTOCOL_SETTINGS_PAGES and throws for a path that table
+  // does not carry, which is correct for the pages this file generates
+  // and wrong for one somebody else draws.
+  configSettingsJson: configSettingsJson,
+  respondToAction: respondToAction,
   // THE FOLDS AND THE TOOLTIPS, for the same one module. They are exported for
   // the reason page() is: `sts_metadata.js` draws a console page, and a page
   // drawn in this console's shell whose prose did not fold would be the one

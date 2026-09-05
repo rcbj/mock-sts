@@ -2437,6 +2437,266 @@ const SCHEMAS = {
         'one.', {})
     }),
 
+  // -----------------------------------------------------------------------
+  // XACML. Three schemas, because the three GETs answer three different
+  // questions and one loose object covering all of them would document none.
+  // -----------------------------------------------------------------------
+  Xacml: openObject(
+    'The Policy Decision Point. THIS IS THE ONLY FAMILY ON THIS SERVICE THAT ' +
+    'ANSWERS A QUESTION ABOUT SOMEBODY ELSE\'S BOUNDARY: every other protocol ' +
+    'here authenticates or provisions a person, and this one is handed a ' +
+    'subject who was authenticated somewhere else and asked whether they may.',
+    {
+      enabled: { type: 'boolean',
+        description: 'Whether the /xacml endpoints answer. When off they ' +
+                     'stay REGISTERED and answer 501 rather than 404 — the ' +
+                     'feature being off and the URL being wrong are ' +
+                     'different sentences to a client.' },
+      pepBias: { type: 'string', enum: ['deny-biased', 'permit-biased'],
+        description: 'THE EMBEDDED PEP\'S SETTING, NOT THE PDP\'S. The two ' +
+                     'biases agree on every Permit and every Deny and differ ' +
+                     'on Indeterminate and NotApplicable.' },
+      policies: { type: 'integer',
+        description: 'How many are in ou=policies.' },
+      enabledPolicies: { type: 'integer' },
+      root: { type: ['string', 'null'],
+        description: 'The policy the PDP starts from. NULL means every ' +
+                     'decision is NotApplicable — a PDP evaluates ONE ' +
+                     'document and reaches the rest through ' +
+                     'PolicyIdReference.' },
+      pipAvailable: { type: 'boolean',
+        description: 'Whether the Policy Information Point has the embedded ' +
+                     'directory. Without it a decision sees only the ' +
+                     'attributes the REQUEST carried, which is the ' +
+                     'pure-XACML behaviour and is not a failure.' },
+      settings: { type: ['object', 'null'], additionalProperties: true,
+        description: 'The settings drawn on /admin/xacml.' }
+    }),
+
+  XacmlPolicies: openObject(
+    'The policy repository, which IS ou=policies in the embedded directory ' +
+    'rather than a copy of one.',
+    {
+      root: { type: ['string', 'null'] },
+      policies: { type: 'array', items: openObject('One policy.', {
+        name: { type: 'string',
+          description: 'The directory entry\'s name. SEPARATE from the ' +
+                       'PolicyId inside the document, on purpose: a PolicyId ' +
+                       'is a URI and changes when a policy is re-issued, so ' +
+                       'naming the entry after it would make a version bump ' +
+                       'into a delete and a create.' },
+        policyId: { type: ['string', 'null'] },
+        kind: { type: 'string', enum: ['Policy', 'PolicySet'] },
+        version: { type: 'string' },
+        enabled: { type: 'boolean' },
+        isRoot: { type: 'boolean' },
+        combiningAlgId: { type: 'string' },
+        description: { type: 'string' },
+        problems: { type: 'array', items: { type: 'string' },
+          description: 'Static type-check problems. XACML is statically ' +
+                       'typed, so these are wrong for EVERY request rather ' +
+                       'than for some — a policy listed with problems will ' +
+                       'not load and the PDP reports Indeterminate.' }
+      }) },
+      templates: { type: 'array', items: openObject(
+        'A starting point POST /admin-api/xacml/create-from-template will ' +
+        'build.', {
+          id: { type: 'string' },
+          label: { type: 'string' },
+          blurb: { type: 'string' },
+          what: { type: 'string' },
+          parameters: { type: 'array', items: openObject('One parameter.', {
+            name: { type: 'string',
+              description: 'Sent as `p_<name>`.' },
+            label: { type: 'string' },
+            help: { type: 'string' },
+            type: { type: 'string', enum: ['string', 'list'] },
+            dflt: { type: 'string' }
+          }) }
+        }) }
+    }),
+
+  XacmlEditor: openObject(
+    'One policy as an editable tree. Each node carries the elements XACML ' +
+    'allows AT THAT POINT — computed against the real function library by ' +
+    'the same code that validates the result, which is what lets a caller ' +
+    'walk the tree and POST a legal move without a second copy of the ' +
+    'grammar.',
+    {
+      policies: { type: 'array', items: { type: 'string' } },
+      policy: { type: ['object', 'null'], additionalProperties: true },
+      problem: { type: ['string', 'null'] },
+      problems: { type: 'array', items: { type: 'string' } },
+      document: { type: 'string',
+        description: 'The XACML XML as stored. The document is the truth; ' +
+                     'everything else on the entry is derived from it.' },
+      alfa: { type: ['string', 'null'],
+        description: 'The same policy rendered as ALFA. EMITTED, not stored ' +
+                     '— ALFA is a view of the model here rather than a ' +
+                     'second copy of the policy, because a stored ALFA text ' +
+                     'and a stored XML one would be two documents that could ' +
+                     'disagree.' },
+      tree: { type: 'array', items: openObject('One node.', {
+        path: { type: 'string',
+          description: 'The node\'s address, e.g. ' +
+                       '`rules.0.target.anyOf.1.allOf.0.matches.2`. ONLY ' +
+                       'VALID AGAINST THE DOCUMENT IT WAS READ FROM — remove ' +
+                       'rule 0 and every path naming rule 1 now means rule ' +
+                       '0. Re-read the tree after each edit.' },
+        depth: { type: 'integer' },
+        kind: { type: 'string' },
+        label: { type: 'string' },
+        detail: { type: 'string' },
+        options: openObject('What may be done here.', {
+          kind: { type: 'string' },
+          removable: { type: 'boolean' },
+          additions: { type: 'array', items: openObject('One legal move.', {
+            action: { type: 'string',
+              description: 'POST this to /admin-api/xacml/{action} with the ' +
+                           'node\'s `path`.' },
+            label: { type: 'string' },
+            help: { type: 'string' }
+          }) }
+        })
+      }) }
+    }),
+
+  XacmlDecision: openObject(
+    'One question put to the PDP, and what the embedded PEP would do with ' +
+    'the answer. TWO DIFFERENT ANSWERS, both here on purpose — the PDP ' +
+    'returns one of four decisions and the PEP turns that into allowed or ' +
+    'refused using its bias and the obligation rule, and a policy that "is ' +
+    'not working" is nearly always one of those two being mistaken for the ' +
+    'other.',
+    {
+      asked: { type: 'boolean',
+        description: 'False when no subject and no resource were given. The ' +
+                     'endpoint does not decide about nobody.' },
+      subject: { type: 'string' },
+      action: { type: 'string' },
+      resource: { type: ['string', 'null'] },
+      decision: { type: 'string',
+        description: 'Permit, Deny, NotApplicable or Indeterminate — the ' +
+                     'four EXTERNAL values. The three Indeterminate ' +
+                     'variants the combining algorithms need are folded ' +
+                     'down once, inside the engine.' },
+      status: { type: 'object', additionalProperties: true },
+      obligations: { type: 'array', items: { type: 'string' } },
+      advice: { type: 'array', items: { type: 'string' } },
+      applicablePolicies: { type: 'array', items: { type: 'string' } },
+      enforcement: openObject('What the EMBEDDED PEP would do.', {
+        allowed: { type: 'boolean' },
+        bias: { type: 'string',
+          description: 'xacml.pepBias. The two biases agree on every Permit ' +
+                       'and every Deny and differ on Indeterminate and ' +
+                       'NotApplicable, which is the case nobody tests.' },
+        why: { type: 'string',
+          description: 'Including the section 7.2 case: a Permit carrying ' +
+                       'an obligation this PEP cannot discharge is a ' +
+                       'REFUSAL, because allowing it and dropping the ' +
+                       'obligation would enforce half a policy and report ' +
+                       'success.' }
+      })
+    }),
+
+  XacmlPeps: openObject(
+    'The REMOTE Policy Enforcement Points that pull this repository and ' +
+    'enforce it in another process. The question this answers is not ' +
+    'whether they are up but whether everybody is deciding with the SAME ' +
+    'policy — `current` is a comparison this service performs, not a claim ' +
+    'the PEP makes about itself.',
+    {
+      enabled: { type: 'boolean',
+        description: 'xacml.remotePeps. When false the three endpoints ' +
+                     'under /xacml/pep answer 501 and the register below is ' +
+                     'untouched.' },
+      syncToken: { type: 'string',
+        description: 'A digest over the documents of every ENABLED policy ' +
+                     'plus which one is the root — that is, over exactly ' +
+                     'the bytes GET /xacml/pep/policies would answer with. ' +
+                     'So a policy edited and edited back does NOT invalidate ' +
+                     'anybody\'s copy, and DISABLING one does.' },
+      staleAfterS: { type: 'integer',
+        description: 'xacml.pepStaleAfterS. How long since the last ' +
+                     'heartbeat before `stale` is true. It changes nothing ' +
+                     'this service does, deliberately: a PEP whose sync has ' +
+                     'stopped is still enforcing whatever it last pulled.' },
+      requiresCertificate: { type: 'boolean',
+        description: 'xacml.pepRequireCertificate. Whether REGISTERING ' +
+                     'needs a client certificate. Pulling policy never ' +
+                     'does.' },
+      current: { type: 'integer',
+        description: 'How many registered PEPs hold the current token.' },
+      stale: { type: 'integer' },
+      notify: openObject('The nudge, and its four bounds.', {
+        on: { type: 'boolean' },
+        allowedHosts: { type: 'array', items: { type: 'string' },
+          description: 'EMPTY MEANS ANY, which is the default.' },
+        allowInsecure: { type: 'boolean' },
+        timeoutMs: { type: 'integer' }
+      }),
+      peps: { type: 'array', items: openObject('One registered PEP.', {
+        name: { type: 'string',
+          description: 'Named from its CLIENT CERTIFICATE when it has one, ' +
+                       'through the same certificatePlan() naming every ' +
+                       'other certificate-borne identity here goes through. ' +
+                       'So one certificate is one row and a PEP that ' +
+                       'restarts updates rather than duplicating.' },
+        dn: { type: 'string' },
+        identity: { type: 'string',
+          description: 'The DN that naming rule produces. NO ENTRY IS ' +
+                       'CREATED THERE — a PEP is a component and ou=users ' +
+                       'counts people.' },
+        certificateSubject: { type: 'string' },
+        thumbprint: { type: 'string',
+          description: 'RFC 8705 x5t#S256, through the same function the ' +
+                       'token endpoint binds a certificate-bound token ' +
+                       'with.' },
+        authenticated: { type: 'boolean',
+          description: 'False when it registered with no client certificate ' +
+                       'because xacml.pepRequireCertificate was off. Such a ' +
+                       'row proved nothing and says so rather than looking ' +
+                       'like one that did.' },
+        notifyUrl: { type: 'string' },
+        notifyProblem: { type: ['string', 'null'],
+          description: 'Why this URL would be refused, computed on the ask ' +
+                       'rather than remembered — so changing the allowlist ' +
+                       'changes what is said about a PEP registered an hour ' +
+                       'ago.' },
+        lastNotify: { type: 'string',
+          description: 'What happened to the last nudge. THE ONLY PLACE A ' +
+                       'FAILED NUDGE IS RECORDED: it is invisible from the ' +
+                       'receiving end by definition.' },
+        bias: { type: 'string',
+          description: 'REPORTED BY THE PEP, never set from here. ' +
+                       'xacml.pepBias governs the EMBEDDED PEP at ' +
+                       '/xacml/protected and nothing else.' },
+        resource: { type: 'string' },
+        version: { type: 'string' },
+        description: { type: 'string' },
+        enabled: { type: 'boolean',
+          description: 'Whether this service NUDGES it. Not whether it is ' +
+                       'enforcing — nothing here can answer that.' },
+        registeredAt: { type: 'string' },
+        lastSeen: { type: 'string' },
+        syncToken: { type: 'string' },
+        policyCount: { type: 'integer' },
+        decisions: { type: 'integer',
+          description: 'The PEP\'s own cumulative count, in its process. A ' +
+                       'PEP that restarts makes this go down, which is ' +
+                       'honest.' },
+        allowed: { type: 'integer' },
+        refused: { type: 'integer' },
+        undischargeable: { type: 'integer',
+          description: 'Refusals that were a Permit carrying an obligation ' +
+                       'the PEP could not discharge (section 7.2) — the one ' +
+                       'enforcement outcome that looks like a bug from the ' +
+                       'client side and is the specification working.' },
+        current: { type: 'boolean' },
+        stale: { type: 'boolean' }
+      }) }
+    }),
+
   Ssf: openObject(
     'The Shared Signals transmitter: the streams it has agreed, who each one ' +
     'is about, what is queued for it, what a receiver refused, and what has ' +

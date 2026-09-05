@@ -196,6 +196,59 @@ const ssfAuth = require('../ssf/ssf_auth');
 // them as "—" and the `whatItDoesNot` line beside them says which.
 // ---------------------------------------------------------------------------
 const FAMILIES = [
+  // XACML IS THE ONE FAMILY HERE THAT PERFORMS NO CRYPTOGRAPHY AT ALL, and
+  // saying so is the point of the row rather than an admission. A PDP reads a
+  // policy and a request and returns a decision; nothing is signed, nothing is
+  // verified, nothing is encrypted, and no key is involved anywhere in the
+  // decision path. A reader who does not find XACML on this page would
+  // reasonably wonder whether the page is incomplete — which is exactly what
+  // the drift check between this table and sts_metadata.js's PROTOCOLS exists
+  // to prevent, in both directions.
+  //
+  // What that costs, and it is worth knowing: a decision travels over whatever
+  // the transport gives it and carries no integrity of its own. The REMOTE
+  // PEP (phase five) is where that matters, and the answer there is the same
+  // one: it REGISTERS over mutual TLS and PULLS the repository over the same
+  // connection, which is the tls/ family's cryptography and not this one's.
+  // The policies it pulls are not signed, so a PEP trusts the transport for
+  // them exactly as it trusts it for everything else.
+  { name: 'XACML',
+    signs: 'Nothing. A decision is not a token and carries no signature.',
+    verifies: 'Nothing in the decision path. The remote PEP\'s client ' +
+              'certificate is verified by the TLS layer (see TLS / mutual ' +
+              'TLS), not here.',
+    encrypts: 'Nothing.',
+    decrypts: 'Nothing.',
+    keys: 'None. No key of any kind takes part in reaching a decision.',
+    hashes: 'ONE, AND IT IS NOT SECURITY. The remote PEP\'s sync token is a ' +
+            'SHA-256 over the documents of every enabled policy plus which ' +
+            'one is the root — a cheap way for a PEP to ask "has anything ' +
+            'changed" and get a 304, and nothing more. It authenticates ' +
+            'nothing and is not compared against anything a caller supplies ' +
+            'as a credential, so it would still be correct as a CRC.',
+    whatItDoesNot: 'It signs no decision, so a decision that travelled ' +
+                   'between two processes carries no integrity of its own ' +
+                   'and rests entirely on the transport. That is the ' +
+                   'position rather than a gap: signing a decision would ' +
+                   'need a PEP to hold a key and verify it, and this ' +
+                   'service\'s whole premise is that the interesting part ' +
+                   'is the policy rather than the plumbing.',
+    // THREE ROWS OF THIS TABLE SAY "NOTHING", AND THIS ONE MUST STILL CARRY
+    // THE FIELDS. `cryptoJson()` calls `envelopes.slice(0)` and
+    // `algorithms()` on every row without checking, deliberately — a row is
+    // the whole shape or it is not a row — and this one was missing both from
+    // phase one until phase five, which made GET /admin-api/crypto answer 500
+    // rather than reporting a family that does no cryptography. The empty
+    // list and the empty table are the right answer here and are what the
+    // page draws as an em dash.
+    envelopes: [],
+    algorithms: function () {
+      return [
+        ['Nothing is signed, verified, encrypted or decrypted here', []],
+        ['The remote PEP sync token, which is a change detector rather ' +
+         'than a security mechanism', ['SHA-256']]
+      ];
+    } },
   { name: 'OAuth2 / OIDC',
     signs: 'Every access token and refresh token, and the ID Token, with the ' +
            'realm\'s RSA key as RS256. A client that registers ' +

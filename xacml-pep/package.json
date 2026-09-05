@@ -1,0 +1,15 @@
+{
+  "name": "mock-sts-xacml-pep",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A remote XACML 3.0 Policy Enforcement Point for the mock STS. It holds its own copy of the engine, pulls the policy repository from the PDP and decides locally.",
+  "main": "pep.js",
+  "scripts": {
+    "start": "node pep.js"
+  },
+  "dependencies": {
+    "@xmldom/xmldom": "^0.9.8",
+    "bunyan": "^1.8.15"
+  },
+  "license": "MIT"
+}

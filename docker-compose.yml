@@ -383,6 +383,93 @@ services:
       retries: 5
       start_period: 10s
 
+  # -------------------------------------------------------------------------
+  # THE REMOTE POLICY ENFORCEMENT POINT (phase five).
+  #
+  # A SECOND PROCESS THAT HOLDS ITS OWN COPY OF THE XACML ENGINE, pulls the
+  # policy repository from the sts above and decides locally. That is the point
+  # of it: a PEP that asked the PDP per request would be POST /xacml/pdp with a
+  # network hop in front of every access decision.
+  #
+  #   curl http://localhost:9090/                        what it holds
+  #   curl "http://localhost:9090/protected?subject=alice&employeeType=staff"
+  #
+  # IT IS `profiles: [xacml]`, SO A PLAIN `docker compose up` DOES NOT START
+  # IT. That is deliberate and it is the same judgement the postgres service
+  # makes the other way: the mock is sixteen protocol families and a remote PEP
+  # is one demonstration inside one of them, so it is opt-in
+  # (`docker compose --profile xacml up`) rather than a container everybody
+  # pays for. It also keeps the test suite unaffected — `local-run-tests.sh`
+  # brings up the `sts` service with --no-deps and never sees this.
+  #
+  # WHAT IT DEMONSTRATES THAT THE EMBEDDED PEP AT /xacml/protected CANNOT: this
+  # one can be STALE, can hold a policy the PDP no longer has, and can go on
+  # enforcing while the PDP is down. Stop the sts container and watch
+  # http://localhost:9090/protected go on deciding correctly — that is the
+  # trade the design takes, and the alternative (a PDP outage denying
+  # everything everywhere) is the failure that makes people remove
+  # authorization services.
+  # -------------------------------------------------------------------------
+  xacml-pep:
+    container_name: ${XACML_PEP_CONTAINER_NAME:-xacml-pep}
+    hostname: xacml-pep
+    profiles: ["xacml"]
+    image: rcbj/xacml-pep
+    build:
+      # THE REPOSITORY ROOT, because the Dockerfile copies the seven engine
+      # modules out of xacml/ at build time — there is one copy of the
+      # evaluator in this tree and this image cannot drift from it. That file
+      # argues why a checked-in copy and an npm package were both refused.
+      context: .
+      dockerfile: xacml-pep/Dockerfile
+    ports:
+      - "${XACML_PEP_HOST_PORT:-9090}:9090"
+    depends_on:
+      sts:
+        condition: service_healthy
+    environment:
+      # By compose DNS, on the private bridge, so this never depends on a host
+      # port mapping.
+      - PEP_PDP_URL=${XACML_PEP_PDP_URL:-https://sts:8081}
+      # NO PEP_TLS_CERT, so this PEP registers UNAUTHENTICATED and the mock
+      # refuses it unless xacml.pepRequireCertificate is off. That is the
+      # honest default rather than a broken one: generating a client
+      # certificate here would mean either committing a private key to this
+      # repository — which postgres/generate-tls.sh exists specifically to
+      # avoid — or a first-start script for a demonstration container. Mount a
+      # pair and name it to see the authenticated path:
+      #
+      #   volumes:
+      #     - ./my-pep-certs:/certs:ro
+      #   environment:
+      #     - PEP_TLS_CERT=/certs/pep.crt
+      #     - PEP_TLS_KEY=/certs/pep.key
+      #
+      # EITHER WAY IT ENFORCES. Registering buys a row on
+      # /admin/xacml/peps and an address for the nudge, not the ability to
+      # decide — GET /xacml/pep/policies requires no credential.
+      - PEP_NAME=${XACML_PEP_NAME:-pep-1}
+      # The mock regenerates its key on every start and signs it itself, so
+      # there is no anchor to verify against. `pep.js` logs this on every
+      # start rather than once, for federation_http.js's reason: a
+      # certificate check turned off months ago and forgotten is the worst
+      # kind of leftover.
+      - PEP_TLS_INSECURE=true
+      # THE MOCK REFUSES TO DIAL THIS BY DEFAULT and that is the design
+      # demonstrating itself rather than a misconfiguration: it is plain
+      # http, and xacml.pepNotifyAllowInsecure is off. So on a plain
+      # `--profile xacml up` no nudge is ever delivered, the PDP says why on
+      # the PEP's row at /admin/xacml/peps, and the PEP converges on its
+      # fifteen-second poll anyway — which is the whole claim the nudge is
+      # affordable under. Set STS_XACML_PEP_NOTIFY_ALLOW_INSECURE=true on the
+      # sts service to watch a change reach this container in under a second
+      # instead.
+      - PEP_NOTIFY_URL=${XACML_PEP_NOTIFY_URL:-http://xacml-pep:9090/notify}
+      - PEP_RESOURCE=${XACML_PEP_RESOURCE:-https://xacml-pep/protected}
+      - PEP_BIAS=${XACML_PEP_BIAS:-deny-biased}
+      - PEP_POLL_INTERVAL_MS=${XACML_PEP_POLL_INTERVAL_MS:-15000}
+      - PEP_LOG_LEVEL=${XACML_PEP_LOG_LEVEL:-info}
+
 # ---------------------------------------------------------------------------
 # NAMED VOLUMES. Both survive `docker compose down` and are removed by
 # `docker compose down -v`, which is the difference somebody wants to know

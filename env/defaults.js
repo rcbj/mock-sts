@@ -241,6 +241,22 @@ var config = {
     authClientCert: true         // Offer TLS client certificates
   },
 
+  // --- XACML -----------------------------------------------------------
+  xacml: {
+    enabled: true,                 // XACML enabled
+    maxPolicies: 200,              // Policies the repository may hold
+    pepBias: "deny-biased",        // What the embedded PEP does with a non-Permit
+    returnPolicyIdList: false,     // Always return the applicable policy identifiers
+    remotePeps: true,              // Remote Policy Enforcement Points may register
+    pepRequireCertificate: true,   // A registering PEP must present a client certificate
+    maxPeps: 50,                   // Remote PEPs the register may hold
+    pepStaleAfterS: 300,           // Seconds before a registered PEP is reported stale
+    pepNotify: true,               // Nudge a registered PEP when the repository changes
+    pepNotifyAllowedHosts: "",     // Notify endpoint allowlist
+    pepNotifyAllowInsecure: false, // Allow http:// and untrusted TLS for a nudge
+    pepNotifyTimeoutMs: 2000       // Nudge timeout (ms)
+  },
+
   // --- SSF -------------------------------------------------------------
   ssf: {
     enabled: true,                                                                                                                                        // SSF enabled

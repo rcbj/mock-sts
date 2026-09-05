@@ -315,6 +315,32 @@ const SPECS = [
   //     until it was real, because a specification named here and not
   //     implemented is an IDLE CLAIM and tests/vendored/sts_metadata.js fails
   //     the page for one.
+  { id: 'xacml30', name: 'OASIS XACML 3.0 (core)',
+    where: 'OASIS',
+    url: 'https://docs.oasis-open.org/xacml/3.0/xacml-3.0-core-spec-os-en.html',
+    coverage: 'full for the mandatory feature set: the policy language, the ' +
+              'seven decision values including the three extended ' +
+              'Indeterminates, target matching, conditions, variables, the ' +
+              'twelve combining algorithms, obligations and advice, policy ' +
+              'references, and the standard function library over all ' +
+              'seventeen datatypes. Held to the OASIS conformance suite — ' +
+              '454 of the 455 mandatory cases pass, and the one exception is ' +
+              'recorded with its argument in xacml/conformance/MANIFEST.js. ' +
+              'NOT covered: AttributeSelector and the XPath functions (a ' +
+              'policy using one is Indeterminate rather than silently empty), ' +
+              'the Multiple Decision and Hierarchical Resource profiles, and ' +
+              'administrative delegation.' },
+  { id: 'xacmljson', name: 'JSON Profile of XACML 3.0 v1.1',
+    where: 'OASIS',
+    url: 'https://docs.oasis-open.org/xacml/xacml-json-http/v1.1/os/' +
+         'xacml-json-http-v1.1-os.html',
+    coverage: 'full for the request and response: the shorthand category ' +
+              'names, the short datatype names, datatype inference from the ' +
+              'JSON type (including the integer/double distinction, which is ' +
+              'read from the source text because JSON.parse has already ' +
+              'thrown it away), arrays as bags, obligations, advice and the ' +
+              'PolicyIdentifierList. The profile defines no policy syntax, so ' +
+              'policies stay XML.' },
   { id: 'ssf', name: 'OpenID Shared Signals Framework 1.0',
     where: 'OpenID Foundation',
     url: 'https://openid.net/specs/openid-sharedsignals-framework-1_0-final.html',
@@ -1208,6 +1234,148 @@ const ENDPOINTS = [
   // so a conforming receiver discovers them and none of these names is
   // normative. They are here because this page walks the live router, and a
   // route that answers and is undescribed fails the drift check.
+  { path: '/xacml', group: 'XACML', name: 'What the XACML surface is',
+    specs: ['xacml30', 'xacmljson'],
+    what: 'The PDP, the repository and the embedded PEP, described. ' +
+          '?format=json for the same thing as data. Answers while ' +
+          'xacml.enabled is OFF, so a client can discover that this service ' +
+          'speaks XACML and is not currently doing it.' },
+  { path: '/xacml/pdp', group: 'XACML', name: 'A decision',
+    specs: ['xacml30', 'xacmljson'],
+    what: 'POST a JSON Profile request, get a JSON Profile response. THIS ' +
+          'ENDPOINT AUTHENTICATES NOBODY and that is not only the house ' +
+          'rule: a PDP is not an authorization boundary, it answers a ' +
+          'question about somebody else\'s. The identity that matters is IN ' +
+          'the request. A malformed request is a 400 rather than an ' +
+          'Indeterminate — an Indeterminate is an answer ABOUT a request and ' +
+          'a 400 says there was no request to answer about.' },
+  { path: '/xacml/policies', group: 'XACML', name: 'The policy repository',
+    specs: ['xacml30'],
+    what: 'Every policy as the PDP sees it, DOCUMENTS INCLUDED, with the ' +
+          'static type-check problems of each. The documents are shown ' +
+          'deliberately, unlike the secrets /admin/ldap/* hides: a policy is ' +
+          'a rule rather than a credential, and a rule nobody can read is a ' +
+          'rule nobody can check. The store is ou=policies in the embedded ' +
+          'directory — that container IS the repository.' },
+  { path: '/xacml/protected', group: 'XACML', name: 'The embedded PEP',
+    specs: ['xacml30'],
+    what: 'A resource this service guards with its own PDP. Takes subject, ' +
+          'resource and action as query parameters, asks the PDP, and ' +
+          'ENFORCES the answer — 200 or 403. It is where xacml.pepBias is ' +
+          'visible: deny-biased and permit-biased agree on every Permit and ' +
+          'every Deny and differ on Indeterminate and NotApplicable, which ' +
+          'is the case nobody tests. An obligation it cannot discharge turns ' +
+          'a Permit into a refusal (section 7.2), which is the part ' +
+          'implementations skip.' },
+  { path: '/xacml/pep/register', group: 'XACML',
+    name: 'A remote PEP registers', specs: ['xacml30'],
+    what: 'A Policy Enforcement Point in ANOTHER PROCESS says it exists, ' +
+          'over mutual TLS on this same port — server.js already sets ' +
+          'requestCert: true, so this needed no new listener. THE ONE ' +
+          'ENDPOINT IN THIS FAMILY THAT ASKS FOR A CREDENTIAL, and it asks a ' +
+          'different question from /xacml/pdp: not who the decision is ' +
+          'about, but WHICH PEP this is — because a registration writes an ' +
+          'entry and supplies an address this service will later dial. It ' +
+          'is a turnstile like every other gate here (the certificate need ' +
+          'not chain to anything, RFC 8705 section 3\'s argument) and it is ' +
+          'NOT what lets a PEP enforce: an unregistered one pulls and ' +
+          'decides just as well. xacml.pepRequireCertificate turns it off.' },
+  { path: '/xacml/pep/policies', group: 'XACML',
+    name: 'The repository, for a remote PEP to LOAD', specs: ['xacml30'],
+    what: 'Every ENABLED policy and which one is the root, plus a sync ' +
+          'token over exactly those bytes; ?since=<token> answers 304. THE ' +
+          'PULL IS THE CONTRACT — a remote PEP polls this on its own ' +
+          'interval and evaluates locally with its own copy of the engine, ' +
+          'because a PEP that asked per request would be /xacml/pdp with a ' +
+          'network hop in front of every access decision. Requires no ' +
+          'credential, for the same reason /xacml/policies does not: a ' +
+          'policy is a rule, and a rule nobody can read is a rule nobody ' +
+          'can check. A DISABLED policy is left out rather than sent with a ' +
+          'flag, because a PEP that loaded one would enforce a policy this ' +
+          'service does not.' },
+  { path: '/xacml/pep/heartbeat', group: 'XACML',
+    name: 'What a remote PEP has enforced', specs: ['xacml30'],
+    what: 'Its cumulative counters and the sync token it holds — which is ' +
+          'what makes "current" a comparison this service performs rather ' +
+          'than a claim the PEP makes about itself. Those decisions happened ' +
+          'in another process and this service saw none of them, which is ' +
+          'the entire point of a remote PEP. It does NOT create a row: a ' +
+          'heartbeat from something that never registered is refused naming ' +
+          'the registration endpoint, because a row created here would carry ' +
+          'no certificate, no notify URL and no registration date.' },
+  { path: '/admin/xacml', group: 'XACML', name: 'The XACML console page',
+    specs: ['xacml30'],
+    what: 'Settings, and what the PDP currently decides with. The one ' +
+          'setting on it that is NOT the PDP\'s is xacml.pepBias, which ' +
+          'belongs to the embedded Policy ENFORCEMENT point.' },
+  { path: '/admin/xacml/policies', group: 'XACML',
+    name: 'The policy repository',
+    specs: ['xacml30'],
+    what: 'Enable, disable, choose the root, delete, and create from an ' +
+          'RBAC or ABAC template. The table IS ou=policies in the embedded ' +
+          'directory.' },
+  { path: '/admin/xacml/editor', group: 'XACML', name: 'The guided editor',
+    specs: ['xacml30'],
+    what: 'Every element offers exactly what XACML allows at that point, ' +
+          'computed on the server by the same code that validates the ' +
+          'result — so the editor cannot offer something that will then be ' +
+          'refused. NO JAVASCRIPT: this console is script-src \'none\', so ' +
+          'every control is a form POST and every choice is a round trip. ' +
+          'There is no draft state; the policy being edited is the one the ' +
+          'PDP is using.' },
+  { path: '/admin/xacml/peps', group: 'XACML',
+    name: 'The remote enforcement points', specs: ['xacml30'],
+    what: 'Which PEPs pull this repository, and whether they are deciding ' +
+          'with the SAME policy this service holds — which is the question ' +
+          'a distributed authorization deployment has and the one nothing ' +
+          'else in this console can answer. NOTHING ON IT REACHES INTO ' +
+          'ANOTHER PROCESS: "stop nudging" stops this service dialling a ' +
+          'PEP and does not stop it enforcing, because it already holds the ' +
+          'engine and the policy. The register is ou=peps in the embedded ' +
+          'directory.' },
+  { path: '/admin/xacml/decide', group: 'XACML', name: 'Try a decision',
+    specs: ['xacml30'],
+    what: 'Ask the PDP about somebody and see the decision, which policies ' +
+          'applied, and — separately — what the embedded PEP would do with ' +
+          'it. Those last two are different answers, and when a policy "is ' +
+          'not working" it is nearly always because only one was being ' +
+          'looked at.' },
+  { path: '/admin-api/xacml', group: 'XACML',
+    name: 'The XACML console page over JSON', specs: ['xacml30'],
+    what: 'What GET /admin/xacml draws, as data. Ungated, like the rest of ' +
+          '/admin-api.' },
+  { path: '/admin-api/xacml/policies', group: 'XACML',
+    name: 'The policy repository over JSON', specs: ['xacml30'],
+    what: 'Every policy with its static type-check problems, the root, and ' +
+          'the templates with the parameters each takes.' },
+  { path: '/admin-api/xacml/editor', group: 'XACML',
+    name: 'One policy as an editable tree', specs: ['xacml30'],
+    what: 'Each node carries the legal moves at that point, so a caller can ' +
+          'walk the tree and POST one without a second copy of the grammar.' },
+  { path: '/admin-api/xacml/decide', group: 'XACML',
+    name: 'Ask the PDP a question over JSON', specs: ['xacml30'],
+    what: 'What GET /admin/xacml/decide draws: the decision, which policies ' +
+          'applied, and — separately — what the embedded PEP would do with ' +
+          'it. NOT POST /xacml/pdp, which takes a JSON Profile request and ' +
+          'is what a PEP calls; this builds a request out of three query ' +
+          'parameters and is what a person asks.' },
+  { path: '/admin-api/xacml/peps', group: 'XACML',
+    name: 'The remote enforcement points over JSON', specs: ['xacml30'],
+    what: 'The register, and what each PEP last reported: whether it holds ' +
+          'the current repository, when it was last heard from, the bias it ' +
+          'says it is running with, and what happened to the last nudge — ' +
+          'which is the only place a failed nudge is recorded, because it ' +
+          'is invisible from the receiving end by definition.' },
+  { path: '/admin-api/xacml/:action', group: 'XACML',
+    name: 'Change a policy, the repository or a remote PEP',
+    specs: ['xacml30'],
+    what: 'The console\'s three POST endpoints as ONE action resource — a ' +
+          'caller should not have to work out which page owns "enable". ' +
+          'The repository\'s, the editor\'s, and the three that end -pep, ' +
+          'which are spelt that way because this endpoint dispatches on the ' +
+          'action name and a second "disable" would be ambiguous between a ' +
+          'policy and an enforcement point. Rule 7 is why this exists in ' +
+          'the same commit as the pages.' },
   { path: '/.well-known/ssf-configuration', group: 'Shared Signals',
     name: 'Transmitter configuration metadata',
     specs: ['ssf'],
@@ -4598,6 +4766,17 @@ const PROTOCOLS = [
           'UserInfo and RP-initiated logout, with as many named ' +
           'authorization servers as have been asked for. RFC 9700 mode ' +
           'turns the BCP\'s refusals on.' },
+  { name: 'XACML', groups: ['XACML'],
+    specs: ['xacml30', 'xacmljson'],
+    what: 'A Policy Decision Point, a policy repository that IS ' +
+          'ou=policies in the embedded directory, a Policy Information ' +
+          'Point that reads attributes off the subject\'s own entry, and an ' +
+          'embedded Policy Enforcement Point. THE ONLY FAMILY HERE THAT ' +
+          'ANSWERS A QUESTION ABOUT SOMEBODY ELSE\'S BOUNDARY: every other ' +
+          'protocol on this service authenticates or provisions somebody, ' +
+          'and this one is handed a subject that has already been ' +
+          'authenticated elsewhere and asked whether they may. Held to the ' +
+          'OASIS conformance suite rather than to a test written here.' },
   { name: 'Federation', groups: ['Federation'],
     specs: ['saml2-profiles', 'saml11-profiles', 'ws-federation', 'oidc', 'rfc6749'],
     what: 'BOTH ENDS OF A FEDERATION RELATIONSHIP, in five protocols: SAML ' +

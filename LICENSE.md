@@ -17,3 +17,17 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+## One subtree is not MIT
+
+`xacml/conformance/` holds the OASIS XACML 3.0 conformance test suite, taken
+from [`authzforce/core`](https://github.com/authzforce/core) and **licensed
+under Apache-2.0**, not under the MIT licence above. Its own `LICENSE` file
+sits beside it and `xacml/conformance/PROVENANCE.md` records the full chain —
+OASIS XACML TC, then AT&T (April 2014, MIT), then AuthzForce — together with
+the one link in that chain that public sources do not establish.
+
+Nothing else in this repository is affected. The MIT licence above covers every
+other file.

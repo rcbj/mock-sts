@@ -2485,6 +2485,200 @@ const SETTINGS = [
   // argument is actually about. `ssf.signingAlgorithm` is the one setting here
   // that reaches the whole post-quantum table, because the signature goes
   // through `helpers.signJwtAs()` like every other JWT this service mints.
+  // ---------------------------------------------------------------------
+  // XACML 3.0.
+  //
+  // The engine is `xacml/`, the store is ou=policies in the embedded
+  // directory, and the decision endpoint is POST /xacml/pdp. Two things about
+  // this group are worth knowing before adding a row to it.
+  //
+  // FIRST, `xacml.enabled` LEAVES THE ROUTES REGISTERED and makes them answer
+  // 501, exactly as `ssf.enabled` does — the feature is off, the URL is not
+  // wrong, and those are different sentences to a client that is trying to
+  // work out whether this service speaks XACML at all.
+  //
+  // SECOND, THERE IS NO SETTING THAT MAKES THE PDP MORE PERMISSIVE, and that
+  // is deliberate in a service whose every other surface is a turnstile. A
+  // PDP's whole output is a decision; a flag that made it answer Permit when
+  // it could not decide would not be a mock of anything, it would be a broken
+  // PDP. What IS configurable is what happens at the PEP — see
+  // `xacml.pepBias`, which is the PEP's decision and not the PDP's.
+  { key: 'xacml.enabled', group: 'XACML', label: 'XACML enabled',
+    env: 'STS_XACML_ENABLED', type: 'bool', dflt: true, runtime: true,
+    description: 'When on, the XACML 3.0 endpoints under /xacml answer. ' +
+                 'Turning it off leaves the routes REGISTERED and makes ' +
+                 'them answer 501 rather than 404 — the feature is off, the ' +
+                 'URL is not wrong. The policy repository in ou=policies is ' +
+                 'untouched either way, so turning this back on decides ' +
+                 'against the same policies it did before.' },
+
+  { key: 'xacml.maxPolicies', group: 'XACML',
+    label: 'Policies the repository may hold',
+    env: 'STS_XACML_MAX_POLICIES', type: 'int', dflt: 200, runtime: true,
+    description: 'How many entries may live under ou=policies. The same ' +
+                 'kind of limit ou=federations and ou=applications carry, ' +
+                 'and for the same reason: this directory is in memory in ' +
+                 'the default persistence mode, and a caller that can create ' +
+                 'entries without bound can exhaust it. Reaching the limit ' +
+                 'refuses the CREATE and logs; it never evicts.' },
+
+  { key: 'xacml.pepBias', group: 'XACML',
+    label: 'What the embedded PEP does with a non-Permit',
+    env: 'STS_XACML_PEP_BIAS', type: 'enum',
+    enumValues: ['deny-biased', 'permit-biased'], dflt: 'deny-biased',
+    runtime: true,
+    description: 'THIS IS THE PEP\'S DECISION AND NOT THE PDP\'S, which is ' +
+                 'the whole reason it is a setting. XACML section 7.2 lets a ' +
+                 'PEP be deny-biased (anything that is not Permit is a ' +
+                 'refusal) or permit-biased (anything that is not Deny is ' +
+                 'allowed), and real deployments differ. Deny-biased is the ' +
+                 'default because it is what a PEP protecting anything ' +
+                 'should be; permit-biased exists so that a client can see ' +
+                 'what the other choice does to an Indeterminate, which is ' +
+                 'the case the two disagree about and the one nobody tests.' },
+
+  { key: 'xacml.returnPolicyIdList', group: 'XACML',
+    label: 'Always return the applicable policy identifiers',
+    env: 'STS_XACML_RETURN_POLICY_ID_LIST', type: 'bool', dflt: false,
+    runtime: true,
+    description: 'A request asks for the list of policies that applied by ' +
+                 'setting ReturnPolicyIdList; turning this on returns it ' +
+                 'whether or not the request asked. Off by default because ' +
+                 'it is what the specification says, and on is what makes a ' +
+                 'debugger useful — a decision you cannot trace to a policy ' +
+                 'is a decision you cannot argue with.' },
+
+  // ---------------------------------------------------------------------
+  // THE REMOTE PEP (phase five). SEVEN ROWS, AND THEY DIVIDE IN TWO.
+  //
+  // The first three are about the REGISTRATION SURFACE — what a remote Policy
+  // Enforcement Point may do when it dials this service. The last four are
+  // about the NUDGE, which is the one outbound request this family makes, and
+  // they are deliberately the same four `ssf.push*` carries: an off switch, a
+  // host allowlist, an insecure escape and a timeout. Two families making one
+  // outbound request each should be configured the same way, or the second one
+  // is a surprise to anybody who has already read the first.
+  //
+  // WHAT IS NOT HERE IS A SETTING THAT CHANGES A REMOTE PEP'S BIAS. A remote
+  // PEP is a SEPARATE PROCESS with its own configuration, and `xacml.pepBias`
+  // governs the EMBEDDED one at /xacml/protected and nothing else. A row here
+  // that appeared to set a remote PEP's bias would be a control that silently
+  // did nothing, which is worse than no control: the remote one reports the
+  // bias it is actually running with on every heartbeat, and the console shows
+  // that rather than what this service would have chosen for it.
+  { key: 'xacml.remotePeps', group: 'XACML',
+    label: 'Remote Policy Enforcement Points may register',
+    env: 'STS_XACML_REMOTE_PEPS', type: 'bool', dflt: true, runtime: true,
+    description: 'When on, the three endpoints under /xacml/pep answer: a ' +
+                 'remote PEP registers, PULLS the policy repository, and ' +
+                 'reports what it has enforced. Turning it off leaves the ' +
+                 'routes registered and answering 501, like every other ' +
+                 'switch here, and leaves the register in ou=peps untouched ' +
+                 '— so a PEP that was registered is still listed, still ' +
+                 'shown as stale, and comes back the moment this goes on ' +
+                 'again. THE PULL IS THE CONTRACT: a PEP that cannot reach ' +
+                 'this endpoint has stale policy and says so on its own ' +
+                 'surface, which is the failure mode this whole design is ' +
+                 'arranged to make visible.' },
+
+  { key: 'xacml.pepRequireCertificate', group: 'XACML',
+    label: 'A registering PEP must present a client certificate',
+    env: 'STS_XACML_PEP_REQUIRE_CERTIFICATE', type: 'bool', dflt: true,
+    runtime: true,
+    description: 'ON by default, and it is the one refusal in this family. ' +
+                 'POST /xacml/pdp authenticates nobody on purpose — a PDP ' +
+                 'answers a question about somebody ELSE\'S boundary and the ' +
+                 'identity that matters is in the request — but REGISTERING ' +
+                 'is a different question: it writes an entry, it is what ' +
+                 'the console lists, and it is the address a nudge is sent ' +
+                 'to. So "which PEP is this" is exactly the question here, ' +
+                 'and a client certificate is the answer. Like every other ' +
+                 'gate in this service it is a TURNSTILE: the certificate is ' +
+                 'not required to chain to anything, because RFC 8705\'s ' +
+                 'argument applies unchanged — what is proved is that the ' +
+                 'same key completed the handshake. Turning it off lets a ' +
+                 'PEP register over plain HTTP, which is what a run with ' +
+                 'global.https off needs; such a registration is marked ' +
+                 'UNAUTHENTICATED on its entry and on the console rather ' +
+                 'than being quietly indistinguishable from one that proved ' +
+                 'something.' },
+
+  { key: 'xacml.maxPeps', group: 'XACML',
+    label: 'Remote PEPs the register may hold',
+    env: 'STS_XACML_MAX_PEPS', type: 'int', dflt: 50, runtime: true,
+    description: 'How many entries may live under ou=peps, for the same ' +
+                 'reason xacml.maxPolicies bounds ou=policies: this ' +
+                 'directory is in memory in the default persistence mode and ' +
+                 'a caller that can create entries without bound can ' +
+                 'exhaust it. Reaching the limit refuses the REGISTRATION ' +
+                 'and logs; it never evicts, because evicting a PEP would ' +
+                 'stop nudging a component that is still enforcing.' },
+
+  { key: 'xacml.pepStaleAfterS', group: 'XACML',
+    label: 'Seconds before a registered PEP is reported stale',
+    env: 'STS_XACML_PEP_STALE_AFTER_S', type: 'int', dflt: 300,
+    min: 10, max: 86400, runtime: true,
+    description: 'A remote PEP heartbeats; this is how long since the last ' +
+                 'one before the console calls it stale. It changes NOTHING ' +
+                 'this service does — no entry is removed, no nudge is ' +
+                 'withheld — it is purely what the word "stale" means on the ' +
+                 'page. That is the point: a PEP whose sync has stopped is ' +
+                 'still enforcing, against whatever policy it last pulled, ' +
+                 'and a register that hid it would hide exactly the ' +
+                 'situation somebody needs to see.' },
+
+  { key: 'xacml.pepNotify', group: 'XACML',
+    label: 'Nudge a registered PEP when the repository changes',
+    env: 'STS_XACML_PEP_NOTIFY', type: 'bool', dflt: true, runtime: true,
+    description: 'THE NUDGE IS AN OPTIMISATION AND NEVER THE MECHANISM. A ' +
+                 'remote PEP PULLS on its own interval; when a policy ' +
+                 'changes, this service additionally POSTs a few bytes to ' +
+                 'each registered PEP that gave a notify URL, saying only ' +
+                 '"something changed, pull now". Turning it off costs ' +
+                 'LATENCY and nothing else — every PEP still converges on ' +
+                 'its next poll — which is what makes it safe to turn off ' +
+                 'in a deployment with no egress. It is the third outbound ' +
+                 'request in this repository and xacml/xacml_pep_http.js ' +
+                 'argues it rather than citing the other two.' },
+
+  { key: 'xacml.pepNotifyAllowedHosts', group: 'XACML',
+    label: 'Notify endpoint allowlist',
+    env: 'STS_XACML_PEP_NOTIFY_ALLOWED_HOSTS', type: 'csv', dflt: '',
+    runtime: true,
+    description: 'Host names this service will nudge. EMPTY MEANS ANY, ' +
+                 'which is the default and matches ssf.pushAllowedHosts ' +
+                 'exactly — a deployment reachable by anybody it does not ' +
+                 'trust sets the list, and every other host is refused BY ' +
+                 'NAME on the PEP\'s own row. Hosts rather than URLs, for ' +
+                 'the reason SSF gives: a component legitimately moves its ' +
+                 'path and does not legitimately move to another host.' },
+
+  { key: 'xacml.pepNotifyAllowInsecure', group: 'XACML',
+    label: 'Allow http:// and untrusted TLS for a nudge',
+    env: 'STS_XACML_PEP_NOTIFY_ALLOW_INSECURE', type: 'bool', dflt: false,
+    runtime: true,
+    description: 'OFF by default, like federation\'s and SSF\'s equivalents ' +
+                 '— and what travels here is WEAKER than either of those, ' +
+                 'which is worth saying rather than leaving to be assumed. ' +
+                 'A nudge carries no credential and no event: its whole ' +
+                 'body says that the repository changed, which the PEP is ' +
+                 'about to find out anyway. It is still off by default, ' +
+                 'because the URL is one somebody configured and a request ' +
+                 'this service makes in the clear is a request somebody can ' +
+                 'answer for.' },
+
+  { key: 'xacml.pepNotifyTimeoutMs', group: 'XACML',
+    label: 'Nudge timeout (ms)',
+    env: 'STS_XACML_PEP_NOTIFY_TIMEOUT_MS', type: 'int', dflt: 2000,
+    min: 100, max: 30000, runtime: true,
+    description: 'How long to wait for a PEP to answer a nudge. SHORTER ' +
+                 'THAN SSF\'S TEN SECONDS ON PURPOSE, and the reason is the ' +
+                 'thing that makes a nudge a nudge: a lost push is a lost ' +
+                 'event, so SSF waits; a lost nudge costs one polling ' +
+                 'interval of latency and nothing at all, so waiting is the ' +
+                 'expensive mistake. What IS waiting on it is the console ' +
+                 'form of whoever just saved a policy.' },
+
   { key: 'ssf.enabled', group: 'SSF', label: 'SSF enabled',
     env: 'STS_SSF_ENABLED', type: 'bool', dflt: true, runtime: true,
     description: 'When on, the Shared Signals Framework endpoints under ' +

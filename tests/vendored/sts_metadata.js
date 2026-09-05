@@ -268,7 +268,7 @@ function theConsoleChromeIsThere(page) {
 function theProtocolListIsHonest(doc, page) {
   log.debug("Entering theProtocolListIsHonest().");
   log.info("=== The protocol list ===");
-  const expected = ["OAuth2 / OIDC", "Federation", "Shared Signals",
+  const expected = ["OAuth2 / OIDC", "XACML", "Federation", "Shared Signals",
                     "SAML 2.0", "SAML 1.1",
                     "WS-Federation", "WS-Trust", "Kerberos", "SPNEGO", "SPIFFE",
                     "SCIM", "LDAP", "PKI / X.509", "WebAuthn / CTAP",

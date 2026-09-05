@@ -123,7 +123,23 @@ COPY . ./
 # service, this image exists to run `server.js`, and nothing in it would ever
 # call them. `npm test` inside this image therefore does not work, exactly as
 # deliberately as before; package.json is copied for its dependency list.
-RUN rm -rf ./tests
+#
+# **`xacml-pep` GOES THE SAME WAY, SINCE 2026-09-05, AND FOR THE SAME REASON
+# ONE STEP FURTHER OUT.** That directory is a SECOND CONTAINER — a remote XACML
+# Policy Enforcement Point with its own Dockerfile, its own package.json and
+# its own thirty-line `common/helpers.js` shim. `server.js` requires none of
+# it and nothing in this image ever could. It is in the context because THAT
+# image is built from this same context (its Dockerfile copies the engine out
+# of `xacml/` at build time, which is what keeps one copy of the evaluator in
+# the tree), and a context has one ignore file — so the exclusion belongs here
+# beside its reason rather than in `.dockerignore`, where it would break the
+# very build it exists for.
+#
+# The shim is the specific thing worth not shipping: it is a file called
+# `common/helpers.js` that exports two functions, and a copy of it inside an
+# image whose real `common/helpers.js` is the identity service's is a trap
+# laid for whoever next reads a stack trace.
+RUN rm -rf ./tests ./xacml-pep
 # The service selects its configuration (log level) with CONFIG_FILE, the same
 # way api and client do. The compose files override this per stack.
 #
