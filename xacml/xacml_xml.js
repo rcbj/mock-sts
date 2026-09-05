@@ -247,8 +247,14 @@ function readExpression(node) {
       .map(readExpression);
     log.debug('Leaving readExpression(). Apply with ' + args.length +
               ' argument(s).');
+    // The <Description> filtered out above is KEPT rather than discarded. It
+    // is optional syntax that means nothing to the evaluator and everything to
+    // the next reader, and the editor rewrites the whole document on every
+    // edit — so a part the reader drops is not merely unread, it is DELETED by
+    // the first click. Same argument as `descriptionOf()` above it.
     return { kind: 'apply',
              functionId: requiredAttribute(node, 'FunctionId'),
+             description: descriptionOf(node),
              args: args };
   }
   if (name === 'Function') {
@@ -433,6 +439,92 @@ function readVariableDefinitions(node) {
   return variables;
 }
 
+// ---------------------------------------------------------------------------
+// <PolicyDefaults> / <PolicySetDefaults>, WHICH IS ONE ELEMENT WITH TWO NAMES.
+//
+// It holds an <XPathVersion>, and the specification (section 5.14) says that
+// element MUST be present when the policy contains an <AttributeSelector> or
+// an `xpathExpression` value. Nothing here READS it — this implementation's
+// selector evaluation is the one XPath engine it has, and it does not switch
+// dialects on a URI — but it is carried, because a policy that arrived
+// schema-valid and left without it would leave through this service's own
+// writer, and two of the vendored conformance policies carry one.
+//
+// The rest of what the element may hold in later profiles is not read and not
+// written: what is not in the model is lost on the first edit, and saying so
+// here is the point of this comment.
+// ---------------------------------------------------------------------------
+function readXPathVersion(node, wrapper) {
+  log.debug('Entering readXPathVersion(). wrapper=' + wrapper);
+  const defaults = firstNamed(node, wrapper);
+  if (!defaults) {
+    log.debug('Leaving readXPathVersion(). Absent.');
+    return null;
+  }
+  const version = firstNamed(defaults, 'XPathVersion');
+  log.debug('Leaving readXPathVersion(). ' + (version ? 'Present.' : 'Empty.'));
+  return version ? textOf(version).trim() : null;
+}
+
+// ---------------------------------------------------------------------------
+// COMBINER PARAMETERS.
+//
+// Four elements — <CombinerParameters>, <RuleCombinerParameters>,
+// <PolicyCombinerParameters> and <PolicySetCombinerParameters> — and they are
+// the one part of the policy syntax this PDP is CERTAIN to ignore. Section C
+// of the specification is explicit that none of the twelve standard combining
+// algorithms takes a parameter, so a document may carry these and no standard
+// algorithm can read them.
+//
+// THEY ARE STILL READ, AND THE REASON IS NOT SYMMETRY. The editor serializes
+// the whole document on every single edit, so an element the reader skips is
+// silently deleted the moment somebody renames a rule. Carrying them makes the
+// round trip lossless; it does not make them mean anything, which is why
+// `xacml_editor.js` shows them and lets them be removed and does NOT offer to
+// add one — see the argument there.
+//
+// The several <CombinerParameters> elements a policy may carry are flattened
+// into one list and written back as one element. They are a NAMED SET for an
+// algorithm rather than an ordered document structure, so the grouping carries
+// no meaning to lose.
+// ---------------------------------------------------------------------------
+function readCombinerParameterList(node) {
+  return childrenNamed(node, 'CombinerParameter').map(function (one) {
+    const children = elementChildren(one);
+    if (children.length !== 1) {
+      throw model.syntaxError(
+        '<CombinerParameter> must hold exactly one <AttributeValue>.');
+    }
+    return { name: requiredAttribute(one, 'ParameterName'),
+             value: readExpression(children[0]) };
+  });
+}
+
+function readCombinerParameters(node) {
+  log.debug('Entering readCombinerParameters().');
+  let out = [];
+  childrenNamed(node, 'CombinerParameters').forEach(function (group) {
+    out = out.concat(readCombinerParameterList(group));
+  });
+  log.debug('Leaving readCombinerParameters(). ' + out.length + ' parameter(s).');
+  return out;
+}
+
+// The three that name what they are FOR. One shape, three element names and
+// three id attributes, so one reader — collapsing them into a single list with
+// a flag is how the distinction gets lost at the point it matters, which is
+// the same argument obligations and advice are read by one function under.
+function readReferencedCombinerParameters(node, element, idAttribute) {
+  log.debug('Entering readReferencedCombinerParameters(). element=' + element);
+  const out = childrenNamed(node, element).map(function (group) {
+    return { ref: requiredAttribute(group, idAttribute),
+             parameters: readCombinerParameterList(group) };
+  });
+  log.debug('Leaving readReferencedCombinerParameters(). ' + out.length +
+            ' group(s).');
+  return out;
+}
+
 function readPolicy(node) {
   log.debug('Entering readPolicy().');
   const rules = childrenNamed(node, 'Rule').map(readRule);
@@ -451,9 +543,13 @@ function readPolicy(node) {
     description: descriptionOf(node),
     version: attribute(node, 'Version') || '1.0',
     combiningAlgId: requiredAttribute(node, 'RuleCombiningAlgId'),
+    xpathVersion: readXPathVersion(node, 'PolicyDefaults'),
     target: readTarget(firstNamed(node, 'Target')),
     variables: readVariableDefinitions(node),
     rules: rules,
+    combinerParameters: readCombinerParameters(node),
+    ruleCombinerParameters: readReferencedCombinerParameters(
+      node, 'RuleCombinerParameters', 'RuleIdRef'),
     obligations: readObligations(node),
     advice: readAdvice(node),
     maxDelegationDepth: attribute(node, 'MaxDelegationDepth')
@@ -484,10 +580,23 @@ function readPolicySet(node) {
     description: descriptionOf(node),
     version: attribute(node, 'Version') || '1.0',
     combiningAlgId: requiredAttribute(node, 'PolicyCombiningAlgId'),
+    xpathVersion: readXPathVersion(node, 'PolicySetDefaults'),
     target: readTarget(firstNamed(node, 'Target')),
     children: children,
+    combinerParameters: readCombinerParameters(node),
+    // The two that name a CHILD of this set rather than a rule. Read
+    // separately because the element name says which kind of child is being
+    // named, and a document that named a Policy with the PolicySet spelling
+    // would be wrong in a way one merged list could not express.
+    policyCombinerParameters: readReferencedCombinerParameters(
+      node, 'PolicyCombinerParameters', 'PolicyIdRef'),
+    policySetCombinerParameters: readReferencedCombinerParameters(
+      node, 'PolicySetCombinerParameters', 'PolicySetIdRef'),
     obligations: readObligations(node),
-    advice: readAdvice(node)
+    advice: readAdvice(node),
+    // A PolicySet may carry it too (section 5.1), and reading it on a Policy
+    // and not here would lose it on exactly the documents that use delegation.
+    maxDelegationDepth: attribute(node, 'MaxDelegationDepth')
   };
 }
 
@@ -708,15 +817,77 @@ function indent(depth) {
   return new Array(depth + 1).join('  ');
 }
 
+// ---------------------------------------------------------------------------
+// THE NAMESPACE BINDINGS AN XPATH NEEDS, WRITTEN BACK ONTO THE ELEMENT THAT
+// USES IT.
+//
+// An `<AttributeSelector Path="//md:record/md:patient"/>` means nothing
+// without the binding for `md:`, and that binding is a property of the
+// DOCUMENT the selector arrived in — captured at read time by
+// `namespacesInScope()`, because by the time the model is evaluated the DOM is
+// gone. Until this existed the reader captured them and the writer dropped
+// them, so the FIRST EDIT of a policy containing a selector produced a
+// document whose XPath could not resolve a single prefix. Nothing failed
+// loudly: an unresolvable prefix is an empty bag, an empty bag is
+// NotApplicable, and NotApplicable looks exactly like a policy that decided
+// you may not.
+//
+// TWO RULES, and both are about being narrow rather than tidy:
+//
+//   Only PREFIXED bindings are written. A default `xmlns=` on an element also
+//   rebinds THAT ELEMENT'S OWN NAME, and these elements are XACML elements
+//   written unprefixed — declaring `xmlns="http://www.medico.com/..."` on an
+//   <AttributeSelector> would move the selector itself out of the XACML
+//   namespace and produce a document nothing can read.
+//
+//   Only prefixes the path actually USES are written. Every binding in scope
+//   at read time includes `xsi`, `xacml-context` and whatever else the root
+//   declared, and copying all of them onto every selector is noise on a
+//   document people read. Over-inclusion is safe here — a prefix matched
+//   inside a quoted string in the XPath costs one unused declaration — while
+//   under-inclusion is the failure above, so the test is deliberately loose.
+// ---------------------------------------------------------------------------
+function namespaceAttrs(namespaces, usedIn) {
+  log.debug('Entering namespaceAttrs().');
+  if (!namespaces) {
+    log.debug('Leaving namespaceAttrs(). None captured.');
+    return '';
+  }
+  const text = String(usedIn || '');
+  const used = {};
+  const pattern = /([A-Za-z_][A-Za-z0-9_.-]*):/g;
+  let found = pattern.exec(text);
+  while (found) {
+    used[found[1]] = true;
+    found = pattern.exec(text);
+  }
+  const out = Object.keys(namespaces).filter(function (prefix) {
+    return prefix !== '' && used[prefix] &&
+           namespaces[prefix] !== model.NS_XACML;
+  }).sort().map(function (prefix) {
+    return attr('xmlns:' + prefix, namespaces[prefix]);
+  }).join('');
+  log.debug('Leaving namespaceAttrs(). ' + (out ? 'Declared.' : 'Nothing.'));
+  return out;
+}
+
 function writeExpression(expression, depth) {
   log.debug('Entering writeExpression(). kind=' + expression.kind);
   const pad = indent(depth);
   if (expression.kind === 'value') {
+    const lexical = String(expression.lexical === undefined
+                             ? '' : expression.lexical);
+    // An `xpathExpression` value is an XPath, so it carries the same two
+    // things a selector does: the category the path is evaluated against, and
+    // the prefix bindings it uses. Both were captured by the reader and both
+    // were dropped here until this line existed — see `namespaceAttrs()`.
+    const xpath = model.canonicalType(expression.type) ===
+                  model.TYPE.XPATH_EXPRESSION;
     log.debug('Leaving writeExpression(). AttributeValue.');
-    return pad + '<AttributeValue' + attr('DataType', expression.type) + '>' +
-      xmlEscape(String(expression.lexical === undefined
-                         ? '' : expression.lexical)) +
-      '</AttributeValue>';
+    return pad + '<AttributeValue' + attr('DataType', expression.type) +
+      (xpath ? attr('XPathCategory', expression.xpathCategory) +
+               namespaceAttrs(expression.namespaces, lexical) : '') + '>' +
+      xmlEscape(lexical) + '</AttributeValue>';
   }
   if (expression.kind === 'designator') {
     log.debug('Leaving writeExpression(). AttributeDesignator.');
@@ -738,6 +909,7 @@ function writeExpression(expression, depth) {
       attr('Path', expression.path) +
       attr('DataType', expression.dataType) +
       attr('ContextSelectorId', expression.contextSelectorId) +
+      namespaceAttrs(expression.namespaces, expression.path) +
       ' MustBePresent="' + (expression.mustBePresent ? 'true' : 'false') +
       '"/>';
   }
@@ -752,12 +924,21 @@ function writeExpression(expression, depth) {
       attr('VariableId', expression.variableId) + '/>';
   }
   if (expression.kind === 'apply') {
+    // <Description> FIRST, because the schema's sequence puts it there and an
+    // <Apply> whose description followed its arguments is a document this
+    // reader accepts and a schema validator does not — which is the same trap
+    // `writeTarget()` argues about an omitted <Target/>.
+    const described = expression.description
+      ? indent(depth + 1) + '<Description>' +
+        xmlEscape(expression.description) + '</Description>\n'
+      : '';
     const inner = (expression.args || []).map(function (argument) {
       return writeExpression(argument, depth + 1);
     }).join('\n');
     log.debug('Leaving writeExpression(). Apply.');
     return pad + '<Apply' + attr('FunctionId', expression.functionId) + '>' +
-      (inner ? '\n' + inner + '\n' + pad : '') + '</Apply>';
+      (described || inner ? '\n' + described + inner +
+                            (inner ? '\n' : '') + pad : '') + '</Apply>';
   }
   log.debug('Leaving writeExpression(). Unwritable.');
   throw model.syntaxError('Cannot write an expression of kind "' +
@@ -818,6 +999,54 @@ function writeHolders(holders, depth, wrapper, item, idAttr, onAttr) {
     wrapper + '>';
 }
 
+// <PolicyDefaults> / <PolicySetDefaults>. Written only when there is a version
+// to put in it, because an empty <PolicyDefaults/> is not schema-valid — the
+// element exists to hold the XPathVersion.
+function writeDefaults(xpathVersion, depth, wrapper) {
+  if (!xpathVersion) {
+    return '';
+  }
+  const pad = indent(depth);
+  return '\n' + pad + '<' + wrapper + '>\n' +
+    indent(depth + 1) + '<XPathVersion>' + xmlEscape(xpathVersion) +
+    '</XPathVersion>\n' + pad + '</' + wrapper + '>';
+}
+
+// The four combiner-parameter elements. See `readCombinerParameters()` for why
+// they are carried at all: nothing here reads them, and the writer's job is to
+// make sure an edit does not delete them.
+function writeCombinerParameterList(parameters, depth) {
+  return (parameters || []).map(function (one) {
+    return indent(depth) + '<CombinerParameter' +
+      attr('ParameterName', one.name) + '>\n' +
+      writeExpression(one.value, depth + 1) + '\n' +
+      indent(depth) + '</CombinerParameter>';
+  }).join('\n');
+}
+
+function writeCombinerParameters(parameters, depth) {
+  if (!parameters || !parameters.length) {
+    return '';
+  }
+  const pad = indent(depth);
+  return '\n' + pad + '<CombinerParameters>\n' +
+    writeCombinerParameterList(parameters, depth + 1) + '\n' +
+    pad + '</CombinerParameters>';
+}
+
+function writeReferencedCombinerParameters(groups, depth, element,
+                                           idAttribute) {
+  if (!groups || !groups.length) {
+    return '';
+  }
+  const pad = indent(depth);
+  return groups.map(function (group) {
+    return '\n' + pad + '<' + element + attr(idAttribute, group.ref) + '>\n' +
+      writeCombinerParameterList(group.parameters, depth + 1) + '\n' +
+      pad + '</' + element + '>';
+  }).join('');
+}
+
 function writeRule(rule, depth) {
   log.debug('Entering writeRule(). id=' + rule.id);
   const pad = indent(depth);
@@ -848,7 +1077,18 @@ function writePolicyBody(policy, depth, withNamespace) {
     body += '\n' + indent(depth + 1) + '<Description>' +
       xmlEscape(policy.description) + '</Description>';
   }
+  // THE ORDER OF WHAT FOLLOWS IS THE SCHEMA'S SEQUENCE AND NOT A PREFERENCE:
+  // Description, PolicyDefaults, Target, then the repeatable group, then the
+  // two expression holders. A body assembled in a different order parses back
+  // here perfectly and fails somebody else's schema validator, which is the
+  // worst of both — the same trap `writeTarget()` argues about.
+  body += writeDefaults(policy.xpathVersion, depth + 1, 'PolicyDefaults');
   body += '\n' + writeTarget(policy.target, depth + 1);
+  body += writeCombinerParameters(policy.combinerParameters, depth + 1);
+  body += writeReferencedCombinerParameters(policy.ruleCombinerParameters,
+                                            depth + 1,
+                                            'RuleCombinerParameters',
+                                            'RuleIdRef');
   Object.keys(policy.variables || {}).forEach(function (id) {
     body += '\n' + indent(depth + 1) + '<VariableDefinition' +
       attr('VariableId', id) + '>\n' +
@@ -866,7 +1106,12 @@ function writePolicyBody(policy, depth, withNamespace) {
     (withNamespace ? ' xmlns="' + model.NS_XACML + '"' : '') +
     attr('PolicyId', policy.id) +
     attr('Version', policy.version || '1.0') +
-    attr('RuleCombiningAlgId', policy.combiningAlgId) + '>' +
+    attr('RuleCombiningAlgId', policy.combiningAlgId) +
+    // Optional, and carried rather than honoured: this PDP implements no
+    // administrative delegation, so the depth is written back exactly as it
+    // was found and read by nothing. `xacml/CLAUDE.md` says so out loud rather
+    // than letting the attribute imply otherwise.
+    attr('MaxDelegationDepth', policy.maxDelegationDepth) + '>' +
     body + '\n' + pad + '</Policy>';
 }
 
@@ -882,7 +1127,16 @@ function writePolicySetBody(policySet, depth, withNamespace) {
     body += '\n' + indent(depth + 1) + '<Description>' +
       xmlEscape(policySet.description) + '</Description>';
   }
+  body += writeDefaults(policySet.xpathVersion, depth + 1,
+                        'PolicySetDefaults');
   body += '\n' + writeTarget(policySet.target, depth + 1);
+  body += writeCombinerParameters(policySet.combinerParameters, depth + 1);
+  body += writeReferencedCombinerParameters(
+    policySet.policyCombinerParameters, depth + 1,
+    'PolicyCombinerParameters', 'PolicyIdRef');
+  body += writeReferencedCombinerParameters(
+    policySet.policySetCombinerParameters, depth + 1,
+    'PolicySetCombinerParameters', 'PolicySetIdRef');
   (policySet.children || []).forEach(function (child) {
     if (child.kind === 'Policy') {
       body += '\n' + writePolicyBody(child, depth + 1, false);
@@ -904,7 +1158,8 @@ function writePolicySetBody(policySet, depth, withNamespace) {
     (withNamespace ? ' xmlns="' + model.NS_XACML + '"' : '') +
     attr('PolicySetId', policySet.id) +
     attr('Version', policySet.version || '1.0') +
-    attr('PolicyCombiningAlgId', policySet.combiningAlgId) + '>' +
+    attr('PolicyCombiningAlgId', policySet.combiningAlgId) +
+    attr('MaxDelegationDepth', policySet.maxDelegationDepth) + '>' +
     body + '\n' + pad + '</PolicySet>';
 }
 

@@ -241,6 +241,10 @@ const vcClaims = require('../oid4vc/vc_claims');
 // admin_stats.js's resolver, which every issuance site reaches long before the
 // directory's routes should exist.
 const groupClaims = require('../common/group_claims');
+// The ROLE REGISTER. `ou=roles` is its store the way ou=policies is the policy
+// repository's, and this file fills its directory slot below — a require in
+// the other direction would drag every /ldap route to the front of the router.
+const roles = require('../common/roles');
 // The admin console's two roles, which are two groups in THIS directory. Required
 // outright rather than through a slot in the other direction because it registers
 // no route (rule 3), so nothing about the require order changes by naming it here;
@@ -397,6 +401,18 @@ function policiesDn() {
   return 'ou=policies,' + baseDn();
 }
 
+// ou=roles IS the role register. A container of its own rather than a corner
+// of ou=groups, and the difference is not filing: a GROUP is a set of PEOPLE,
+// and a role is a name that a person, a group OR AN APPLICATION may hold. The
+// third one is what makes them different kinds of thing — `client_credentials`
+// has no person in it, and an application holding a role is the only way there
+// is anything to decide about that grant. Folding roles into ou=groups would
+// mean every reader of ou=groups had to filter out the entries that are not
+// sets of people. `common/roles.js` holds the schema; /admin/roles publishes it.
+function rolesDn() {
+  return 'ou=roles,' + baseDn();
+}
+
 // ou=peps is the register of REMOTE Policy Enforcement Points — the processes
 // that pull this repository and enforce it somewhere else. A container of its
 // own rather than a corner of ou=policies, and the reason is the one that
@@ -473,6 +489,10 @@ function maxFederations() {
 
 function maxPolicies() {
   return config.value('xacml.maxPolicies');
+}
+
+function maxRoles() {
+  return config.value('roles.maxRoles');
 }
 
 function maxPeps() {
@@ -1319,6 +1339,21 @@ function seed() {
       'The entry holds the XACML XML AS AUTHORED and everything else on it ' +
       'is derived from that document at write time, so where the two ' +
       'disagree the document wins. xacml/xacml_store.js holds the schema.'
+  }, { origin: 'seed' });
+  putEntry(rolesDn(), {
+    objectClass: ['top', 'organizationalUnit'],
+    ou: 'roles',
+    description: 'ROLES: the one thing here a user, a group AND an ' +
+      'application can all be mapped into. An entry is named by the role and ' +
+      'everything on it is MEMBERSHIP — who holds it. What a role is ' +
+      'REQUIRED for is NOT here: that lives in appRequiredRole on the ' +
+      'application entry that requires it, because it is a fact about the ' +
+      'application. Six more roles exist and are in no container at all — ' +
+      'EVERYBODY, ALL_AUTHENTICATED_USERS, ALL_UNAUTHENTICATED_USERS, ' +
+      'ALL_APPLICATIONS, ALL_AUTHENTICATED_APPLICATIONS and ' +
+      'ALL_UNAUTHENTICATED_APPLICATIONS are COMPUTED from the security ' +
+      'context of the decision being made. common/roles.js holds the schema; ' +
+      'GET /admin/roles publishes it.'
   }, { origin: 'seed' });
   putEntry(pepsDn(), {
     objectClass: ['top', 'organizationalUnit'],
@@ -4357,6 +4392,36 @@ if (typeof groupClaims.setDirectory === 'function') {
 //
 // Guarded like every other install here: an older copy of either module
 // without the slot costs a warning rather than a service that will not start.
+// THE ROLE REGISTER'S CONTAINER, AND ITS GROUP LOOKUP.
+//
+// Two functions rather than one slot's worth, because resolving a role needs
+// both halves and only this module has either: `ou=roles` says which groups
+// hold a role, and `groupsOfUser()` says which groups a person is in. Handing
+// over the container alone would leave `roles.js` able to list roles and
+// unable to answer whether anybody holds one.
+//
+// The group names are FLATTENED to their common names here. `groupsOfUser()`
+// answers rows carrying a DN, a cn and how the membership was established,
+// which is what /admin/groups draws; a role only ever compares names, and
+// passing the rows would put the shape of a console page into the resolver.
+if (typeof roles.setDirectory === 'function') {
+  roles.setDirectory({
+    allRoles: allRoles,
+    writeRole: writeRole,
+    deleteRole: deleteRole,
+    groupsOfUser: function (name) {
+      return (groupsOfUser(name).groups || []).map(function (one) {
+        return one.cn;
+      });
+    }
+  });
+} else {
+  log.warn('ldap: common/roles.js offers no setDirectory(), so ou=roles is ' +
+           'unreachable and only the six built-in roles answer. An ' +
+           'application requiring EVERYBODY still admits everybody, so ' +
+           'nothing is refused that was not refused before.');
+}
+
 if (typeof xacmlStore.setDirectory === 'function') {
   xacmlStore.setDirectory({ allPolicies: allPolicies,
                             writePolicy: writePolicy,
@@ -6866,6 +6931,102 @@ function deletePolicy(name) {
   touchDirectory();
   auditPolicyDirectory('entry.delete', stored.dn, stored.attributes, false);
   log.debug('Leaving deletePolicy(). ' + entries.size + ' entry/entries left.');
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// ou=roles AS A STORE.
+//
+// The same three functions again. One thing about them is worth saying: a role
+// entry is named by the ROLE NAME itself and there is no second identifier —
+// unlike a policy, whose entry name and PolicyId are deliberately different
+// things. A role IS its name: it is what a token claim carries, what an
+// application's requirement list names, and what a XACML policy matches on, so
+// a role with a handle and a separate display name would be three places for
+// one string to disagree with itself.
+// ---------------------------------------------------------------------------
+function roleDn(name) {
+  return 'cn=' + escapeDnValue(String(name)) + ',' + rolesDn();
+}
+
+function roleEntry(name) {
+  log.debug('Entering roleEntry(). name=' + name);
+  const direct = getEntry(roleDn(name));
+  log.debug('Leaving roleEntry(). ' + (direct ? 'Found.' : 'Not here.'));
+  return direct || null;
+}
+
+function roleCount() {
+  let n = 0;
+  eachEntryInRealm(function (stored) {
+    if (isUnder(stored.dn, rolesDn()) &&
+        normalizeDn(stored.dn) !== normalizeDn(rolesDn())) {
+      n++;
+    }
+  });
+  return n;
+}
+
+function allRoles() {
+  log.debug('Entering allRoles().');
+  const rows = [];
+  eachEntryInRealm(function (stored) {
+    if (isUnder(stored.dn, rolesDn()) &&
+        normalizeDn(stored.dn) !== normalizeDn(rolesDn())) {
+      const object = entryObject(stored);
+      object.name = (stored.attributes.cn || [])[0] ||
+                    stored.dn.split(',')[0].replace(/^cn=/i, '');
+      rows.push(object);
+    }
+  });
+  log.debug('Leaving allRoles(). ' + rows.length + ' role(s).');
+  return rows;
+}
+
+// Create or REPLACE, for writePolicy()'s reason: the record being written was
+// read from this entry a moment ago and changed, so merging would make it
+// impossible to REMOVE a member — and removing a member from a role is the
+// half of this register that has a security consequence.
+function writeRole(name, attributes) {
+  log.debug('Entering writeRole(). name=' + name);
+  const existing = roleEntry(name);
+  const dn = existing ? existing.dn : roleDn(name);
+  if (!existing && roleCount() >= maxRoles()) {
+    log.warn('ldap: not creating ' + dn + '; ou=roles holds its maximum of ' +
+             maxRoles() + ' entry/entries (roles.maxRoles).');
+    log.debug('Leaving writeRole(). The container is full.');
+    return false;
+  }
+  if (totalEntries() >= maxEntries() && !existing) {
+    log.warn('ldap: not creating ' + dn + '; the directory holds its ' +
+             'maximum of ' + maxEntries() + ' entries.');
+    log.debug('Leaving writeRole(). The directory is full.');
+    return false;
+  }
+  const created = existing ? existing.createdAt : generalizedTime();
+  const stored = putEntry(dn, Object.assign({ cn: String(name) }, attributes),
+                          { origin: existing ? existing.origin : 'roles' });
+  stored.createdAt = created;
+  stored.attributes.createtimestamp = [created];
+  stored.attributes.modifytimestamp = [generalizedTime()];
+  auditPolicyDirectory(existing ? 'entry.update' : 'entry.create', dn,
+                       stored.attributes, !existing);
+  log.debug('Leaving writeRole(). The entry was ' +
+            (existing ? 'updated.' : 'created.'));
+  return true;
+}
+
+function deleteRole(name) {
+  log.debug('Entering deleteRole(). name=' + name);
+  const stored = roleEntry(name);
+  if (!stored) {
+    log.debug('Leaving deleteRole(). It was not here.');
+    return false;
+  }
+  entries.delete(normalizeDn(stored.dn));
+  touchDirectory();
+  auditPolicyDirectory('entry.delete', stored.dn, stored.attributes, false);
+  log.debug('Leaving deleteRole(). ' + entries.size + ' entry/entries left.');
   return true;
 }
 

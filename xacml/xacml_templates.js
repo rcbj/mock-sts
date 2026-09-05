@@ -50,7 +50,42 @@ const { log } = require('../common/helpers');
 const model = require('./xacml_model');
 
 const F1 = 'urn:oasis:names:tc:xacml:1.0:function:';
+const F3 = 'urn:oasis:names:tc:xacml:3.0:function:';
 const TYPE = model.TYPE;
+
+// ---------------------------------------------------------------------------
+// THE ATTRIBUTE VOCABULARY OF AN ISSUANCE DECISION.
+//
+// These four identifiers are the contract between the embedded PEP that
+// ASSERTS them (`xacml/xacml_role_pep.js`) and the policy that READS them —
+// which is the one below, and any policy anybody writes afterwards. They are
+// exported so there is ONE spelling of each: a template that built a policy
+// reading `urn:sts-mock:xacml:roles` while the PEP asserted
+// `urn:sts-mock:xacml:role` would produce an empty bag, an empty bag is no
+// intersection, and no intersection is a Deny — a policy that refuses
+// everybody for a reason invisible in both files.
+//
+// **THEY ARE URI-SHAPED ON PURPOSE.** `xacml_pip.js` treats a BARE name as a
+// directory attribute to look up on the subject's own entry, so an attribute
+// called `roles` would send the PIP looking for a `roles` attribute in LDAP
+// and quietly answer with whatever it found there instead of with what the PEP
+// asserted. A colon in the name is what keeps these out of that path.
+// ---------------------------------------------------------------------------
+const ISSUANCE_ATTRIBUTE = {
+  // On the SUBJECT: the roles the party being authenticated holds, from the
+  // register and from the six built-in ones.
+  ROLE: 'urn:sts-mock:xacml:role',
+  // On the SUBJECT: the roles found in a token the caller PRESENTED, read out
+  // of the claim `roles.claimName` names. Separate from the above rather than
+  // unioned into it, and that separation is the whole reason it is visible in
+  // the policy: these two are not equally trustworthy. The register is this
+  // service's own record; a claim is whatever was in a token, and this service
+  // does not verify access tokens it did not issue.
+  TOKEN_ROLE: 'urn:sts-mock:xacml:role-from-token',
+  // On the RESOURCE: the roles the application demands. `appRequiredRole` on
+  // its entry, or EVERYBODY where it names none.
+  REQUIRED_ROLE: 'urn:sts-mock:xacml:required-role'
+};
 
 // ---------------------------------------------------------------------------
 // SMALL MODEL BUILDERS.
@@ -101,6 +136,21 @@ function listOf(raw) {
   });
 }
 
+// A yes/no answer from a template parameter, which is a text field like every
+// other one. Anything that is not plainly a no is a yes, because these two
+// parameters both default to yes and the cost of misreading a typo as a yes is
+// a policy that permits slightly more than intended — while misreading one as
+// a no builds the issuance policy without an arm and refuses people.
+function yes(answer, dflt) {
+  const text = String(answer === undefined || answer === null ? '' : answer)
+    .trim().toLowerCase();
+  if (!text) {
+    return dflt !== false;
+  }
+  return !(text === 'no' || text === 'false' || text === 'off' ||
+           text === '0' || text === 'n');
+}
+
 function slug(text) {
   return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'x';
@@ -114,6 +164,153 @@ function slug(text) {
 // receives the answers already coerced and returns a MODEL.
 // ---------------------------------------------------------------------------
 const TEMPLATES = [
+  {
+    // -----------------------------------------------------------------------
+    // THE ONE TEMPLATE THIS SERVICE EVALUATES ABOUT ITSELF.
+    //
+    // Every other template here builds a policy about somebody ELSE's
+    // boundary, which is what a PDP is for. This one builds the policy the
+    // EMBEDDED PEP asks before this service issues anything — a token, a
+    // ticket, an assertion, a session — and `xacml.issuancePolicy` names the
+    // repository entry it lives in.
+    //
+    // IT IS SEEDED, AND IT IS NOT THE REPOSITORY ROOT. Two questions, two
+    // documents: the root answers what a caller asks at /xacml/pdp and what
+    // every remote PEP pulls, and this answers who may be issued something
+    // here. Making them one document would mean editing the demo policy
+    // changed who could sign in, and narrowing one application's roles changed
+    // what /xacml/pdp told a remote PEP.
+    //
+    // WHY IT IS ONE POLICY FOR EVERY APPLICATION RATHER THAN ONE PER
+    // APPLICATION. The alternative — a rule per application naming its roles —
+    // was rejected because the requirement then lives in TWO places that can
+    // disagree: `appRequiredRole` on the entry, which the console edits, and a
+    // rule in a policy, which the editor edits. This way the policy states the
+    // RULE ("you must hold one of the roles this application requires") and
+    // the entry states the FACT, the PEP puts both in the request, and there
+    // is nothing to keep in step.
+    // -----------------------------------------------------------------------
+    id: 'role-issuance',
+    label: 'Role-based issuance (this service\'s own)',
+    blurb: 'The policy the embedded PEP asks before this service issues ' +
+           'anything: the party being authenticated must hold one of the ' +
+           'roles the application requires.',
+    what: 'Produces ONE Permit rule whose condition is an intersection test ' +
+          'between the roles the subject holds and the roles the resource ' +
+          'requires — plus the same test against the roles found in a ' +
+          'PRESENTED TOKEN\'s claim, and a permit for an application that ' +
+          'requires nothing at all. The combining algorithm is ' +
+          'deny-unless-permit, so anything the rule does not permit is ' +
+          'refused rather than left to the PEP\'s bias. Because the ' +
+          'requirement travels in the REQUEST rather than being written into ' +
+          'the policy, this one document decides for every application, and ' +
+          'narrowing an application is editing its entry rather than editing ' +
+          'a policy.',
+    parameters: [
+      { name: 'allowTokenRoles',
+        label: 'Also accept roles found in a presented token',
+        dflt: 'yes', type: 'string',
+        help: 'yes or no. When yes, a role named in the roles claim of a ' +
+              'token the caller presented counts as held. THAT IS WEAKER ' +
+              'THAN THE REGISTER and the policy says so in its own ' +
+              'description: this service does not verify access tokens it ' +
+              'did not issue, so a claim is evidence about a token rather ' +
+              'than about a person. It is on by default because reading the ' +
+              'claim back is the thing most people come here to watch.' },
+      { name: 'permitWhenNothingRequired',
+        label: 'Permit when the application requires no role at all',
+        dflt: 'yes', type: 'string',
+        help: 'yes or no. An application that names no required role is ' +
+              'given EVERYBODY by the registry, so this arm is a belt-and- ' +
+              'braces answer for a request that carries no requirement at ' +
+              'all — a PEP written by somebody else, or this one after a ' +
+              'future change. Saying no makes such a request a Deny.' }
+    ],
+    build: function (answers, options) {
+      log.debug('Entering buildRoleIssuance().');
+      const given = answers || {};
+      const useTokenRoles = yes(given.allowTokenRoles, true);
+      const permitEmpty = yes(given.permitWhenNothingRequired, true);
+
+      // THE INTERSECTION TEST, and it is a HIGHER-ORDER function because that
+      // is the only way XACML expresses "do these two bags share a member".
+      // `any-of-any(string-equal, A, B)` is true when string-equal holds for
+      // ANY pair — which is exactly the question, and which no ordinary
+      // two-argument predicate can ask.
+      function intersects(subjectAttribute) {
+        return apply(F3 + 'any-of-any', [
+          { kind: 'function', functionId: F1 + 'string-equal' },
+          designator(model.CATEGORY.ACCESS_SUBJECT, subjectAttribute,
+                     TYPE.STRING),
+          designator(model.CATEGORY.RESOURCE,
+                     ISSUANCE_ATTRIBUTE.REQUIRED_ROLE, TYPE.STRING)
+        ]);
+      }
+
+      const arms = [intersects(ISSUANCE_ATTRIBUTE.ROLE)];
+      if (useTokenRoles) {
+        arms.push(intersects(ISSUANCE_ATTRIBUTE.TOKEN_ROLE));
+      }
+      if (permitEmpty) {
+        // "The resource requires nothing." Written as a bag-size test because
+        // XACML has no way to ask whether a designator matched — an absent
+        // attribute and an attribute with no values are the same empty bag,
+        // which is the right answer here: both mean nobody said.
+        arms.push(apply(F1 + 'integer-equal', [
+          apply(F1 + 'string-bag-size', [
+            designator(model.CATEGORY.RESOURCE,
+                       ISSUANCE_ATTRIBUTE.REQUIRED_ROLE, TYPE.STRING)
+          ]),
+          value(TYPE.INTEGER, '0')
+        ]));
+      }
+
+      const condition = arms.length === 1 ? arms[0]
+        : apply(F1 + 'or', arms);
+
+      log.debug('Leaving buildRoleIssuance(). ' + arms.length + ' arm(s).');
+      return {
+        kind: 'Policy',
+        id: options.idBase,
+        version: '1.0',
+        description: 'THE ISSUANCE POLICY. The embedded PEP asks this before ' +
+                     'this service issues a token, a ticket, an assertion or ' +
+                     'a session. It permits when the party being ' +
+                     'authenticated holds one of the roles the application ' +
+                     'requires' +
+                     (useTokenRoles
+                        ? ', or when a role in a PRESENTED TOKEN\'s claim is ' +
+                          'one of them — which is weaker, because this ' +
+                          'service does not verify tokens it did not issue'
+                        : '') +
+                     (permitEmpty
+                        ? ', or when the application requires nothing at all'
+                        : '') +
+                     '. Everything else is denied, because the combining ' +
+                     'algorithm is deny-unless-permit and an issuance ' +
+                     'decision must not depend on a PEP\'s bias.',
+        combiningAlgId: model.RULE_ALG.DENY_UNLESS_PERMIT,
+        // NO TARGET, and that is deliberate rather than an omission: this
+        // document is evaluated by ONE caller that only ever asks about an
+        // issuance, so a target restating that could only ever refuse a
+        // request the PEP would not have made — and would do it as
+        // NotApplicable, which under deny-unless-permit is a Deny nobody can
+        // explain.
+        target: null,
+        variables: {},
+        rules: [{
+          id: options.idBase + ':rule:holds-a-required-role',
+          effect: model.EFFECT.PERMIT,
+          description: 'Permit when the roles the subject holds and the ' +
+                       'roles the resource requires share a member.',
+          target: null,
+          condition: condition,
+          obligations: [], advice: []
+        }],
+        obligations: [], advice: []
+      };
+    }
+  },
   {
     id: 'rbac',
     label: 'Role-based (RBAC)',
@@ -374,6 +571,7 @@ function catalogue() {
 }
 
 module.exports = {
+  ISSUANCE_ATTRIBUTE: ISSUANCE_ATTRIBUTE,
   TEMPLATES: TEMPLATES,
   lookup: lookup,
   build: build,

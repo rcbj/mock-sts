@@ -142,6 +142,14 @@ const crypto = require('crypto');
 const config = require('./config');
 const { log, nowSec, randomId, numberWord } = require('./helpers');
 const audit = require('./audit');
+// THE ROLE REGISTER, for one string and one reason: `DEFAULT_REQUIRED_ROLE`.
+// A plain require in the ordinary direction and it can stay one — `roles.js`
+// is a leaf that requires `helpers` and `config` and nothing else here, so
+// this cannot become a cycle unless somebody makes that file require back.
+// Hard-coding 'EVERYBODY' here instead would put the permissive default in two
+// files, and the day they disagreed every application would silently start
+// requiring a role nobody holds.
+const roles = require('./roles');
 
 // ---------------------------------------------------------------------------
 // THE KINDS. One per way an application can present itself to this service.
@@ -1070,6 +1078,34 @@ const SCHEMA = {
     // declared for two protocols gets the same answer in both — which is the
     // behaviour a claim mapping should have and the reason these are four
     // attributes rather than eight.
+    // ---------------------------------------------------------------------
+    // THE ROLES THIS APPLICATION REQUIRES, added 2026-09-05 with the role
+    // register.
+    //
+    // IT IS THE OPPOSITE RELATION FROM `roleMemberApplication` ON A ROLE
+    // ENTRY, and the two are one keystroke apart in a listing, so it is worth
+    // being exact: `roleMemberApplication` says this application HOLDS a role
+    // — what a client_credentials grant is decided on, where there is no
+    // person — and this attribute says what this application DEMANDS of
+    // whoever is being authenticated before anything is issued for it.
+    //
+    // ABSENT MEANS `EVERYBODY`, and that is what makes the whole feature off
+    // by default without being switched off. Everybody holds EVERYBODY, so an
+    // application nobody has configured admits exactly who it admitted before
+    // roles existed — while the decision is still a real XACML decision,
+    // visible on /admin/xacml/decide and in the audit log. Narrowing this list
+    // is how enforcement is turned on for one application, and it is the only
+    // way it is turned on.
+    { name: 'appRequiredRole', kind: 'multi', from: 'by hand',
+      what: 'A role somebody must hold before this application is issued ' +
+            'anything — a token, an assertion, a WS-Federation response, a ' +
+            'session. Multi-valued and ANY of them is enough. ABSENT MEANS ' +
+            'EVERYBODY, the built-in role everybody holds, which is why an ' +
+            'unconfigured application refuses nobody. The decision is made ' +
+            'by the XACML PDP against the policy named by ' +
+            'xacml.issuancePolicy, not by an if in an issuance site, so the ' +
+            'reason for a refusal is a policy somebody can read.' },
+
     { name: 'appGroupsClaim', kind: 'single', from: 'by hand',
       overrides: 'groups.claim',
       what: 'TRUE or FALSE: does anything issued to this application carry a groups ' +
@@ -1546,6 +1582,12 @@ const EDITABLE = {
   // See the PROTOCOLS table above: one of those two attributes is what somebody
   // said this application is for and the other is what happened to it.
   appAllowedProtocol: 'multi',
+  // `multi` for `oauthClientId`'s reason read the other way: an application
+  // that will admit either of two roles is one application, and a `set` here
+  // would replace the list with one value and read afterwards as the others
+  // having been deliberately withdrawn — which, on the one attribute here
+  // that REFUSES people, is the failure worth designing against.
+  appRequiredRole: 'multi',
   // THE IDENTIFIER ATTRIBUTES, one per protocol family (see the PROTOCOLS
   // table). Every one of them is `multi` bar oauthTlsClientAuthSubjectDn below,
   // whose own row says why — an application answering to two client_ids or two
@@ -4106,6 +4148,47 @@ function forAppliesTo(appliesTo) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// THE ROLES AN APPLICATION REQUIRES.
+//
+// The one reader of `appRequiredRole`, so that "absent means EVERYBODY" is a
+// property of this function rather than a convention four callers have to
+// remember — and the fourth caller is always the one that reads an empty list
+// as "require nothing", which is the same words and the opposite meaning.
+//
+// AN UNKNOWN APPLICATION ALSO REQUIRES EVERYBODY. This service registers an
+// application on first sight, so the very first request from a new client
+// arrives before its entry exists; refusing it would make this service refuse
+// every client once, which is precisely the permissiveness it is for.
+// ---------------------------------------------------------------------------
+function requiredRolesOf(identifier) {
+  log.debug("Entering requiredRolesOf(). identifier=" + identifier);
+  const loaded = load(identifier);
+  const values = loaded.known
+    ? valuesOf((loaded.record && loaded.record.fields || {}).appRequiredRole)
+        .map(function (one) { return String(one).trim(); })
+        .filter(function (one) { return one.length > 0; })
+    : [];
+  if (!values.length) {
+    log.debug("Leaving requiredRolesOf(). None named, so EVERYBODY.");
+    return [roles.DEFAULT_REQUIRED_ROLE];
+  }
+  log.debug("Leaving requiredRolesOf(). " + values.length + " role(s).");
+  return values;
+}
+
+// Whether this application has been NARROWED — whether somebody has asked for
+// anything beyond the permissive default. The console draws it, and the
+// embedded PEP uses it to decide how to behave when the issuance policy is
+// missing: an application that requires only EVERYBODY loses nothing by the
+// policy being absent, and one that requires `staff` loses the whole point of
+// having said so. See `xacml/xacml_role_pep.js`, which argues that split.
+function requiresNarrowedRoles(identifier) {
+  const required = requiredRolesOf(identifier);
+  return !(required.length === 1 &&
+           required[0] === roles.DEFAULT_REQUIRED_ROLE);
+}
+
 function count() {
   const backing = store();
   return backing ? backing.countApplications() : 0;
@@ -4341,6 +4424,8 @@ function seedInternalApplications() {
 }
 
 module.exports = {
+  requiredRolesOf: requiredRolesOf,
+  requiresNarrowedRoles: requiresNarrowedRoles,
   KINDS: KINDS,
   KIND_IDS: KIND_IDS,
   // The DECLARED protocol vocabulary, exported whole rather than as a list of

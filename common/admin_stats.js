@@ -1491,6 +1491,32 @@ function resolvedSamlAttributes(id, context) {
 // then its typed claims and its directory attributes alone — a smaller service,
 // not a broken one.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// THE ROLES CLAIM, AND WHY IT IS A PLAIN REQUIRE WHERE THE GROUPS CLAIM NEEDED
+// A SLOT.
+//
+// CLAUDE.md rule 3e says the hooks on this file are four different problems
+// rather than a pattern, that a fifth must not be added because the fourth
+// exists, and that the group resolver is the one to check a new proposal
+// against — it was added only after showing a require failed BOTH ways round.
+//
+// THE ROLES CLAIM FAILS NEITHER, so it does not get a slot:
+//
+//   * `common/roles.js` is a LEAF. It requires `helpers` and `config` and
+//     nothing else in this repository, so requiring it here cannot close a
+//     cycle — which is the whole of why `group_claims.js` could not be
+//     required this way round: that file requires THIS one.
+//   * It registers no route, so requiring it moves nothing in the router.
+//
+// The DIRECTORY still arrives at that module through a slot of its own that
+// `ldap_server.js` fills, for the reason it always does — only that module can
+// answer what is in `ou=roles`, and it is the last thing `server.js` requires.
+//
+// So the rule is honoured by doing the ordinary thing where the ordinary thing
+// works, which is what the rule actually asks for. `audit.js` is required here
+// the same way and for the same reason.
+const roles = require('./roles');
+
 let groupResolver = null;
 
 function setGroupResolver(hooks) {
@@ -1512,6 +1538,52 @@ function resolvedGroupClaims(id, context) {
               'issued without its groups claim: ' + e.message);
     return {};
   }
+}
+
+// The roles claim, wrapped for the reason every other directory read during an
+// issuance is wrapped: a register this service consults must never be able to
+// fail the issuance it was consulted during. `roles.js` already swallows its
+// own store errors; this is the second net, and it costs nothing.
+//
+// **WHO THE CLAIM IS ABOUT is the subject of the token**, and where there is no
+// person — a client_credentials grant — that is the CLIENT, which is exactly
+// the case the role register exists to be able to answer. `authenticated` is
+// true here because a token is being minted: whatever door this came through
+// let them through it.
+function resolvedRoleClaims(context) {
+  const ctx = context || {};
+  const username = String(ctx.username || ctx.subject || '');
+  try {
+    return roles.claimFor(
+      username
+        ? { kind: 'user', name: username, authenticated: true }
+        : { kind: 'application',
+            name: String(ctx.client_id || ''), authenticated: true }) || {};
+  } catch (e) {
+    log.error('the role register threw and was ignored; the token is issued ' +
+              'without its roles claim: ' + e.message);
+    return {};
+  }
+}
+
+// The SAML half. ONE <Attribute> with several <AttributeValue> children rather
+// than one element per role — the same rule `group_claims.js` states beside its
+// own emitter, and the same defect it prevents: several elements with one Name
+// is a relying party reading the first and silently seeing one role where the
+// person holds four.
+function resolvedRoleAttributes(id, context) {
+  const claim = resolvedRoleClaims(context);
+  const names = Object.keys(claim);
+  if (!names.length) {
+    return [];
+  }
+  return names.map(function (name) {
+    const attribute = { name: name, values: claim[name] };
+    if (id === 'saml11') {
+      attribute.namespace = DEFAULT_SAML11_NAMESPACE;
+    }
+    return attribute;
+  });
 }
 
 function resolvedGroupAttributes(id, context) {
@@ -1783,7 +1855,18 @@ function jwtClaims(id, context) {
   // and the specific thing beats the general one. Written as an assignment
   // ORDER here because a JWT payload is an object; samlAttributes() below has
   // to write the same rule as a filter, for the reason stated there.
-  const out = resolvedGroupClaims(id, context);
+  //
+  // FOUR LAYERS NOW, and the roles claim is UNDER the groups claim rather than
+  // beside it. Both come from a setting and a directory rather than from
+  // anything somebody named on a page, so the precedence between the two only
+  // matters when they are configured to the SAME name — which is a real
+  // configuration (`groups.claimName` = `roles` is one of the spellings its own
+  // row recommends trying) and therefore needs an answer rather than an
+  // accident. The answer is that GROUPS WINS, because that claim has been here
+  // longer and a client already parsing it must not have its meaning changed by
+  // a feature arriving underneath it.
+  const out = resolvedRoleClaims(context);
+  Object.assign(out, resolvedGroupClaims(id, context));
   Object.assign(out, resolvedJwtClaims(id, context));
   claimSet(id).forEach(function (claim) {
     out[claim.name] = typedValue(expandValue(claim.value, context));
@@ -1848,7 +1931,15 @@ function samlAttributes(id, context) {
   const fromGroups = resolvedGroupAttributes(id, context).filter(function (attribute) {
     return !names.has(attribute.name);
   });
-  let out = fromGroups.concat(fromDirectory, typed);
+  // The FIFTH layer and the lowest, filtered against all three above it, and
+  // beneath the groups claim for the reason jwtClaims() gives: the two are the
+  // only layers here nobody named on a page, they can be configured to the same
+  // name, and the older of the two has to keep its meaning.
+  fromGroups.forEach(function (attribute) { names.add(attribute.name); });
+  const fromRoles = resolvedRoleAttributes(id, context).filter(function (attribute) {
+    return !names.has(attribute.name);
+  });
+  let out = fromRoles.concat(fromGroups, fromDirectory, typed);
   // The same fourth layer jwtClaims() applies, and for the same reason it is
   // last: this decides which of the attributes this service would assert to
   // ANYBODY a particular federation partner is allowed to see. It removes only,
