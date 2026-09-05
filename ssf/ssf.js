@@ -129,6 +129,17 @@ const events = require('./ssf_events');
 // one holds transmit(), the streams and the deliveries and therefore decides
 // where it goes. A require the other way would be a cycle. See its header.
 const caep = require('./caep');
+// The RISC account register, on the same terms and for the same reason: it
+// holds the register and answers what an event WOULD be, and this file holds
+// transmit(), the streams and the deliveries and therefore decides where it
+// goes. See its header.
+const risc = require('./risc');
+// THE DIRECTORY, for the account observer alone. The require goes in the
+// ORDINARY direction — `server.js` loads ldap/ldap_server.js at 361 and this
+// file at 426 — so it moves no route and closes no cycle, and rule 3e's test
+// therefore asks for no slot. `scim/scim.js` requires it the same way. What
+// travels back the other direction is one function: see riscAutoEmit().
+const directory = require('../ldap/ldap_server');
 const streams = require('./ssf_streams');
 const transport = require('./ssf_http');
 const ssfAuth = require('./ssf_auth');
@@ -323,6 +334,17 @@ function transmit(record, options) {
            'anybody sees. CAEP\'s subject is normally SSF\'s COMPLEX one — ' +
            'the person is not revoked, one session of theirs is.' });
   }
+  // AND THE OTHER KIND OF WRONG SUBJECT, WHICH IS A WARNING RATHER THAN A
+  // REFUSAL. The refusal above is MECHANICAL — an event with no subject can
+  // be matched against no stream, so it goes to nobody or to everybody and
+  // neither is what was meant. This one is a CONFORMANCE opinion: RISC's two
+  // identifier events say their subject must be an email address or a phone
+  // number, and an event carrying an iss_sub pair instead is perfectly
+  // deliverable and merely wrong. Refusing to send one would remove the
+  // ability to find out what a receiver does with it. See subjectAdvice().
+  events.subjectAdvice(uri, asked.subject).forEach(function (note) {
+    log.warn('ssf: ' + note);
+  });
   if (asked.subject && !streams.streamCoversSubject(record, asked.subject)) {
     log.debug('Leaving transmit(). Not a subject on this stream.');
     return Promise.resolve({ ok: false, delivered: false, jti: '',
@@ -351,6 +373,11 @@ function transmit(record, options) {
     // stream's own counters, three lines down, and conflating the two would
     // make a poll stream look like a transmitter that never says anything.
     caep.noteTransmitted(record, claims);
+    // AND THE ACCOUNT REGISTER, on exactly the same terms. Neither call knows
+    // about the other and each answers null for an event of the other's
+    // vocabulary, which is what keeps this line from being a branch naming a
+    // profile — the third vocabulary added a call and changed nothing here.
+    risc.noteTransmitted(record, claims);
     // AND ON THE STREAM, per type. The line above counts what was said about a
     // SESSION; this counts what was said to a RECEIVER, and neither can be
     // derived from the other — the register keeps the last twenty-five events
@@ -2178,6 +2205,488 @@ adminConsole.setCaepReporter({
   }
 });
 
+// ---------------------------------------------------------------------------
+// THE SECOND THING THIS SERVICE DOES WITHOUT BEING ASKED, AND IT IS ASKED FOR
+// BY A DIFFERENT EVENT ENTIRELY.
+//
+// CAEP made this service emit because somebody signed in, presented a session
+// or signed out — three acts in the AUTHENTICATION layer, all reached through
+// `authn.startSession()` and its two siblings. RISC makes it emit because its
+// own DIRECTORY changed: a person deleted, an account marked inactive, a mail
+// address moved. Those are acts in the PROVISIONING layer and they reach this
+// service over SCIM, over LDAP and from the console alike, which is why the
+// observer sits on `ldap_server.js`'s store rather than on any one door.
+//
+// **THE DIVISION OF LABOUR IS `caepAutoEmit()`'s EXACTLY**, with one
+// difference that is the specification's rather than this file's: `observe()`
+// answers with a LIST. One directory write can be two RISC events — `active`
+// going false AND an identifier moving — and a version of this that took the
+// first would drop the second silently, which in a protocol with no
+// missing-event error is a transmitter that lies by omission.
+//
+// **IT RETURNS A PROMISE AND NOBODY AWAITS IT**, for the reason the CAEP half
+// gives: `ldap_server.js` calls this from inside a write and does not wait,
+// because a push delivery takes as long as somebody else's endpoint does and
+// an `ldapmodify` that blocked on a receiver's TCP timeout would be a
+// directory whose writes depend on a third party being up.
+// ---------------------------------------------------------------------------
+function riscAutoEmit(notice) {
+  log.debug('Entering riscAutoEmit().');
+  if (!enabled()) {
+    log.debug('Leaving riscAutoEmit(). SSF is off.');
+    return Promise.resolve({ sent: 0, streams: 0 });
+  }
+  // THE ISSUER IS ADDED HERE AND NOT IN `ldap_server.js`, because it is an SSF
+  // fact and the directory has no business knowing one. It matters for the
+  // same reason it does in the CAEP half: an `iss_sub` subject names the
+  // person by ISSUER and subject, and a receiver matches that `iss` against
+  // the issuer it discovered.
+  const due = risc.observe(Object.assign({}, notice || {},
+      { issuer: issuerFor(null) }));
+  if (!due.length) {
+    log.debug('Leaving riscAutoEmit(). Nothing is due.');
+    return Promise.resolve({ sent: 0, streams: 0 });
+  }
+  return Promise.all(due.map(function (one) {
+    return sendOneRiscEvent(one);
+  })).then(function (results) {
+    const sent = results.reduce(function (total, one) {
+      return total + one.sent;
+    }, 0);
+    log.debug('Leaving riscAutoEmit(). ' + sent + ' sent.');
+    return { sent: sent, streams: results.length, results: results };
+  }).catch(function (e) {
+    // Swallowed here as well as in `ldap_server.js`'s noteAccountChange(), and
+    // not redundantly: that catch covers this function throwing synchronously
+    // and this one covers a rejected promise nobody is waiting on, which node
+    // reports as an unhandled rejection and — depending on the flags — ends
+    // the process.
+    log.error('risc: automatic emission failed: ' + e.message);
+    log.debug('Leaving riscAutoEmit(). Failed.');
+    return { sent: 0, streams: 0, why: e.message };
+  });
+}
+
+// One due event onto every stream that agreed to the type and covers the
+// account. Split out of riscAutoEmit() because that function now has a list to
+// walk and the body was the same three paragraphs each time round.
+function sendOneRiscEvent(due) {
+  log.debug('Entering sendOneRiscEvent(). ' + due.uri);
+  const candidates = streams.listStreams().filter(function (record) {
+    return record.events_delivered.indexOf(due.uri) >= 0 &&
+           streams.streamCoversSubject(record, due.subject);
+  });
+  if (!candidates.length) {
+    // SAID ONCE, AT INFO, and it is the most useful line this feature
+    // produces, for the reason the CAEP half's is: "nothing arrived" is the
+    // commonest report about any Shared Signals deployment and its commonest
+    // cause is this — the act happened, the transmitter built the event, and
+    // no stream had asked for that type or covered that subject.
+    log.info('risc: a ' + due.uri.slice(events.RISC_PREFIX.length) + ' is ' +
+             'due for account ' + due.row.accountId + ' and NO STREAM takes ' +
+             'it — ' + streams.listStreams().length + ' stream(s) exist, and ' +
+             'none both delivers that type and covers ' +
+             subjects.describeSubject(due.subject) + '. The event is ' +
+             'recorded on /admin/risc-accounts with nothing sent.');
+    due.row.notes.push('A ' + due.uri.slice(events.RISC_PREFIX.length) +
+        ' was due and no stream takes it.');
+    due.row.notes = due.row.notes.slice(-5);
+    // AND THE REGISTER STILL FOLLOWS THE ACT. The ordinary path applies the
+    // state on the way back through `noteTransmitted()`, which reads a token
+    // that here was never built — so without this line, deleting a person
+    // from a service with no RISC stream agreed would leave a row saying the
+    // account is still active. Nothing would fail; the page would simply be
+    // wrong about it, and being wrong would look exactly like a service where
+    // nothing had been deleted. See risc.applyDue().
+    risc.applyDue(due);
+    log.debug('Leaving sendOneRiscEvent(). No stream takes it.');
+    return Promise.resolve({ sent: 0, streams: 0, uri: due.uri });
+  }
+  return Promise.all(candidates.map(function (record) {
+    return transmit(record, { uri: due.uri, payload: due.payload,
+      subject: due.subject, toe: due.payload.event_timestamp });
+  })).then(function (reports) {
+    const sent = reports.filter(function (one) {
+      return one.ok;
+    }).length;
+    log.info('risc: ' + due.uri.slice(events.RISC_PREFIX.length) + ' for ' +
+             'account ' + due.row.accountId + ' went to ' + sent + ' of ' +
+             candidates.length + ' stream(s).');
+    log.debug('Leaving sendOneRiscEvent(). ' + sent + ' sent.');
+    return { sent: sent, streams: candidates.length, uri: due.uri,
+      reports: reports };
+  });
+}
+
+// The inverted hook, filled at require time. `ldap/ldap_server.js` is 361 in
+// the require order and this module is 426, so the require above goes the
+// ordinary way and only the FUNCTION travels back — see setAccountObserver()
+// over there.
+directory.setAccountObserver(riscAutoEmit);
+
+// ---------------------------------------------------------------------------
+// THE RISC CONSOLE AND MANAGEMENT API.
+//
+// `/admin/risc`, `/admin/risc-accounts` and `/admin-api/risc` reach this
+// directory through `admin.setRiscReporter()`, the TENTH slot, for exactly the
+// reasons the eighth and ninth exist: a require from `admin.js` to this file
+// would close a cycle, and one from `mgmt-api/admin_api.js` would move every
+// `/ssf` route ahead of the management API's own.
+// ---------------------------------------------------------------------------
+
+// WHAT THIS TRANSMITTER HAS SAID TO EACH RECEIVER ABOUT ACCOUNTS. It is
+// `caepApplications()`'s shape and it is a second function rather than a
+// parameter on that one, because the two answer different questions about
+// different registers and a single function taking a vocabulary would be the
+// branch this whole directory is written to avoid.
+function riscApplications() {
+  log.debug('Entering riscApplications().');
+  const riscUris = events.RISC_EVENT_URIS;
+  const all = streams.listStreams();
+
+  const accountsByStream = {};
+  risc.list().forEach(function (row) {
+    (row.streams || []).forEach(function (id) {
+      if (!accountsByStream[id]) {
+        accountsByStream[id] = {};
+      }
+      accountsByStream[id][row.accountId] = true;
+    });
+  });
+
+  function blank(identifier, name, registered) {
+    const counts = {};
+    riscUris.forEach(function (uri) { counts[uri] = 0; });
+    return { identifier: identifier, name: name, registered: registered,
+      dn: '', declared: false, streams: [], streamCount: 0, enabled: 0,
+      deliveries: [], audiences: [], takes: [], counts: counts, total: 0,
+      accounts: 0, queued: 0, delivered: 0, failed: 0, acknowledged: 0,
+      receiverErrors: 0, lastPushAt: '', lastPushError: '' };
+  }
+
+  const rows = {};
+  const order = [];
+  function rowFor(identifier, name, registered) {
+    if (!rows[identifier]) {
+      rows[identifier] = blank(identifier, name, registered);
+      order.push(identifier);
+    }
+    return rows[identifier];
+  }
+
+  applications.list().forEach(function (entry) {
+    const declared = (entry.allowedProtocols || []).indexOf('ssf') >= 0;
+    const seen = (entry.recordedProtocols || []).indexOf('ssf') >= 0;
+    const receiverId = ((entry.attributes || {}).ssfReceiverId || [])[0] || '';
+    if (!declared && !seen && !receiverId) {
+      return;
+    }
+    const row = rowFor(receiverId || entry.identifier,
+                       entry.name || entry.identifier, true);
+    row.dn = entry.dn || '';
+    row.declared = declared;
+    row.endpoints = ((entry.attributes || {}).ssfDeliveryEndpoint || [])
+      .slice();
+  });
+
+  const NOBODY = '(no application — ssf.authRequired is off)';
+  all.forEach(function (record) {
+    const who = String(record.createdBy || '');
+    const known = who && who !== '(unauthenticated)';
+    const row = rowFor(known ? who : NOBODY, known ? who : NOBODY, false);
+    row.streams.push(record.stream_id);
+    row.streamCount += 1;
+    if (record.status === 'enabled') {
+      row.enabled += 1;
+    }
+    const delivery = streams.deliveryName(record.delivery.method);
+    if (row.deliveries.indexOf(delivery) < 0) {
+      row.deliveries.push(delivery);
+    }
+    const aud = Array.isArray(record.aud) ? record.aud.join(' ')
+                                          : String(record.aud || '');
+    if (aud && row.audiences.indexOf(aud) < 0) {
+      row.audiences.push(aud);
+    }
+    riscUris.forEach(function (uri) {
+      if (record.events_delivered.indexOf(uri) >= 0) {
+        const short = uri.slice(events.RISC_PREFIX.length);
+        if (row.takes.indexOf(short) < 0) {
+          row.takes.push(short);
+        }
+      }
+      const n = (record.eventCounts || {})[uri] || 0;
+      row.counts[uri] += n;
+      row.total += n;
+    });
+    row.queued += record.counters.queued;
+    row.delivered += record.counters.delivered;
+    row.failed += record.counters.failed;
+    row.acknowledged += record.counters.acknowledged;
+    row.receiverErrors += record.counters.receiverErrors;
+    if (record.lastPushAt > row.lastPushAt) {
+      row.lastPushAt = record.lastPushAt;
+    }
+    if (record.lastPushError) {
+      row.lastPushError = record.lastPushError;
+    }
+  });
+
+  order.forEach(function (identifier) {
+    const row = rows[identifier];
+    const seen = {};
+    row.streams.forEach(function (id) {
+      Object.keys(accountsByStream[id] || {}).forEach(function (accountId) {
+        seen[accountId] = true;
+      });
+    });
+    row.accounts = Object.keys(seen).length;
+  });
+
+  const out = order.map(function (identifier) { return rows[identifier]; });
+  out.sort(function (a, b) {
+    if (b.total !== a.total) {
+      return b.total - a.total;
+    }
+    if (b.streamCount !== a.streamCount) {
+      return b.streamCount - a.streamCount;
+    }
+    return String(a.identifier).localeCompare(String(b.identifier));
+  });
+  log.debug('Leaving riscApplications(). ' + out.length + ' receiver(s).');
+  return out;
+}
+
+function riscReport(req) {
+  log.debug('Entering riscReport().');
+  const report = risc.report();
+  report.issuer = issuerFor(req);
+  report.ssfEnabled = enabled();
+  report.applications = riscApplications();
+  report.streams = streams.listStreams().map(function (record) {
+    const takes = events.RISC_EVENT_URIS.filter(function (uri) {
+      return record.events_delivered.indexOf(uri) >= 0;
+    });
+    return { stream_id: record.stream_id, aud: record.aud,
+      status: record.status, delivery: record.delivery.method,
+      subjects: record.subjects.length,
+      takes: takes.map(function (uri) {
+        return uri.slice(events.RISC_PREFIX.length);
+      }) };
+  });
+  log.debug('Leaving riscReport(). ' + report.tracked + ' account(s).');
+  return report;
+}
+
+// ---------------------------------------------------------------------------
+// EMIT ONE RISC EVENT BY HAND.
+//
+// Ten of the fourteen describe things nothing here does — no breach corpus is
+// searched by this service and no recovery flow runs in it — so this is the
+// only way they are produced. **AND FOUR OF THOSE TEN CHANGE REAL STATE WHEN
+// THEY GO**: RISC section 2.8 defines each opt-out event as *"the account is
+// in the X state"* rather than as a report that it moved, so emitting one is
+// the transition. That is why `applyToState()` runs on the way out and not
+// only on the way back through `noteTransmitted()`.
+//
+// **AN ACCOUNT THIS SERVICE HAS NEVER HELD IS ACCEPTED**, which is the
+// opposite of what `caepEmit()` does with an unknown session, and the reason
+// is what the two events are ABOUT. A CAEP event names a session, and a
+// session identifier this service never minted is one it can compose no
+// subject from. An account is a person, this service can name any person at
+// all, and a debugger pointed at this transmitter is entitled to ask it to say
+// something about somebody who has never signed in — which is exactly the
+// state a RISC receiver is in most of the time, since RISC is aimed ACROSS
+// providers and the account it warns you about is usually one you have never
+// seen.
+// ---------------------------------------------------------------------------
+function riscEmit(asked) {
+  log.debug('Entering riscEmit().');
+  const uri = String(asked.type || '').indexOf(events.RISC_PREFIX) === 0
+    ? String(asked.type)
+    : events.RISC_PREFIX + String(asked.type || '');
+  const row = events.EVENT_BY_URI[uri];
+  if (!row || row.family !== 'risc') {
+    log.debug('Leaving riscEmit(). Not a RISC event type.');
+    return Promise.resolve({ ok: false, errors: [
+      '"' + String(asked.type || '') + '" is not one of RISC\'s fourteen ' +
+      'event types. They are: ' + events.RISC_EVENT_URIS.map(function (one) {
+        return one.slice(events.RISC_PREFIX.length);
+      }).join(', ') + '.'] });
+  }
+  const accountId = String(asked.account_id || '');
+  if (!accountId) {
+    log.debug('Leaving riscEmit(). No account named.');
+    return Promise.resolve({ ok: false, errors: [
+      'A RISC event is ABOUT an account — the subject names one and, for ' +
+      'eleven of the fourteen types, the subject is the entire message — so ' +
+      'there is nothing to compose one from. Name an account, or pick a row ' +
+      'from /admin/risc-accounts.'] });
+  }
+  const known = risc.rowFor(accountId, { iss: issuerFor(null) });
+  let values = asked.payload;
+  if (typeof values === 'string' && values.trim()) {
+    try {
+      values = JSON.parse(values);
+    } catch (e) {
+      log.debug('Leaving riscEmit(). The payload is not JSON.');
+      return Promise.resolve({ ok: false,
+        errors: ['The event payload is not JSON: ' + e.message] });
+    }
+  }
+  const payload = risc.buildPayload(uri, values || {}, {
+    reasonAdmin: String(asked.reason_admin || '') ||
+      'Emitted by hand from the console.',
+    reasonUser: String(asked.reason_user || '')
+  });
+  const verdict = events.validateEvent(uri, payload);
+  if (!verdict.ok) {
+    log.debug('Leaving riscEmit(). The payload is invalid.');
+    return Promise.resolve({ ok: false, errors: verdict.errors });
+  }
+  // THE STATE MACHINE'S ONE HARD RULE, ASKED BEFORE ANYTHING IS BUILT. The
+  // register is updated on the way BACK through `noteTransmitted()`, so a
+  // refusal enforced only there would fire on an event that has already been
+  // signed, queued and delivered — which is not a refusal, it is a note in a
+  // log about something a receiver has already acted on. See risc.refusals().
+  const hard = risc.refusals(known, uri);
+  if (hard.length) {
+    log.debug('Leaving riscEmit(). Refused by the state machine.');
+    return Promise.resolve({ ok: false, errors: hard });
+  }
+  const subject = risc.subjectFor(known, uri);
+  const advice = events.subjectAdvice(uri, subject)
+    .concat(verdict.warnings || []);
+  // THE GATE RUNS BEFORE THE STREAMS ARE LOOKED AT, deliberately: an account
+  // that has opted out is one this transmitter has agreed to stop talking
+  // about, and "no stream takes it" would be the wrong reason to report.
+  //
+  // **AND A SUPPRESSED EVENT CHANGES NO STATE HERE, WHERE A SUPPRESSED
+  // AUTOMATIC ONE DOES.** That looks inconsistent and is the honest reading of
+  // what each path is about. In `risc.observe()` the DIRECTORY really changed
+  // — somebody was deleted, `active` really did go false — so the register
+  // follows the act whether or not anybody was told, which is the same rule
+  // `caep.js`'s observer follows and the reason a row can show a state nobody
+  // received an event about. Here the act IS the emission: nothing happened
+  // except that somebody asked this service to say something, and it did not.
+  // Applying the state would leave a register asserting that an account was
+  // purged on the strength of a message that was never sent.
+  const allowed = risc.gate(known, uri);
+  if (!allowed.send) {
+    known.suppressed += 1;
+    log.debug('Leaving riscEmit(). Suppressed by the opt-out gate.');
+    return Promise.resolve({ ok: false, errors: [allowed.why],
+      warnings: advice });
+  }
+  const candidates = streams.listStreams().filter(function (record) {
+    return record.events_delivered.indexOf(uri) >= 0 &&
+           streams.streamCoversSubject(record, subject);
+  });
+  audit.audit({ action: 'risc.event.emit', category: 'signals',
+    protocol: 'RISC', channel: 'http', target: accountId,
+    summary: 'A RISC ' + row.name + ' was emitted by hand for account ' +
+      accountId,
+    detail: { type: uri, streams: candidates.length } });
+  if (!candidates.length) {
+    // The register is still told, so the page shows the state change even
+    // though nothing was sent — which is what makes "nothing arrived"
+    // traceable to "nobody asked" rather than to a bug.
+    const applied = risc.applyToState(known, uri, payload);
+    log.debug('Leaving riscEmit(). No stream takes it.');
+    return Promise.resolve({ ok: applied.ok, errors: applied.errors,
+      warnings: applied.warnings.concat(advice),
+      message: applied.ok
+        ? 'Nothing was sent: no stream both delivers "' +
+          uri.slice(events.RISC_PREFIX.length) + '" and covers ' +
+          subjects.describeSubject(subject) + '. The account\'s state was ' +
+          'still updated, so the change is on this page.'
+        : applied.errors.join(' ') });
+  }
+  return Promise.all(candidates.map(function (record) {
+    return transmit(record, { uri: uri, payload: payload, subject: subject,
+      toe: payload.event_timestamp });
+  })).then(function (reports) {
+    const sent = reports.filter(function (one) {
+      return one.ok;
+    }).length;
+    log.debug('Leaving riscEmit(). ' + sent + ' of ' + reports.length + '.');
+    return { ok: sent > 0,
+      errors: sent > 0 ? [] : reports.map(function (one) {
+        return one.why;
+      }),
+      warnings: advice,
+      message: sent + ' of ' + reports.length + ' stream(s) took the ' +
+        row.name + '.',
+      reports: reports };
+  });
+}
+
+function riscAction(name, body) {
+  log.debug('Entering riscAction(). ' + name);
+  const asked = body || {};
+  if (name === 'emit') {
+    return riscEmit(asked);
+  }
+  if (name === 'reset-account') {
+    const row = risc.reset(String(asked.account_id || ''));
+    if (!row) {
+      log.debug('Leaving riscAction(). No such account.');
+      return Promise.resolve({ ok: false,
+        errors: ['No account "' + String(asked.account_id || '') + '" is ' +
+                 'tracked here.'] });
+    }
+    log.debug('Leaving riscAction(). Reset.');
+    return Promise.resolve({ ok: true, errors: [],
+      message: 'The RISC state of account ' + row.accountId + ' was reset. ' +
+        'The directory entry is untouched — this page is about what has ' +
+        'been SAID about that account, and nobody has been disabled or ' +
+        'deleted.' });
+  }
+  if (name === 'clear') {
+    const gone = risc.clear();
+    log.debug('Leaving riscAction(). Cleared.');
+    return Promise.resolve({ ok: true, errors: [],
+      message: gone + ' account row(s) dropped. Nothing in the directory ' +
+        'changed: this register is a record of what was said, and clearing ' +
+        'it forgets the record rather than deleting anybody.' });
+  }
+  // Spelled the way every other action handler here spells it, with the count
+  // from the list rather than from a word typed beside it. That sentence is
+  // READ by `tests/vendored/admin_api.js` and by
+  // `sts_admin_api_operations.js`, so a handler that writes it its own way
+  // turns two checks off with nothing failing.
+  log.debug('Leaving riscAction(). Unknown action.');
+  return Promise.resolve({ ok: false,
+    errors: ['Unknown action "' + String(name) + '". The ' +
+      numberWord(RISC_CONSOLE_ACTIONS.length) + ' are: ' +
+      RISC_CONSOLE_ACTIONS.join(', ') + '.'] });
+}
+
+const RISC_CONSOLE_ACTIONS = ['emit', 'reset-account', 'clear'];
+
+adminConsole.setRiscReporter({
+  report: riscReport,
+  action: riscAction,
+  actions: RISC_CONSOLE_ACTIONS,
+  eventTypes: function () {
+    return events.RISC_EVENTS.map(function (row) {
+      return { uri: row.uri, name: row.name,
+        short: row.uri.slice(events.RISC_PREFIX.length),
+        subject: row.subject,
+        subjectFormats: (row.subjectFormats || []).slice(),
+        deprecated: String(row.deprecated || ''),
+        offered: events.supportedEventUris().indexOf(row.uri) >= 0,
+        members: row.members.map(function (member) {
+          return { name: member.name, required: !!member.required,
+            type: member.type, values: member.values || [],
+            what: member.what };
+        }),
+        required: row.required.slice(),
+        what: row.what };
+    });
+  }
+});
+
 module.exports = {
   WELL_KNOWN: WELL_KNOWN,
   metadata: metadata,
@@ -2189,5 +2698,9 @@ module.exports = {
   caepAutoEmit: caepAutoEmit,
   caepReport: caepReport,
   caepAction: caepAction,
-  CAEP_CONSOLE_ACTIONS: CAEP_CONSOLE_ACTIONS
+  CAEP_CONSOLE_ACTIONS: CAEP_CONSOLE_ACTIONS,
+  riscAutoEmit: riscAutoEmit,
+  riscReport: riscReport,
+  riscAction: riscAction,
+  RISC_CONSOLE_ACTIONS: RISC_CONSOLE_ACTIONS
 };

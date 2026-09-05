@@ -2442,8 +2442,10 @@ const SCHEMAS = {
     'is about, what is queued for it, what a receiver refused, and what has ' +
     'been pushed AT this service. SSF is the PIPE and not the vocabulary — ' +
     'it defines two events of its own, both about the pipe, and CAEP and ' +
-    'RISC are the vocabularies spoken over it. CAEP is implemented and has ' +
-    'a register of its own at GET /admin-api/caep; RISC is not here yet.',
+    'RISC are the vocabularies spoken over it. Both are implemented and ' +
+    'each has a register of its own — GET /admin-api/caep for what has been ' +
+    'said about a SESSION, GET /admin-api/risc for what has been said about ' +
+    'an ACCOUNT.',
     {
       installed: {
         type: 'boolean',
@@ -2675,6 +2677,193 @@ const SCHEMAS = {
       settings: {
         type: 'object',
         description: 'The `CAEP` setting group as /admin/caep draws it. ' +
+                     'Change one through POST /admin-api/config/set-many.'
+      }
+    }),
+
+  Risc: openObject(
+    'The Risk Incident Sharing and Coordination profile: what state each ' +
+    'ACCOUNT is in and how many events of which type have been sent about ' +
+    'it. RISC is the SECOND vocabulary over Shared Signals and not a family ' +
+    'of its own — its events travel on SSF streams, are signed by the SSF ' +
+    'signer and are delivered by the two SSF deliveries — so the streams ' +
+    'themselves are at GET /admin-api/ssf and only their RISC-relevant half ' +
+    'is repeated here.\n\nWHAT SEPARATES IT FROM Caep IS THE SUBJECT OF ' +
+    'THE SENTENCE. CAEP says *this session is no longer trustworthy*; RISC ' +
+    'says *this account is no longer trustworthy*. A revoked session is one ' +
+    'sign-in at one relying party; a purged account is every session that ' +
+    'person has anywhere, for ever.',
+    {
+      installed: {
+        type: 'boolean',
+        description: 'Whether ssf/ssf.js is loaded in this process at all. A ' +
+                     'DIFFERENT question from `enabled`, and RISC cannot be ' +
+                     'installed without SSF: it has no transport of its own.'
+      },
+      enabled: {
+        type: 'boolean',
+        description: 'The `risc.enabled` setting. When false the fourteen ' +
+                     'event types are dropped from `events_supported`, so a ' +
+                     'stream asking for one gets it back MISSING from ' +
+                     '`events_delivered` — the only notice SSF gives. SSF ' +
+                     'and CAEP are unaffected.'
+      },
+      autoEmit: {
+        type: 'boolean',
+        description: 'The `risc.autoEmit` setting. With it on, a change to ' +
+                     'this service\'s own DIRECTORY sends a Security Event ' +
+                     'Token with nobody having asked — which is a DIFFERENT ' +
+                     'observer from CAEP\'s, watching the provisioning layer ' +
+                     'rather than the authentication one.'
+      },
+      autoEmitActs: {
+        type: 'array',
+        description: 'Which of the four observable acts emit on their own: ' +
+                     'a person deleted, `active` going false or true, and an ' +
+                     'identifier moving. The other ten event types describe ' +
+                     'things nothing here does — no breach corpus is ' +
+                     'searched by this service and no recovery flow runs in ' +
+                     'it — so they are only ever emitted by hand.',
+        items: { type: 'string' }
+      },
+      honourOptOut: {
+        type: 'boolean',
+        description: 'The `risc.honourOptOut` setting. RISC section 2.8 says ' +
+                     'an account in the final opt-out state is NOT ' +
+                     'participating in event exchange, so with this on its ' +
+                     'events are suppressed and counted in ' +
+                     '`accounts[].suppressed`.\n\nTHE FOUR OPT-OUT EVENTS ' +
+                     'ARE NEVER SUPPRESSED, and that exception is what makes ' +
+                     'the rule work: `opt-out-effective` is an event ' +
+                     'ANNOUNCING that there will be no more events, so ' +
+                     'gating it would enter the silent state without telling ' +
+                     'anybody — indistinguishable at the far end from a ' +
+                     'transmitter that has gone down — and `opt-in` is sent ' +
+                     'FROM that state by definition and is the only way a ' +
+                     'receiver learns the account came back.'
+      },
+      subjectFormat: {
+        type: 'string',
+        description: 'The `risc.subjectFormat` setting, and the most ' +
+                     'consequential one in this group. Eleven of the ' +
+                     'fourteen event types carry NO payload members at all, ' +
+                     'so the subject is the entire message. `iss_sub` is the ' +
+                     'identifier a receiver already holds; `email` is what a ' +
+                     'receiver keying on an address expects, and ' +
+                     '`identifier-recycled` exists precisely because that ' +
+                     'key is unsafe.\n\nThe two identifier events IGNORE ' +
+                     'it and use `email` regardless, because their subject ' +
+                     'carries the identifier that changed — and it carries ' +
+                     'the OLD value, which is the reverse of every other ' +
+                     'event in all three vocabularies.'
+      },
+      googleSubjectType: {
+        type: 'boolean',
+        description: 'The deliberate defect this profile\'s own ' +
+                     'specification asks for by name. RISC 1.0 section 3.1 ' +
+                     'records that a production RISC transmitter in the ' +
+                     'field spells a subject identifier\'s discriminator ' +
+                     '`subject_type` rather than `format`, says the usage is ' +
+                     'deprecated and that new services MUST NOT use it — and ' +
+                     'then tells relying parties they need code to work ' +
+                     'around it anyway. With this on, every RISC subject ' +
+                     'this service sends carries `subject_type`. CAEP and ' +
+                     'SSF events are untouched: their specifications never ' +
+                     'had the problem.'
+      },
+      omitEventTimestamp: {
+        type: 'boolean',
+        description: 'The `risc.omitEventTimestamp` setting. It reaches ONE ' +
+                     'of the fourteen types, because `credential-compromise` ' +
+                     'is the only one that defines the member — and RISC ' +
+                     'words it as when the transmitter DISCOVERED the ' +
+                     'compromise rather than when it happened, so a receiver ' +
+                     'reading it as an occurrence time dates the incident ' +
+                     'from the wrong end whether or not it is sent.'
+      },
+      tracked: {
+        type: 'integer',
+        description: 'How many accounts the register holds, capped by ' +
+                     '`risc.maxAccountsTracked` with the oldest going first.'
+      },
+      totals: {
+        type: 'object',
+        description: 'How many of each event type have been sent, across ' +
+                     'every account.'
+      },
+      applications: {
+        type: 'array',
+        description: 'WHAT THIS TRANSMITTER HAS SAID TO EACH RECEIVER, ' +
+                     'across every account. It is the CaepApplication shape ' +
+                     'with `accounts` where that one has `sessions`, and the ' +
+                     'same three rules hold: an application with no stream ' +
+                     'is a row rather than an omission, a row named `(no ' +
+                     'application …)` collects the streams agreed while ' +
+                     '`ssf.authRequired` was off, and `counts` is counted ' +
+                     'when the token is built and QUEUED rather than when it ' +
+                     'is delivered.',
+        items: { type: 'object' }
+      },
+      eventTypes: {
+        type: 'array',
+        description: 'The fourteen, with their short names — which is what ' +
+                     'the `emit` action and `risc.eventsSupported` both ' +
+                     'take. Each carries `deprecated` where its own ' +
+                     'specification deprecates it: one does, ' +
+                     '`sessions-revoked`, in favour of CAEP\'s ' +
+                     '`session-revoked`. The two names differ by one letter ' +
+                     'and mean different things — every session the account ' +
+                     'has, against the one the subject names.',
+        items: { type: 'object' }
+      },
+      catalogue: {
+        type: 'array',
+        description: 'The same fourteen opened out. Three things about them ' +
+                     'surprise a reader who knows CAEP: ELEVEN have no ' +
+                     'payload members at all and only one has a REQUIRED ' +
+                     'member; the claims CAEP gives all eight of its events ' +
+                     'are given here to ONE event and there are three of ' +
+                     'them rather than four (no `initiating_entity`); and ' +
+                     'one member name in the whole of Shared Signals uses a ' +
+                     'HYPHEN — `identifier-changed`\'s `new-value` — where ' +
+                     'everything else in all three vocabularies is ' +
+                     'snake_case, so `new_value` typed from habit produces ' +
+                     'an event that delivers and says nothing.',
+        items: { type: 'object' }
+      },
+      accounts: {
+        type: 'array',
+        description: 'One entry per account this service has been told ' +
+                     'anything about, INCLUDING ONES THAT NO LONGER EXIST — ' +
+                     'a purged account is gone from the directory entirely, ' +
+                     'so the row is the only remaining evidence that ' +
+                     'receivers were told.\n\nEach carries THREE states ' +
+                     'rather than one: `lifecycle` (active, disabled, ' +
+                     'purged), `optOut` (RISC section 2.8\'s three) and ' +
+                     '`credentialStanding`. They move independently — an ' +
+                     'account can be opted out and perfectly healthy, or ' +
+                     'compromised and still enabled — so folding them into ' +
+                     'one word would mean choosing which of three questions ' +
+                     'this resource answers.\n\n`formerIdentifiers` is ' +
+                     'every address the account has been known by, which is ' +
+                     'what keeps `identifier-changed` from splitting one ' +
+                     'person into two rows at the moment their identifier ' +
+                     'moves. `suppressed` counts events built and NOT sent ' +
+                     'because of the opt-out gate.',
+        items: { type: 'object' }
+      },
+      streams: {
+        type: 'array',
+        description: 'Which streams would take a RISC event at all. It is ' +
+                     'here rather than only on the Ssf resource because an ' +
+                     'account with a count of zero almost always means ' +
+                     'nobody asked for that type, and SSF gives a receiver ' +
+                     'no other notice of that.',
+        items: { type: 'object' }
+      },
+      settings: {
+        type: 'object',
+        description: 'The `RISC` setting group as /admin/risc draws it. ' +
                      'Change one through POST /admin-api/config/set-many.'
       }
     }),

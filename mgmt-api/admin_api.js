@@ -4410,7 +4410,8 @@ const ROUTES = [
                  'push, RFC 8936 poll) — and two events of its own, both ' +
                  'about the pipe. CAEP and RISC are the vocabularies spoken ' +
                  'over it; CAEP is implemented and its own register is at ' +
-                 'GET /admin-api/caep, and RISC is not here yet.\n\nTHE ' +
+                 'GET /admin-api/caep, and RISC has one of its own at ' +
+                 'GET /admin-api/risc.\n\nTHE ' +
                  'RECEIVER\'S `authorization_header` IS NOT IN THIS REPLY. ' +
                  'It is a credential belonging to somebody else\'s endpoint ' +
                  'and it goes back only to the receiver that set it, at ' +
@@ -4819,6 +4820,261 @@ const ROUTES = [
                      'sessions this service NO LONGER HOLDS are the only ' +
                      'evidence that those sessions existed and were revoked, ' +
                      'and nothing else in this service records it.',
+        requestBodyRequired: false,
+        requestBody: {
+          type: 'object',
+          properties: {},
+          examples: [{}],
+          additionalProperties: false
+        },
+        responseDescription: 'How many rows were dropped.' }
+    ] },
+
+  // ---------------------------------------------------------------------
+  // RISC. A GET, a second GET and a POST, on exactly the CAEP block's terms
+  // and for its reasons: /admin/risc and /admin/risc-accounts carry three
+  // controls between them — emit an event by hand, reset one account's RISC
+  // state, clear the register — and rule 7 is about controls.
+  //
+  // **THERE IS DELIBERATELY NO WAY TO DISABLE OR DELETE AN ACCOUNT FROM
+  // HERE**, which is the same reading of rule 7 that leaves CAEP without a
+  // way to end a session. Emitting an `account-disabled` says an account was
+  // disabled; it does not disable one, and a management API that did both
+  // would make "tell the receivers" and "deprovision this person" one act —
+  // which is exactly the conflation RISC exists to separate. The directory
+  // half is POST /admin-api/users and SCIM, and a write through either emits
+  // the event on its own when `risc.autoEmit` is on.
+  { method: 'GET', path: BASE + '/risc', tag: 'RISC',
+    operationId: 'getRisc',
+    summary: 'The RISC account register: what state each account is in and ' +
+             'how many events of which type have been sent about it',
+    description: 'Everything /admin/risc and /admin/risc-accounts draw, as ' +
+                 'JSON. Per account: who it is, the SSF subject a receiver ' +
+                 'was sent, and THREE states rather than one — the lifecycle ' +
+                 '(active, disabled, purged), the RISC section 2.8 opt-out ' +
+                 'state (opt-in, opt-out-initiated, opt-out) and whether a ' +
+                 'credential has been reported compromised. They move ' +
+                 'independently: an account can be opted out and perfectly ' +
+                 'healthy, or compromised and still enabled.\n\nTHE ' +
+                 'REGISTER OUTLIVES THE ACCOUNT, MORE STARKLY THAN THE CAEP ' +
+                 'ONE OUTLIVES A SESSION. A purged account is gone from the ' +
+                 'directory entirely, so the row whose lifecycle says ' +
+                 '`purged` is the only remaining evidence anywhere that this ' +
+                 'service ever told anybody it was.\n\nRISC IS A VOCABULARY ' +
+                 'AND NOT A FAMILY. Its events travel on SSF streams, are ' +
+                 'signed by the SSF signer and are delivered by the two SSF ' +
+                 'deliveries, so GET /admin-api/ssf is where the streams ' +
+                 'themselves are. `streams` here says only which of them ' +
+                 'would take a RISC event at all.\n\n`suppressed` is the one ' +
+                 'counter with no CAEP equivalent: events this transmitter ' +
+                 'built and did NOT send, because the account is in the ' +
+                 'opt-out state and `risc.honourOptOut` is on. It is the ' +
+                 'only number here that says a receiver heard nothing ON ' +
+                 'PURPOSE.',
+    mirrors: 'GET /admin/risc',
+    responseDescription: 'The register, the catalogue and the settings.',
+    responseSchema: { $ref: '#/components/schemas/Risc' },
+    handler: function (req, res) {
+      log.debug("Entering the management API RISC endpoint.");
+      sendJson(res, 200, admin.riscView(req));
+      log.debug("Leaving the management API RISC endpoint.");
+    } },
+
+  // THE SECOND RISC READ, for the reason the second CAEP read exists:
+  // /admin/risc-accounts is a page of the console and one operation cannot
+  // mirror two pages. `?account=` decides the shape, the list or the
+  // drill-down, because they are the same question at two scales.
+  { method: 'GET', path: BASE + '/risc/accounts', tag: 'RISC',
+    operationId: 'getRiscAccounts',
+    summary: 'The RISC account register, searched and paged — or one ' +
+             'account with everything that has been said about it',
+    description: 'What /admin/risc-accounts draws. Without `account` it is ' +
+                 'the register: one row per account this service has been ' +
+                 'told anything about, including ones that no longer exist, ' +
+                 'searched with `acctq` and paged with `accountsPage` and ' +
+                 '`per`. Beside it, `applications`: what this transmitter ' +
+                 'has said to each RECEIVER across every account, searched ' +
+                 'with `rappq`.\n\nWith `account` it is that one account ' +
+                 'opened out: the events actually sent about it, in order, ' +
+                 'with the jti and the stream each went out on and what the ' +
+                 'register noticed as it was applied, paged with ' +
+                 '`eventsPage`.\n\nTHE SEARCH REACHES IDENTIFIERS THE ' +
+                 'ACCOUNT NO LONGER HAS, and that is not thoroughness: ' +
+                 '`identifier-changed` is an event ABOUT the key, so the ' +
+                 'address a caller is holding — out of a log, off an event ' +
+                 'it is chasing — is routinely the superseded one. A search ' +
+                 'that matched only the current spelling would hide exactly ' +
+                 'the row somebody came to find.\n\nAn `account` that names ' +
+                 'nothing answers 200 with `account: null` rather than 404: ' +
+                 'this register is capped at `risc.maxAccountsTracked` and ' +
+                 'drops the oldest.',
+    mirrors: 'GET /admin/risc-accounts',
+    parameters: [
+      { name: 'acctq', in: 'query', required: false,
+        schema: { type: 'string' },
+        description: 'Narrows the register to rows whose account id, ' +
+                     'username, `sub`, email address, telephone number, SSF ' +
+                     'subject, directory DN or any FORMER identifier ' +
+                     'contains this.' },
+      { name: 'account', in: 'query', required: false,
+        schema: { type: 'string' },
+        description: 'One account id. The reply is then that account and ' +
+                     'its events rather than the list.' },
+      { name: 'accountsPage', in: 'query', required: false,
+        schema: { type: 'integer', minimum: 1 },
+        description: 'Which page of the register. Clamped, like every page ' +
+                     'parameter here.' },
+      { name: 'rappq', in: 'query', required: false,
+        schema: { type: 'string' },
+        description: 'Narrows the per-receiver list to rows whose ' +
+                     'application name, identifier or stream `aud` contains ' +
+                     'this. It deliberately does NOT match event types: a ' +
+                     'receiver that takes none of the fourteen is exactly ' +
+                     'the row somebody is looking for when they ask why ' +
+                     'nothing arrived.' },
+      { name: 'rapplicationsPage', in: 'query', required: false,
+        schema: { type: 'integer', minimum: 1 },
+        description: 'Which page of the per-receiver list. It shares `per` ' +
+                     'with the register above it.' },
+      { name: 'eventsPage', in: 'query', required: false,
+        schema: { type: 'integer', minimum: 1 },
+        description: 'Which page of ONE account\'s events, with `account`.' }
+    ].concat(pagingParameters()),
+    responseDescription: 'The register, or one account and its events.',
+    responseSchema: { $ref: '#/components/schemas/Risc' },
+    handler: function (req, res) {
+      log.debug("Entering the management API RISC accounts endpoint.");
+      sendJson(res, 200, admin.riscAccountsView(req));
+      log.debug("Leaving the management API RISC accounts endpoint.");
+    } },
+
+  { method: 'POST', route: BASE + '/risc/:action', tag: 'RISC',
+    mirrors: 'POST /admin/risc',
+    handler: function (req, res) {
+      log.debug("Entering the management API RISC action endpoint.");
+      const body = parseBody(req);
+      // AWAITS, like the CAEP handler above and for the same reason.
+      admin.riscAction(withAction(req, body)).then(function (result) {
+        sendJson(res, result.ok ? 200 : 400, result);
+        log.debug("Leaving the management API RISC action endpoint.");
+      }).catch(function (e) {
+        log.error('admin-api: the RISC action threw: ' + e.message);
+        sendJson(res, 500, { ok: false,
+          errors: ['The action failed: ' + e.message] });
+        log.debug("Leaving the management API RISC action endpoint. Threw.");
+      });
+    },
+    actions: [
+      { action: 'emit', operationId: 'emitRiscEvent',
+        summary: 'Send one RISC event about one account',
+        description: 'Builds the payload, composes the SUBJECT from the ' +
+                     'account in the format `risc.subjectFormat` names, and ' +
+                     'transmits it on every stream that both delivers the ' +
+                     'type and covers that subject.\n\nELEVEN OF THE ' +
+                     'FOURTEEN CARRY NO PAYLOAD MEMBERS AT ALL, so for those ' +
+                     'the subject is the entire message and `payload` is ' +
+                     'left empty. Only `credential-compromise` has a ' +
+                     'REQUIRED member, `credential_type`, which RISC defines ' +
+                     'by reference to CAEP\'s `credential-change` — the two ' +
+                     'lists are the same list.\n\nTEN OF THE FOURTEEN ARE ' +
+                     'ONLY EVER PRODUCED THIS WAY. No breach corpus is ' +
+                     'searched by this service and no recovery flow runs in ' +
+                     'it. The other four fire on their own when the ' +
+                     'DIRECTORY changes and `risc.autoEmit` is on — a person ' +
+                     'deleted, `active` going false or true, a mail address ' +
+                     'or telephone number moving.\n\nFOUR OF THEM CHANGE ' +
+                     'REAL STATE WHEN THEY GO. RISC section 2.8 defines each ' +
+                     'opt-out event as "the account is in this state" rather ' +
+                     'than as a report that it moved, so emitting `opt-out-' +
+                     'effective` here IS the transition — and the next event ' +
+                     'about that account is suppressed while ' +
+                     '`risc.honourOptOut` is on.\n\nAN ACCOUNT THIS SERVICE ' +
+                     'HAS NEVER HELD IS ACCEPTED, which is the opposite of ' +
+                     'what emitCaepEvent does with an unknown session. A ' +
+                     'session identifier this service never minted is one it ' +
+                     'can compose no subject from; an account is a person, ' +
+                     'and RISC is aimed ACROSS providers, so the account a ' +
+                     'receiver is warned about is usually one it has never ' +
+                     'seen.\n\nA TYPE NO STREAM TAKES IS NOT AN ERROR. The ' +
+                     'account\'s state is still updated and the reply says ' +
+                     'nothing was sent.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            account_id: { type: 'string',
+              description: 'The account it is about, from GET ' +
+                           '/admin-api/risc. A name no row carries is ' +
+                           'accepted and opens one.' },
+            type: { type: 'string',
+              description: 'The event type: a short name such as ' +
+                           '`account-disabled`, or the whole URI.' },
+            payload: { type: 'string',
+              description: 'The event-specific members, as JSON. Empty for ' +
+                           'a conforming specimen of the type, which is what ' +
+                           'eleven of the fourteen always are. Note the ' +
+                           'HYPHEN in `identifier-changed`\'s `new-value`: ' +
+                           'it is the only hyphenated member name in any of ' +
+                           'the three vocabularies, and `new_value` is ' +
+                           'carried and silently ignored by a receiver.' },
+            reason_admin: { type: 'string',
+              description: 'Why, for a log. Sent as an object keyed by ' +
+                           '`risc.reasonLanguage`. It reaches the wire for ' +
+                           'ONE of the fourteen types — RISC gives the ' +
+                           'reason members to `credential-compromise` and to ' +
+                           'nothing else — and is dropped by the catalogue ' +
+                           'on any other, rather than being sent as a member ' +
+                           'the specification does not define.' },
+            reason_user: { type: 'string',
+              description: 'The same, in words meant for the person. Same ' +
+                           'one type.' }
+          },
+          required: ['account_id', 'type'],
+          examples: [{ account_id: 'alice', type: 'account-disabled',
+            payload: '{"reason":"hijacking"}',
+            reason_admin: 'Credential seen in a breach corpus' },
+          { account_id: 'alice', type: 'identifier-changed',
+            payload: '{"new-value":"alice.roe@example.com"}' },
+          { account_id: 'alice', type: 'credential-compromise',
+            payload: '{"credential_type":"password"}' }],
+          additionalProperties: false
+        },
+        responseDescription: 'How many streams took it, why none did, or ' +
+                             'that the opt-out gate suppressed it.' },
+
+      { action: 'reset-account', operationId: 'resetRiscAccount',
+        summary: 'Put one account\'s RISC state back to where it started',
+        description: 'Clears the lifecycle, the opt-out state, the ' +
+                     'credential standing, the identifier history and every ' +
+                     'counter on one row, keeping the row.\n\nIT DISABLES ' +
+                     'AND DELETES NOBODY. This register is a record of what ' +
+                     'has been SAID about an account; resetting it forgets ' +
+                     'the record. The directory entry is untouched, which is ' +
+                     'the distinction this whole page rests on — and it is ' +
+                     'sharper here than for a session, because a row saying ' +
+                     '`purged` may describe a person who really is gone.',
+        requestBodyRequired: true,
+        requestBody: {
+          type: 'object',
+          properties: {
+            account_id: { type: 'string', description: 'The account.' }
+          },
+          required: ['account_id'],
+          examples: [{ account_id: 'alice' }],
+          additionalProperties: false
+        },
+        responseDescription: 'Confirmation, or a refusal naming the id.' },
+
+      { action: 'clear', operationId: 'clearRiscAccounts',
+        summary: 'Drop every row in the RISC account register',
+        description: 'Forgets what has been said about every account. ' +
+                     'Nobody is disabled, nobody is deleted and no directory ' +
+                     'entry is touched.\n\nIt is worth knowing what this ' +
+                     'throws away: a row for an account that has been PURGED ' +
+                     'is the only evidence anywhere in this service that the ' +
+                     'account existed and that receivers were told it was ' +
+                     'deleted. The directory cannot supply it, because the ' +
+                     'entry is gone.',
         requestBodyRequired: false,
         requestBody: {
           type: 'object',

@@ -88,11 +88,12 @@ const subjects = require('./ssf_subjects');
 // and a typo in one of them produces an event a receiver silently ignores.
 const SSF_PREFIX = 'https://schemas.openid.net/secevent/ssf/event-type/';
 
-// The two VOCABULARY prefixes. CAEP's rows are in the table below; RISC's are
-// the third part of this work and its prefix is written down here anyway,
-// because it is the thing most likely to be typed from memory and got subtly
-// wrong — there is no "unknown event type" error in this protocol, so a
-// receiver silently ignores a type it does not recognise and nobody finds out.
+// The two VOCABULARY prefixes. Both have rows in the table below now — CAEP's
+// eight since 2026-09-03 and RISC's fourteen since 2026-09-04 — and they are
+// written once each because a prefix is the thing most likely to be typed
+// from memory and got subtly wrong: there is no "unknown event type" error in
+// this protocol, so a receiver silently ignores a type it does not recognise
+// and nobody finds out.
 const CAEP_PREFIX = 'https://schemas.openid.net/secevent/caep/event-type/';
 const RISC_PREFIX = 'https://schemas.openid.net/secevent/risc/event-type/';
 
@@ -104,13 +105,23 @@ const SET_MEDIA_TYPE = 'secevent+jwt';
 // THE CATALOGUE.
 //
 //   uri        the event type, which is the KEY in the SET's `events` map
-//   family     which specification defines it — 'ssf' or 'caep'; 'risc' is
-//              the third part of this work and has no rows yet
+//   family     which specification defines it — 'ssf', 'caep' or 'risc'
 //   subject    'none' | 'optional' | 'required'. SSF's TWO ARE THE ONLY ONES
 //              IN ANY OF THE THREE VOCABULARIES WITH NO SUBJECT AT ALL, and
 //              it is worth knowing why: they are about the STREAM,
 //              not about anybody, so a receiver that insists on a subject
 //              cannot be verified.
+//   subjectFormats
+//              WHICH RFC 9493 FORMATS THE SUBJECT MAY BE IN, where the
+//              specification narrows it. Only RISC's two identifier events
+//              have one — they say the subject MUST be an email address or a
+//              phone number, because the identifier IS the message — and it
+//              is a property of the ROW rather than a branch naming an event
+//              type, which is what keeps `checkSubjectFormat()` below from
+//              being the vocabulary leaking out of this table.
+//   deprecated the event type that replaces this one, where its own
+//              specification deprecates it. One row has it: RISC's
+//              `sessions-revoked` points at CAEP's `session-revoked`.
 //   members    the event payload's own members. `required` says which a
 //              conforming event carries; the rest are optional.
 //   generate   builds a payload from the values a caller supplied, filling
@@ -250,6 +261,24 @@ function withCommon(members) {
   return (members || []).concat(CAEP_COMMON_MEMBERS);
 }
 
+// ---------------------------------------------------------------------------
+// THE CREDENTIAL TYPES, WRITTEN ONCE BECAUSE TWO SPECIFICATIONS SHARE THEM BY
+// REFERENCE RATHER THAN BY COINCIDENCE.
+//
+// CAEP 1.0 defines this list for `credential-change`. RISC 1.0 section 2.7
+// then says that `credential-compromise`'s `credential_type` "must be one of
+// the values specified for the similarly named field in the Credential Change
+// event defined in the CAEP Specification" — so the two lists are not merely
+// alike, they are the SAME list, and a second copy of it here would be a copy
+// that can drift out of a relationship the specification states outright.
+//
+// It is OPEN in both places: the specification allows types two parties agree
+// between themselves, so a value outside it is carried with a warning.
+// ---------------------------------------------------------------------------
+const CREDENTIAL_TYPES = ['password', 'pin', 'x509', 'fido2-platform',
+  'fido2-roaming', 'fido-u2f', 'verifiable-credential', 'phone-voice',
+  'phone-sms', 'app'];
+
 const CAEP_EVENTS = [
   {
     uri: CAEP_PREFIX + 'session-revoked',
@@ -386,9 +415,7 @@ const CAEP_EVENTS = [
     subject: 'required',
     members: withCommon([
       { name: 'credential_type', required: true, type: 'openenum',
-        values: ['password', 'pin', 'x509', 'fido2-platform',
-                 'fido2-roaming', 'fido-u2f', 'verifiable-credential',
-                 'phone-voice', 'phone-sms', 'app'],
+        values: CREDENTIAL_TYPES,
         what: 'Which kind of credential. The list is CAEP\'s own and it is ' +
               'OPEN — the specification allows types two parties agree ' +
               'between themselves — so a value not on it is carried with a ' +
@@ -584,11 +611,394 @@ const CAEP_EVENTS = [
   }
 ];
 
-// The two vocabularies in one table. SSF's own first, because they are about
-// the pipe every one of the others travels on.
-const EVENTS = SSF_EVENTS.concat(CAEP_EVENTS);
+// ---------------------------------------------------------------------------
+// RISC — THE ACCOUNT VOCABULARY (OpenID RISC Profile Specification 1.0,
+// published 29 August 2025 and final on 2 September 2025), AND IT IS ROWS IN
+// THIS TABLE AND NOTHING ELSE.
+//
+// CAEP was the first vocabulary over this pipe and its arrival cost four value
+// types in `checkMember()` and one refusal in `transmit()`. **RISC COST THIS
+// FILE'S MACHINERY NOTHING AT ALL** — not one value type, not one branch. That
+// is the sentence `ssf/CLAUDE.md` has been promising since the table had two
+// rows in it, and fourteen event types later it is finally testable rather
+// than merely asserted.
+//
+// **WHAT RISC SAYS THAT CAEP DOES NOT.** CAEP's eight are about a SESSION and
+// carry *this session is no longer trustworthy*. These fourteen are about an
+// ACCOUNT and carry *this account is no longer trustworthy*. Those are two
+// different sentences and the difference is the whole reason there are two
+// profiles: a revoked session is one sign-in of one person at one relying
+// party, and a disabled account is every session that person has anywhere, for
+// ever. CAEP is aimed WITHIN an enterprise and RISC ACROSS providers — its
+// origin is Google noticing that a consumer account was taken over and telling
+// every site that account signs in to.
+//
+// ---------------------------------------------------------------------------
+// THE FOUR THINGS ABOUT THESE ROWS THAT SURPRISE SOMEBODY WHO KNOWS CAEP.
+//
+// **ELEVEN OF THE FOURTEEN HAVE NO PAYLOAD MEMBERS AT ALL, AND ONLY ONE HAS A
+// REQUIRED ONE.** A CAEP row is mostly members; a RISC row is mostly `{}`. The
+// consequence is the one worth stating: **the subject carries the entire
+// message.** `account-purged` says nothing but its own type and who it is
+// about, so a subject naming the wrong person is not a partly-wrong event, it
+// is a completely wrong one with nothing else in it to notice by.
+//
+// **THE FOUR COMMON CLAIMS ARE NOT COMMON HERE.** CAEP section 2 gives
+// `event_timestamp`, `initiating_entity`, `reason_admin` and `reason_user` to
+// every one of its eight. RISC gives THREE of them — no `initiating_entity` —
+// and gives them to exactly ONE of its fourteen, `credential-compromise`. A
+// reader porting CAEP's `withCommon()` across would attach four members to
+// fourteen rows and produce thirteen events carrying members their
+// specification does not define. Nothing would fail: an unrecognised member is
+// carried and ignored by a conforming receiver, which is why this is written
+// down rather than left to the table.
+//
+// **ONE MEMBER NAME IN THE WHOLE OF SHARED SIGNALS USES A HYPHEN**, and it is
+// `identifier-changed`'s `new-value`. Every other member of every event in all
+// three vocabularies is `snake_case`. A transmitter that writes `new_value`
+// from habit produces an event that is well-formed, delivers, and tells the
+// receiver nothing about what the identifier changed TO — silently, because
+// the member is optional and its absence is legal.
+//
+// **AND ONE OF THE FOURTEEN IS DEPRECATED BY ITS OWN SPECIFICATION.**
+// `sessions-revoked` — plural — says every session of the account is gone, and
+// RISC 1.0 says new implementations MUST use CAEP's `session-revoked` —
+// singular — instead. The two names differ by one letter and mean different
+// things, which is exactly the pair a person types from memory. It is in this
+// table, offered, and warned about: leaving it out would make this service
+// unable to reproduce the traffic of the many deployments that still send one.
+// ---------------------------------------------------------------------------
+
+// The three claims RISC gives to `credential-compromise` and to nothing else.
+// A named list of three rather than four inlined members, because the COUNT is
+// the fact worth being able to check: `tests/risc_register.js` asserts that it
+// is three and that `initiating_entity` is not among them.
+const RISC_COMMON_MEMBERS = [
+  { name: 'event_timestamp', required: false, type: 'number',
+    what: 'When the transmitter DISCOVERED the compromise, in seconds since ' +
+          'the epoch. RISC section 2.7 words it as discovery rather than as ' +
+          'occurrence, which is not pedantry: a credential found in a breach ' +
+          'corpus was compromised long before anybody noticed, and a ' +
+          'receiver that read this as "when it happened" would date the ' +
+          'incident from the wrong end.' },
+  { name: 'reason_admin', required: false, type: 'langmap',
+    what: 'Why, for an administrator. THIS SERVICE SENDS THE LANGUAGE-MAP ' +
+          'SHAPE CAEP DEFINES — {"en": "..."} — and RISC 1.0 does not ' +
+          'actually repeat that requirement, which makes a bare string ' +
+          'arguably conforming to RISC and certainly unreadable to a ' +
+          'receiver built against CAEP. Sending the map is the reading that ' +
+          'is right under both.' },
+  { name: 'reason_user', required: false, type: 'langmap',
+    what: 'The same, in words meant for the person it happened to.' }
+];
+
+const RISC_EVENTS = [
+  {
+    uri: RISC_PREFIX + 'account-credential-change-required',
+    family: 'risc',
+    name: 'Account Credential Change Required',
+    subject: 'required',
+    members: [],
+    required: [],
+    what: 'The account named by the subject was REQUIRED to change a ' +
+          'credential — a forced password reset, most often. It is not a ' +
+          'report that a credential changed: nothing here says one did, and ' +
+          'the person may never comply. What a receiver learns is that this ' +
+          'provider no longer trusts what it currently holds.',
+    generate: function () {
+      return {};
+    }
+  },
+  {
+    uri: RISC_PREFIX + 'account-purged',
+    family: 'risc',
+    name: 'Account Purged',
+    subject: 'required',
+    members: [],
+    required: [],
+    what: 'The account was PERMANENTLY DELETED. It is the one terminal ' +
+          'event in the vocabulary and the register treats it as one: ' +
+          'nothing can be said about a purged account afterwards except by ' +
+          'contradiction. The distinction from account-disabled is the ' +
+          'whole of its meaning — a disabled account may come back, and ' +
+          'this one may not.',
+    generate: function () {
+      return {};
+    }
+  },
+  {
+    uri: RISC_PREFIX + 'account-disabled',
+    family: 'risc',
+    name: 'Account Disabled',
+    subject: 'required',
+    members: [
+      { name: 'reason', required: false, type: 'openenum',
+        values: ['hijacking', 'bulk-account'],
+        what: 'Why, as one of two words RISC names — and it is worth ' +
+              'knowing what those two are FOR. "hijacking" says this one ' +
+              'account was taken over, which is a signal about a person. ' +
+              '"bulk-account" says it was one of a population created by a ' +
+              'script, which is a signal about the PROVIDER and asks a ' +
+              'receiver to look at everything else that arrived at the same ' +
+              'time. The specification says "possible values" rather than ' +
+              'closing the list, so a third word is carried with a warning.' }
+    ],
+    required: [],
+    what: 'The account was disabled and MAY BE ENABLED AGAIN. It is the ' +
+          'ordinary account-takeover signal, and the pair it forms with ' +
+          'account-enabled is what makes it different from a purge.',
+    generate: function (values) {
+      const asked = values || {};
+      const payload = {};
+      if (typeof asked.reason === 'string' && asked.reason !== '') {
+        payload.reason = asked.reason;
+      }
+      return payload;
+    }
+  },
+  {
+    uri: RISC_PREFIX + 'account-enabled',
+    family: 'risc',
+    name: 'Account Enabled',
+    subject: 'required',
+    members: [],
+    required: [],
+    what: 'The account was enabled. It is RISC\'s only GOOD NEWS and it is ' +
+          'the one everybody forgets to implement: a receiver that acts on ' +
+          'account-disabled and ignores this one has locked somebody out ' +
+          'permanently on the strength of an incident that was resolved.',
+    generate: function () {
+      return {};
+    }
+  },
+  {
+    uri: RISC_PREFIX + 'identifier-changed',
+    family: 'risc',
+    name: 'Identifier Changed',
+    subject: 'required',
+    // THE SUBJECT NAMES THE OLD VALUE, WHICH IS THE OPPOSITE OF EVERY OTHER
+    // EVENT HERE. See the note on subjectFormats below.
+    subjectFormats: ['email', 'phone_number'],
+    members: [
+      { name: 'new-value', required: false, type: 'string',
+        what: 'What the identifier became. **THE ONLY HYPHENATED MEMBER ' +
+              'NAME IN ANY OF THE THREE VOCABULARIES** — everything else in ' +
+              'SSF, CAEP and RISC is snake_case — so `new_value` typed from ' +
+              'habit produces an event that delivers and says nothing. It ' +
+              'is OPTIONAL, and a transmitter that leaves it out is telling ' +
+              'a receiver that an address it holds is stale without telling ' +
+              'it what to hold instead, which is legal and nearly useless.' }
+    ],
+    required: [],
+    what: 'The identifier IN THE SUBJECT changed, and the subject carries ' +
+          'the OLD value — which is the reverse of every other event here ' +
+          'and the thing that catches everybody. RISC says only the ' +
+          'provider AUTHORITATIVE over the identifier should send this: an ' +
+          'email provider may say john.doe@ became john.roe@, and a site ' +
+          'where that address is merely a username may not — it sends ' +
+          'recovery-information-changed instead.',
+    generate: function (values) {
+      const asked = values || {};
+      const payload = {};
+      // **IT READS THE SPECIFICATION'S SPELLING AND ONLY THAT ONE, AND
+      // ACCEPTING `new_value` HERE WAS THE FIRST THING THIS ROW DID WRONG.**
+      // Correcting the underscore silently makes the console kind to a caller
+      // and useless to one: this service exists so that somebody can find out
+      // what their own transmitter is sending, and a mock that quietly repairs
+      // the commonest mistake in this event type is a mock that hides it.
+      // `validateEvent()` warns about the near-miss by name instead, which
+      // says what happened rather than making it not have happened.
+      if (typeof asked['new-value'] === 'string' && asked['new-value']) {
+        payload['new-value'] = asked['new-value'];
+      }
+      return payload;
+    }
+  },
+  {
+    uri: RISC_PREFIX + 'identifier-recycled',
+    family: 'risc',
+    name: 'Identifier Recycled',
+    subject: 'required',
+    subjectFormats: ['email', 'phone_number'],
+    members: [],
+    required: [],
+    what: 'The identifier in the subject was RECYCLED and now belongs to ' +
+          'somebody else. It is the event whose absence causes the quietest ' +
+          'account takeover there is: a mail provider reissues a lapsed ' +
+          'address, a relying party keyed on the address by itself lets the ' +
+          'new owner into the old owner\'s account, and nothing anywhere ' +
+          'was compromised. It is the whole argument for keying on ' +
+          'iss_sub rather than on an email address.',
+    generate: function () {
+      return {};
+    }
+  },
+  {
+    uri: RISC_PREFIX + 'credential-compromise',
+    family: 'risc',
+    name: 'Credential Compromise',
+    subject: 'required',
+    members: [
+      { name: 'credential_type', required: true, type: 'openenum',
+        values: CREDENTIAL_TYPES,
+        what: 'Which kind of credential was found compromised. **RISC ' +
+              'SECTION 2.7 DEFINES THIS BY REFERENCE TO CAEP\'s ' +
+              'credential-change**, so the two lists are the same list ' +
+              'rather than two alike ones — which is why there is one ' +
+              'CREDENTIAL_TYPES here and not a copy per vocabulary.' }
+    ].concat(RISC_COMMON_MEMBERS),
+    required: ['credential_type'],
+    what: 'A credential belonging to this account was FOUND compromised — ' +
+          'seen in a breach corpus, or reported. THE ONLY ONE OF THE ' +
+          'FOURTEEN WITH A REQUIRED MEMBER, and the only one carrying any ' +
+          'of the claims CAEP gives all eight of its own. A receiver acts ' +
+          'on it differently by type: a compromised password is a reset, ' +
+          'and a compromised hardware key is a revocation.',
+    generate: function (values) {
+      const asked = values || {};
+      return {
+        credential_type: typeof asked.credential_type === 'string' &&
+          asked.credential_type !== '' ? asked.credential_type : 'password'
+      };
+    }
+  },
+  {
+    uri: RISC_PREFIX + 'opt-in',
+    family: 'risc',
+    name: 'Opt In',
+    subject: 'required',
+    members: [],
+    required: [],
+    what: 'The account is participating in RISC exchange again. It is one ' +
+          'of the four events that ARE a state transition rather than a ' +
+          'report of one — RISC section 2.8 defines each of them as "the ' +
+          'account is in the X state" — and it is the only event that may ' +
+          'be sent about an account which has opted OUT, because without it ' +
+          'a receiver would never learn that one came back.',
+    generate: function () {
+      return {};
+    }
+  },
+  {
+    uri: RISC_PREFIX + 'opt-out-initiated',
+    family: 'risc',
+    name: 'Opt Out Initiated',
+    subject: 'required',
+    members: [],
+    required: [],
+    what: 'The person asked to stop RISC exchange, AND IT CARRIES ON FOR A ' +
+          'WHILE ANYWAY. That delay is the point of the state existing at ' +
+          'all: RISC section 2.8 says it is there to stop a hijacker from ' +
+          'opting out the moment they take an account over and silencing ' +
+          'the very events that would report them.',
+    generate: function () {
+      return {};
+    }
+  },
+  {
+    uri: RISC_PREFIX + 'opt-out-cancelled',
+    family: 'risc',
+    name: 'Opt Out Cancelled',
+    subject: 'required',
+    members: [],
+    required: [],
+    what: 'The opt-out was called off and the account is back in the opt-in ' +
+          'state. **THE SPELLING IS BRITISH AND IT IS THE SPECIFICATION\'S** ' +
+          '— "cancelled" with two Ls — where a transmitter writing ' +
+          '"opt-out-canceled" produces a URI a conforming receiver silently ' +
+          'ignores, because there is no unknown-event-type error in this ' +
+          'protocol.',
+    generate: function () {
+      return {};
+    }
+  },
+  {
+    uri: RISC_PREFIX + 'opt-out-effective',
+    family: 'risc',
+    name: 'Opt Out Effective',
+    subject: 'required',
+    members: [],
+    required: [],
+    what: 'The opt-out has taken effect and no further RISC events will be ' +
+          'sent about this account. IT IS THE LAST ONE — an event announcing ' +
+          'that there will be no more events — which is what makes it the ' +
+          'one the opt-out gate in risc.js must never suppress. Suppressing ' +
+          'it would leave a receiver waiting for signals that stopped ' +
+          'without notice.',
+    generate: function () {
+      return {};
+    }
+  },
+  {
+    uri: RISC_PREFIX + 'recovery-activated',
+    family: 'risc',
+    name: 'Recovery Activated',
+    subject: 'required',
+    members: [],
+    required: [],
+    what: 'The account went through a recovery flow. It is a signal about ' +
+          'RISK rather than about a change: a recovery is how a legitimate ' +
+          'owner gets back in and it is also how an attacker who controls ' +
+          'the recovery channel takes over, and the transmitter cannot tell ' +
+          'which. A receiver is expected to weigh it, not act on it.',
+    generate: function () {
+      return {};
+    }
+  },
+  {
+    uri: RISC_PREFIX + 'recovery-information-changed',
+    family: 'risc',
+    name: 'Recovery Information Changed',
+    subject: 'required',
+    members: [],
+    required: [],
+    what: 'A recovery address or number was added, changed or removed. It ' +
+          'is what a provider sends about an identifier IT IS NOT ' +
+          'AUTHORITATIVE OVER — RISC says so where identifier-changed says ' +
+          'the opposite — so the pair of them is the same act reported by ' +
+          'two different kinds of provider. It carries no member saying ' +
+          'WHICH information moved, deliberately: that would be publishing ' +
+          'somebody\'s recovery address to every receiver on the stream.',
+    generate: function () {
+      return {};
+    }
+  },
+  {
+    uri: RISC_PREFIX + 'sessions-revoked',
+    family: 'risc',
+    name: 'Sessions Revoked',
+    // RISC 1.0 section 2.11 deprecates this in favour of CAEP's
+    // `session-revoked`. It is here, offered and warned about, because a
+    // transmitter that cannot produce a deprecated event cannot be used to
+    // find out what a receiver does with one — and receivers in the field
+    // still send and expect this.
+    deprecated: CAEP_PREFIX + 'session-revoked',
+    subject: 'required',
+    members: [],
+    required: [],
+    what: 'EVERY session the account has, everywhere, is gone — which is a ' +
+          'far larger instruction than CAEP\'s session-revoked, whose ' +
+          'subject names ONE of them. **DEPRECATED by RISC 1.0 section ' +
+          '2.11**, which says new implementations MUST use CAEP\'s ' +
+          'singular event instead. The two names differ by one letter and ' +
+          'mean different things, so this is the pair to check when a ' +
+          'receiver ends more sessions than anybody intended.',
+    generate: function () {
+      return {};
+    }
+  }
+];
+
+// THE THREE VOCABULARIES IN ONE TABLE. SSF's own first, because they are about
+// the pipe every one of the others travels on; then CAEP's eight about a
+// SESSION, then RISC's fourteen about an ACCOUNT.
+const EVENTS = SSF_EVENTS.concat(CAEP_EVENTS).concat(RISC_EVENTS);
 
 const CAEP_EVENT_URIS = CAEP_EVENTS.map(function (row) {
+  return row.uri;
+});
+
+const RISC_EVENT_URIS = RISC_EVENTS.map(function (row) {
   return row.uri;
 });
 
@@ -625,18 +1035,22 @@ function supportedEventUris() {
   const caep = config.value('caep.enabled')
     ? chooseFrom('caep.eventsSupported', CAEP_EVENTS, 'caep.eventsSupported')
     : [];
-  const out = chosen.concat(caep);
+  const risc = config.value('risc.enabled')
+    ? chooseFrom('risc.eventsSupported', RISC_EVENTS, 'risc.eventsSupported')
+    : [];
+  const out = chosen.concat(caep).concat(risc);
   log.debug('Leaving supportedEventUris(). ' + out.length + ' type(s).');
   return out;
 }
 
 // One vocabulary's offered list, from the setting that governs THAT
-// vocabulary. Two settings rather than one, and the reason is the same one
-// that put CAEP in a group of its own: `ssf.eventsSupported` is about the
-// pipe's own two events and `caep.eventsSupported` is about the profile's
-// eight, so turning the profile off or narrowing it is a CAEP decision and
-// narrowing SSF's two is an SSF one. A single list would have made
-// `caep.enabled` unable to do anything a reader could see in the metadata.
+// vocabulary. THREE settings rather than one, and the reason is the same one
+// that put CAEP and RISC in groups of their own: `ssf.eventsSupported` is
+// about the pipe's own two events, `caep.eventsSupported` is about the
+// profile's eight and `risc.eventsSupported` about RISC's fourteen, so
+// turning a profile off or narrowing it is a decision belonging to THAT
+// profile. A single list would have made `caep.enabled` and `risc.enabled`
+// unable to do anything a reader could see in the metadata.
 //
 // **AN ENTRY IS ACCEPTED AS A SHORT NAME AS WELL AS A FULL URI**, because
 // these URIs are 60 characters long and a setting nobody can type is a setting
@@ -789,6 +1203,23 @@ function checkMember(member, value, errors, warnings) {
   log.debug('Leaving checkMember(). ' + member.name + ' checked.');
 }
 
+// A member name that differs from one this row defines only by hyphen versus
+// underscore. It is one comparison rather than a table of known typos, so it
+// stays true for a vocabulary nobody has written yet.
+function nearestMember(name, members) {
+  log.debug('Entering nearestMember(). ' + name);
+  const flat = String(name).replace(/[-_]/g, '_');
+  let found = '';
+  (members || []).forEach(function (member) {
+    if (!found && member.name !== name &&
+        String(member.name).replace(/[-_]/g, '_') === flat) {
+      found = member.name;
+    }
+  });
+  log.debug('Leaving nearestMember(). ' + (found || '(none)'));
+  return found;
+}
+
 function validateEvent(uri, payload) {
   log.debug('Entering validateEvent(). ' + uri);
   const errors = [];
@@ -809,6 +1240,22 @@ function validateEvent(uri, payload) {
     log.debug('Leaving validateEvent(). Not an object.');
     return { ok: false, errors: errors, warnings: warnings };
   }
+  // A ROW THAT ITS OWN SPECIFICATION DEPRECATES SAYS SO, ON EVERY EVENT, AND
+  // IT IS A WARNING RATHER THAN A REFUSAL. RISC 1.0 section 2.11 deprecates
+  // `sessions-revoked` in favour of CAEP's `session-revoked`; a transmitter
+  // that could not produce the deprecated one could not be used to find out
+  // what a receiver does with it, and receivers in the field still send and
+  // expect it. Written against `row.deprecated` rather than against the URI,
+  // so the next deprecation is a field and not a branch.
+  if (row.deprecated) {
+    warnings.push('"' + uri + '" is DEPRECATED by its own specification, ' +
+        'which says new implementations must use "' + row.deprecated + '" ' +
+        'instead. It is still built and still sent — a transmitter that ' +
+        'could not produce one could not be used to find out what a ' +
+        'receiver does with it — and the two names differ by one letter and ' +
+        'mean different things, so this is the pair to check when a ' +
+        'receiver ends more sessions than anybody intended.');
+  }
   const known = {};
   row.members.forEach(function (member) {
     known[member.name] = member;
@@ -821,7 +1268,25 @@ function validateEvent(uri, payload) {
   Object.keys(body).forEach(function (name) {
     const member = known[name];
     if (!member) {
+      // A NEAR MISS IS NAMED, and it is worth a sentence of its own rather
+      // than the general one below. Every member in SSF and CAEP is
+      // snake_case and exactly one in RISC is not — `identifier-changed`'s
+      // `new-value` — so `new_value` typed from habit is an event that
+      // validates, delivers, and tells the receiver nothing. It is written
+      // against the ROW's own member names rather than against that one
+      // spelling, so it catches the reverse mistake too and needs no
+      // maintenance when a vocabulary adds a member.
+      const nearMiss = nearestMember(name, row.members);
       warnings.push('"' + name + '" is not a member "' + uri + '" defines. ' +
+          (nearMiss
+            ? 'It differs from "' + nearMiss + '", which IS one, only in a ' +
+              'hyphen or an underscore — and this is the one place in the ' +
+              'three vocabularies where that matters, because ' +
+              '"new-value" is the only hyphenated member name in any of ' +
+              'them. What you sent is CARRIED as an extension and the ' +
+              'member the specification defines is absent, so a conforming ' +
+              'receiver reads nothing and reports no error. '
+            : '') +
           'It is CARRIED rather than refused: an event vocabulary extends, ' +
           'and a receiver is expected to ignore what it does not know.');
       return;
@@ -831,6 +1296,57 @@ function validateEvent(uri, payload) {
   });
   log.debug('Leaving validateEvent(). ' + errors.length + ' problem(s).');
   return { ok: errors.length === 0, errors: errors, warnings: warnings };
+}
+
+// ---------------------------------------------------------------------------
+// WHAT IS WRONG WITH THE SUBJECT OF ONE EVENT, WHERE THE ROW NARROWS IT.
+//
+// `transmit()` already refuses an event whose row says `subject: 'required'`
+// and that carries none, and that refusal is MECHANICAL: there is nothing to
+// match against a stream's subjects, so the event can be delivered to nobody
+// or to everybody and neither is what was meant.
+//
+// **THIS IS THE OTHER KIND, AND IT IS A WARNING FOR EXACTLY THAT REASON.**
+// RISC's two identifier events say the subject MUST be an email address or a
+// phone number, because for those two the identifier IS the message — the
+// subject carries the OLD value and the payload carries at most the new one.
+// An `iss_sub` subject there is perfectly deliverable and merely wrong, and
+// refusing to send one would remove the ability to find out what a receiver
+// does with it, which is the whole reason this service exists.
+//
+// It is driven by `row.subjectFormats` rather than by the URI, so it is a
+// property of the table and not a branch naming a vocabulary.
+// ---------------------------------------------------------------------------
+function subjectAdvice(uri, subject) {
+  log.debug('Entering subjectAdvice(). ' + uri);
+  const warnings = [];
+  const row = EVENT_BY_URI[uri];
+  if (!row || !Array.isArray(row.subjectFormats) || !subject) {
+    log.debug('Leaving subjectAdvice(). Nothing to say.');
+    return warnings;
+  }
+  const format = String((subject || {}).format || '');
+  if (!format) {
+    warnings.push('"' + uri + '" wants a subject in one of these formats: ' +
+        row.subjectFormats.join(', ') + '. This one is a COMPLEX subject — ' +
+        'it has no `format` of its own — which names a person and possibly ' +
+        'a session, and this event is about an IDENTIFIER rather than about ' +
+        'either.');
+    log.debug('Leaving subjectAdvice(). Complex subject.');
+    return warnings;
+  }
+  if (row.subjectFormats.indexOf(format) < 0) {
+    warnings.push('"' + uri + '" says its subject MUST be one of ' +
+        row.subjectFormats.join(' or ') + ' and this one is "' + format +
+        '". It is SENT anyway — the event is perfectly deliverable and ' +
+        'merely wrong, and refusing would remove the ability to find out ' +
+        'what a receiver does with it. What is lost is the message itself: ' +
+        'the subject of these two events carries the identifier that ' +
+        'changed, so a subject naming the person instead says that ' +
+        'something about them moved without saying what.');
+  }
+  log.debug('Leaving subjectAdvice(). ' + warnings.length + ' warning(s).');
+  return warnings;
 }
 
 // ---------------------------------------------------------------------------
@@ -1004,6 +1520,11 @@ module.exports = {
   CAEP_EVENTS: CAEP_EVENTS,
   CAEP_EVENT_URIS: CAEP_EVENT_URIS,
   CAEP_COMMON_MEMBERS: CAEP_COMMON_MEMBERS,
+  RISC_EVENTS: RISC_EVENTS,
+  RISC_EVENT_URIS: RISC_EVENT_URIS,
+  RISC_COMMON_MEMBERS: RISC_COMMON_MEMBERS,
+  CREDENTIAL_TYPES: CREDENTIAL_TYPES,
+  subjectAdvice: subjectAdvice,
   EVENT_URIS: EVENT_URIS,
   EVENT_BY_URI: EVENT_BY_URI,
   STATUSES: STATUSES,
