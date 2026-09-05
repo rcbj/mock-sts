@@ -2914,7 +2914,27 @@ function respondToAction(req, res, target, result) {
     return;
   }
   const key = result.ok ? 'notice' : 'error';
-  const message = result.ok ? result.message : (result.errors || []).join(' ');
+  // `why` IS READ AS WELL AS `errors`, AND THAT IS NOT A CONVENIENCE.
+  //
+  // This console's own handlers refuse with `errors: [...]`; the XACML family's
+  // three — `policyAction()`, `editorAction()` and `pepAction()` in
+  // `xacml/xacml_admin.js` — refuse with a single `why`, which is the shape
+  // `xacml_store.js` and `xacml_editor.js` hand up to them. `/admin-api` was
+  // already given that translation (`xacmlAction()` above puts `why` into
+  // `errors`), and the CONSOLE was not — so every refusal on the three
+  // /admin/xacml pages redirected back with `error=` and nothing in it. The
+  // person got the page they had just posted from, unchanged, with no
+  // explanation, which reads exactly like a control that does nothing.
+  //
+  // It matters most where the editor's whole design rests on it: an edit that
+  // would leave a policy invalid is refused and the stored document is
+  // untouched, and the sentence saying so — which names the type error the
+  // author has to fix — was the part being dropped. Fixed HERE rather than at
+  // the three handlers, so that a fourth handler written in that shape cannot
+  // reintroduce it, and so the console and /admin-api cannot disagree about
+  // what a refusal said. Caught by tests/vendored/sts_xacml_editor.js.
+  const message = result.ok ? result.message
+    : ((result.errors || []).join(' ') || String(result.why || ''));
   // `&` when the target already carries a query string, `?` when it does not. The
   // tokens page sends the reader back to the page and filter the button was on, so
   // this is no longer always a bare path — and a second `?` does not start a second

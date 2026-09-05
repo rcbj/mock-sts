@@ -18,10 +18,11 @@ rule that governs them is `common/vendored/`'s: **edit the parent's copy, then
 overwritten by the next sync and never reaches the stack that gates that
 project.
 
-**THE FIVE JOBS MARKED `local: true` IN THAT MANIFEST ARE THE EXCEPTION, AND THE
-RULE IS EXACTLY INVERTED FOR THEM.** `sts_metadata.js`, `admin_api.js`,
-`sts_admin_api_operations.js`, `sts_admin_console.js` and
-`sts_delegated_permissions_example.js` drive this service's OWN
+**THE EIGHT JOBS MARKED `local: true` IN THAT MANIFEST ARE THE EXCEPTION, AND
+THE RULE IS EXACTLY INVERTED FOR THEM.** `sts_metadata.js`, `admin_api.js`,
+`sts_admin_api_operations.js`, `sts_admin_console.js`,
+`sts_delegated_permissions_example.js`, `sts_consent.js`,
+`sts_xacml_endpoints.js` and `sts_xacml_editor.js` drive this service's OWN
 `/admin` console and its `/admin-api`. The first four ran from the parent's
 suite until 2026-08-28 and were deleted there that day, on the argument that a
 test asserting something about this console belongs in the tree where a control
@@ -79,6 +80,7 @@ now two kinds of that plus one that is a different claim entirely:
 |---|---|---|
 | An IN-PROCESS test of this repository's own MODULE CONTRACTS | here | It requires this repository's modules and `node_modules` directly, and some of what it asserts is invisible to any caller over HTTP |
 | A test of this service's OWN `/admin` console or `/admin-api` | `tests/vendored/`, marked `local: true` | **Nothing stops it running over there, and it did until 2026-08-28.** It is here because the tree that ADDS a control to that console is the tree that should fail when the control loses its operation — an ownership argument rather than a capability one |
+| A CONSOLE CONTROL WITH A PROTOCOL CONSEQUENCE | `tests/vendored/`, marked `local: true` | The assertion spans both doors and cannot be made from a repository holding one of them. `sts_consent.js` grants a global consent through `/admin-api/consent` and watches a sign-in stop being asked; `sts_xacml_endpoints.js` and `sts_xacml_editor.js` build a policy through `/admin-api/xacml` — or by pressing buttons on `/admin/xacml/editor` — and then ask `/xacml/pdp` and `/xacml/protected` what changed. **The XACML pair had no choice about it**: a PDP with an empty repository answers NotApplicable to everything, so there is no question worth asking that endpoint until an authoring door has been used |
 
 There was a second row until 2026-08-26 — *an INTEGRATION test that needs
 several copies of this service*, which was `../federation-e2e/` and its own
@@ -236,7 +238,8 @@ Three things about the report runner are decisions rather than mechanics:
   container from the repository's own `docker-compose.yml`, and hands this
   runner its URL with `--service-url`; the jobs themselves are still plain node
   processes on this machine. About a minute plus the image build, most of the
-  minute being the browser job.
+  minute being the two browser jobs — `sts_admin_console.js`, which walks every
+  page, and `sts_xacml_editor.js`, which drives one page in depth.
 
   **THE LIFETIME RULE IS THAT WHOEVER STARTED IT STOPS IT**, and it is why
   `--service-url` exists rather than this runner learning to speak compose. A

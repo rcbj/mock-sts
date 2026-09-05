@@ -44,6 +44,33 @@ writer), `tests/xacml_alfa.js` (ALFA, both directions) and — since phase five 
 `xacml-pep/` and asks the container questions this process cannot answer about
 itself.
 
+**AND TWO OVER HTTP SINCE 2026-09-05, WHICH IS WHAT THOSE FIVE COULD NEVER
+COVER.** Between them the five hold the ENGINE to 455 cases, the store, the PIP,
+the JSON Profile, the editor's grammar and the container's shim — and they make
+NOT ONE HTTP REQUEST, so until these two existed every route in `xacml.js` and
+every form on the five console pages was uncovered. `tests/vendored/`
+`sts_xacml_endpoints.js` drives the seven `/xacml` endpoints and
+`sts_xacml_editor.js` drives `/admin/xacml/editor` in a real browser; both are
+this repository's own (`local: true`), and both live there rather than in the
+parent project's suite for one reason worth stating here, because it is a fact
+about THIS family: **a PDP with an empty repository answers NotApplicable to
+everything**, so there is no question worth asking `/xacml/pdp` until a policy
+exists, and over HTTP the only way to put one there is `/admin-api/xacml`. Every
+assertion in either file therefore spans an authoring door and a deciding door.
+
+Both work in a THROWAWAY TRUST REALM, which is not tidiness: `ou=policies` is
+per realm and a new realm's is EMPTY — the seeded policy is written once, in the
+default realm, at require time — so a realm gives them a repository whose whole
+contents they wrote, makes every count exact rather than "at least", makes the
+no-root state reachable at all, and keeps `xacml.enabled`, `xacml.remotePeps`,
+`xacml.pepBias` and `xacml.pepRequireCertificate` off the process while they are
+turned off and on. **The editor job needs the realm most**: the draft IS the
+stored policy, so a job editing in the default realm would be rewriting the
+seeded one, live, while every other job in the run decided against it.
+
+`sts_xacml_editor.js` found the thirteenth defect on its first run and it is
+listed below with the twelve.
+
 ## ALFA
 
 The third rendering of the model, and the one worth reading — forty lines of
@@ -121,6 +148,69 @@ edit loads the document, applies one change, serializes and writes back. There
 is nothing to lose when a browser closes and no second copy that could disagree
 with the stored one. The cost is that editing is LIVE, so the page says so and
 puts the disable control one click away.
+
+## What the editor can build, and the three things it cannot
+
+**Since 2026-09-05 the guided editor reaches the whole of the XACML 3.0 policy
+syntax this engine models.** Before that it built a `Policy` — rules, targets,
+matches, conditions, obligations, advice — and nothing else, while
+`xacml_xml.js` read and wrote considerably more. That gap was not a missing
+feature so much as **four defects, because the editor SERIALIZES THE WHOLE
+DOCUMENT ON EVERY EDIT**: a part of the syntax the reader skipped was not
+merely unread, it was deleted by the next rename.
+
+| Was | Is |
+|---|---|
+| A `PolicySet` drew as a policy with no rules, offered `add-rule`, accepted it, said "Rule added." and wrote a document without it — the writer serializes `children` and never looks at `rules` | `policySet` is a kind of its own with its own menu: an inline `Policy`, a nested set, a `PolicyIdReference` or a `PolicySetIdReference`, and the POLICY-combining algorithm list, which is a different set of URIs from the rule-combining one it is almost spelt the same as |
+| `set-expression-variable` was in the menu and there was no way to DEFINE a variable, so choosing it built `$v1`, the validator refused the document and the store declined the write | `VariableDefinition` is addable, renamable (**every reference is rewritten with it**) and removable, and the reference option is WITHDRAWN where the enclosing policy defines none |
+| Choosing `any-of`, `all-of`, `map` or the other four higher-order functions built an `<AttributeValue>` where a `<Function>` belongs — an expression the validator refuses, offered by the editor's own menu | a function-parameter argument arrives as a `<Function>` reference, and `map` gets a one-argument default because its function takes one value where the other six take a predicate of two |
+| An `AttributeSelector` could not be built, and a policy that HELD one lost its namespace bindings on the first edit — an unresolvable prefix is an empty bag, which is NotApplicable, which looks exactly like a policy that decided you may not | selectors are addable and editable (path, category, `ContextSelectorId`, `MustBePresent`, one namespace binding at a time), a `Match` may test one instead of a designator, and **the bindings are written back onto the element** |
+| `add-assignment` had been in the menu since the editor shipped and an assignment could not be SEEN, so the only way to correct a mistyped one was to delete the whole obligation | assignments are drawn, editable (`AttributeId`, `Category`, `Issuer`) and removable, and their value is an expression node of its own |
+| `Version`, `Issuer`, `ContextSelectorId`, `XPathCategory` and `MaxDelegationDepth` had no control anywhere; `MaxDelegationDepth` was read and never written | all of them are settable, and a `Version` that is not dot-separated numbers is refused HERE, because nothing else in this service would refuse it and somebody else's schema validator will |
+
+**`MustBePresent` is a `<select>` and not a checkbox, and that is the one piece
+of markup here worth arguing about.** An unchecked checkbox sends nothing, so
+the handler cannot tell "unchecked" from "this form does not edit that field" —
+and it has to keep the value for the second case, or the form that edits a
+Match's function would clear `MustBePresent` on every save. That is the
+difference between an absent attribute being an empty bag and being
+Indeterminate: between a policy that quietly does not apply and one that fails
+closed.
+
+**`XPathVersion` is REPORTED and never enforced.** Section 5.14 says the
+element MUST be present when a policy holds an `AttributeSelector` or an
+`xpathExpression`, and `xacml_validate.js` says nothing about it and never
+will — that file refuses what is CERTAINLY WRONG for every request, and this
+changes no decision this PDP makes, because there is one XPath engine here and
+it does not choose a dialect by URI. So the editor page names the policies that
+need one, beside the field that sets it. Refusing the write would be the editor
+inventing a rule the evaluator has not got; saying nothing would let somebody
+build a document here that this service is happy with and a schema validator
+elsewhere rejects.
+
+**THE THREE THINGS IT DOES NOT DO, and each is a decision rather than a gap:**
+
+* **The four combiner-parameter elements are carried, drawn and removable —
+  and no menu offers to add one.** Section C of the specification says none of
+  the twelve standard combining algorithms takes a parameter, so an Add button
+  would be the first control on this console that provably changes no decision.
+  Drawing them is a different question and comes out the other way: a document
+  may arrive carrying them through ALFA, an import or an `ldapmodify` straight
+  into `ou=policies`, and an element the editor did not draw would be one the
+  person could neither see nor delete while the writer faithfully kept it.
+* **`<PolicyIssuer>` is not implemented at all**, so a document carrying one
+  loses it here. It belongs to the administrative delegation profile, which
+  this PDP does not implement — and `MaxDelegationDepth` beside it is carried
+  and read by nothing, which the console says out loud rather than letting the
+  attribute imply otherwise.
+* **A variable may not be named with a dot in it.** XACML allows one; this
+  editor addresses a node by a dotted path, so `a.b` would produce a row that
+  cannot be edited or removed while the document itself stayed valid. Refused
+  at the point of naming, where it can still be explained.
+
+`tests/xacml_pap.js` carries all of it — 62 assertions added with the change,
+including the one that would have caught the policy-set defect: three children
+added, serialized, read back, and counted.
 
 **Every element arrives complete and valid** — a new rule has a Target and an
 Effect, a new Match has a function, a value and an attribute — because an
@@ -612,3 +702,34 @@ the same decision there as here on the same policy.
 So "the engine is a library with no I/O" stopped being a comment at the top of
 seven files and became something that is checked. That is worth more than the
 remote PEP it arrived with.
+
+## THE THIRTEENTH DEFECT, AND THE ONLY DOOR THAT COULD HAVE SHOWN IT
+
+`tests/vendored/sts_xacml_editor.js` found it on its first run, and it had been
+there since phase three: **every refusal on the three `/admin/xacml` pages
+redirected back to the page with `error=` and nothing in it.**
+
+The three action functions here — `policyAction()`, `editorAction()` and
+`pepAction()` — refuse with a single `why`, which is the shape `xacml_store.js`
+and `xacml_editor.js` hand up to them. `admin.respondToAction()` built the
+browser's message out of `errors`, which none of them sets. So the person got
+the page they had just posted from, unchanged, with no explanation — which reads
+exactly like a control that does nothing.
+
+**It was invisible from both of the places that look.** `/admin-api` had already
+been given the translation (`admin.xacmlAction()` puts `why` into `errors`), so
+every refusal was fully explained there and
+`tests/vendored/sts_admin_api_operations.js` was right to be satisfied. And
+`tests/xacml_pap.js` asserts the refusal the FUNCTION returns, which was correct
+the whole time. The defect lived in the two lines between them, and the only way
+to see it was to press a button in a browser and read the page that came back.
+
+It matters most exactly where this console leans on it hardest: the editor is
+LIVE, and the thing that makes that tolerable is that an edit which would leave
+a policy invalid is refused and the stored document is untouched. The sentence
+saying so — which names the type error the author has to fix — was the part
+being dropped.
+
+Fixed in `admin-ui/admin.js` rather than in the three handlers, so that a fourth
+handler written in that shape cannot reintroduce it and so that the console and
+`/admin-api` cannot disagree about what a refusal said.

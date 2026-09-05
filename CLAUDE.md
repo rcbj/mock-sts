@@ -38,7 +38,7 @@ files did not change; the paths did.
 | `oid4vc/` | OpenID4VCI, OpenID4VP, DID Core. |
 | `admin-ui/` | The console at `/admin`, the two roles that decide who may use it, **every setting drawn on the page for the protocol it configures** (2026-08-27 — `SETTING_HOMES` is the table, `/admin/config` keeps the rows belonging to no protocol and the index of the rest), and the TWO DRAWINGS in this service — `/admin/delegation/map` and `/admin/federation/map`, both laid out on the server. They share a palette, a hexagon and a text metric and NOTHING ELSE: one flattens a layered layout on purpose and the other is a layered layout, so each has its own renderer. `admin-ui/CLAUDE.md` argues why that is not duplication. **And since 2026-08-30 the CRYPTO REPORT** (`crypto_metadata.js`, `/admin/crypto-metadata`): what this service does when it signs, verifies, encrypts or decrypts, for every identity service it advertises, with every algorithm table READ FROM THE MODULE THAT PERFORMS THE ALGORITHM — the same argument `sts_metadata.js` makes about the router, one layer down. |
 | `mgmt-api/` | `/admin-api`, its generated OpenAPI document, and the explorer. |
-| `tests/` | **THE ONLY TEST DIRECTORY HERE**, and since 2026-08-28 it holds BOTH halves of this service's coverage. `tests/*.js` is the in-process half — assertions about this repository's own module contracts, `npm test`, no port and no container and under a second. **`tests/vendored/` is the protocol half**: fifteen jobs driven over HTTP against a CONTAINER built from this tree by `docker-compose.yml` (a throwaway in-process copy under `--no-docker`, and under coverage), plus the wallet modules five of them verify against. NINE are byte-identical copies of the parent project's mock-only jobs and are NOT edited here; **SIX are this repository's own** — the ones that drive this service's `/admin` console and `/admin-api`, marked `local: true` since 2026-08-28, with no copy over there to sync from and the editing rule inverted for them. `tests/vendored/MANIFEST.js` says which is which and where each copy came from, and `--vendor-check` reports drift in the nine. See *Tests* below for what changed and `tests/CLAUDE.md` for the rules that are not optional there. **`tests/tools/` is not tests**: the report generator, the coverage renderer, the compose-stack helpers (`compose.sh`, shared by both launchers) and the throwaway-service launcher `./local-run-tests.sh`, `./docker-run-tests.sh` and `./run-coverage.sh` drive — in a subdirectory precisely so that `run.js`'s discovery rule needs no exclusion list. **`tests/Dockerfile`, its own `.dockerignore` and `tests/run-tests-in-container.sh` are not tests either**: they are the RUNNER as a container, which `docker-compose-run-tests.yml` brings up beside the service so that a host with docker and nothing else runs all thirty-nine jobs — see *Tests* item 5. `federation-e2e/` sat beside it until trust realms made its three-container stack unnecessary; that test is `tests/federation_sso.js` in the parent project's suite now. |
+| `tests/` | **THE ONLY TEST DIRECTORY HERE**, and since 2026-08-28 it holds BOTH halves of this service's coverage. `tests/*.js` is the in-process half — assertions about this repository's own module contracts, `npm test`, no port and no container and under a second. **`tests/vendored/` is the protocol half**: seventeen jobs driven over HTTP against a CONTAINER built from this tree by `docker-compose.yml` (a throwaway in-process copy under `--no-docker`, and under coverage), plus the wallet modules five of them verify against. NINE are byte-identical copies of the parent project's mock-only jobs and are NOT edited here; **EIGHT are this repository's own** — the ones that drive this service's `/admin` console and `/admin-api`, marked `local: true` since 2026-08-28, with no copy over there to sync from and the editing rule inverted for them. `tests/vendored/MANIFEST.js` says which is which and where each copy came from, and `--vendor-check` reports drift in the nine. See *Tests* below for what changed and `tests/CLAUDE.md` for the rules that are not optional there. **`tests/tools/` is not tests**: the report generator, the coverage renderer, the compose-stack helpers (`compose.sh`, shared by both launchers) and the throwaway-service launcher `./local-run-tests.sh`, `./docker-run-tests.sh` and `./run-coverage.sh` drive — in a subdirectory precisely so that `run.js`'s discovery rule needs no exclusion list. **`tests/Dockerfile`, its own `.dockerignore` and `tests/run-tests-in-container.sh` are not tests either**: they are the RUNNER as a container, which `docker-compose-run-tests.yml` brings up beside the service so that a host with docker and nothing else runs all forty-one jobs — see *Tests* item 5. `federation-e2e/` sat beside it until trust realms made its three-container stack unnecessary; that test is `tests/federation_sso.js` in the parent project's suite now. |
 | `xacml/` | **XACML 3.0 and ALFA: the engine, the policy repository, the PIP, an embedded PEP and the PAP.** Fourteen DOM-free modules plus `xacml.js` and `xacml_admin.js`, the two that register routes — seven under `/xacml`, five console pages under `/admin/xacml`, seventeen operations under `/admin-api/xacml` — required at 23c. **`ou=policies` in the embedded directory IS the repository**, the way `ou=federations` is the federation register. **THE ONLY FAMILY HERE THAT ANSWERS A QUESTION ABOUT SOMEBODY ELSE'S BOUNDARY** — every other protocol authenticates or provisions somebody, and this one is handed a subject authenticated elsewhere and asked whether they may. Held to the VENDORED OASIS conformance suite (**454 of 455 mandatory cases**), which is **Apache-2.0 rather than this repository's MIT** and says so in `LICENSE.md`. **ONE MODEL, THREE RENDERINGS**: the core XML, the JSON Profile, and **ALFA** — which is a VIEW and never a second stored copy, and whose contract is that anything it writes it reads back *and the policy decides identically either way*, asserted on seven probes because a swapped comparison round-trips perfectly and decides the opposite. **The guided editor has NO JAVASCRIPT**: this console is `script-src 'none'`, so every "pick the next valid element" dropdown is computed on the server by the same code that validates the result. `xacml/CLAUDE.md` indexes the twelve defects the tests caught. **THE REMOTE PEP LANDED 2026-09-05 and its container is `xacml-pep/`, below** — what is in this directory is the PDP's side: `ou=peps`, three endpoints under `/xacml/pep`, a fifth console page, and the nudge, which is this repository's THIRD outbound request. |
 | `xacml-pep/` | **THE ONLY DIRECTORY HERE THAT IS NOT PART OF THE MOCK.** A second container: a remote XACML Policy Enforcement Point that holds its own copy of the engine, PULLS the policy repository from `/xacml/pep/policies` and decides in its own process. `server.js` does not require it and nothing here does; `docker compose --profile xacml up` starts it. **THE PULL IS THE CONTRACT** — the nudge this service sends on a change is an optimisation over the polling interval and never a replacement for it, which is what makes a third outbound requester affordable. The engine is copied out of `xacml/` AT BUILD TIME, so there is one copy of the evaluator in this tree; `tests/xacml_pep.js` asserts the Dockerfile's COPY set against the module list. **Its thirty-line `common/helpers.js` shim is the most valuable thing in phase five** — it is what makes "the engine is a library with no I/O" a checked claim rather than a comment at the top of seven files. `xacml-pep/CLAUDE.md` argues all of it. |
 | `postgres/` | **Two shell scripts the database container runs, and nothing else.** `generate-tls.sh` makes its server key pair on first start — the same decision every other key here follows, because a certificate committed to a repository is a private key committed to a repository — and `require-tls.sh` rewrites every `host` rule in `pg_hba.conf` to `hostssl` so that TLS is REQUIRED rather than merely available. Both are mounted into the image by `docker-compose.yml`; neither is run by this service. `persistence/CLAUDE.md` argues them. |
@@ -1138,10 +1138,10 @@ the process-wide state you touch.
 
 ```bash
 npm test                          # unchanged: one process, bunyan, under 2s
-./docker-run-tests.sh             # ALL 39 jobs, ENTIRELY IN CONTAINERS — the
+./docker-run-tests.sh             # ALL 41 jobs, ENTIRELY IN CONTAINERS — the
                                   # service AND the runner. Needs docker and
                                   # NOTHING else. What CI runs (see 5 below)
-./local-run-tests.sh              # ALL 39 jobs: the in-process suite, and the
+./local-run-tests.sh              # ALL 41 jobs: the in-process suite, and the
                                   # protocol jobs against a CONTAINER built
                                   # from this working tree
 ./local-run-tests.sh --no-docker  # the same set, with the service run on this
@@ -1192,20 +1192,22 @@ REST IS ARGUED.**
    They answer the gitlink problem the last section of this file describes:
    their suite drives the pinned `sts/` checkout, so a change made here is not
    covered by it until somebody bumps the pin. A run brings up a copy of this
-   tree and drives the fifteen jobs against it — in a CONTAINER since the
+   tree and drives the seventeen jobs against it — in a CONTAINER since the
    same day, which is item 4. About a minute plus the image build.
 
    **`--protocol` used to be needed and is now the default**, because without
    it the bare run was ten in-process files in three seconds and said "Tests
    passed" having driven no protocol endpoint, no admin console and no browser.
-   `--no-protocol` is the way back. **It runs the BROWSER job too, and there is
-   one** — `sts_admin_console.js`, a Selenium job since 2026-08-28 and the
-   admin console's only coverage against this working tree. This runner is
-   SERIAL, so there is never a second Chrome open; `--no-browser` leaves it out
-   and says so.
+   `--no-protocol` is the way back. **It runs the BROWSER jobs too, and there
+   are two** — `sts_admin_console.js`, a Selenium job since 2026-08-28 which
+   walks every page of the console, and `sts_xacml_editor.js` since 2026-09-05,
+   which drives ONE page in depth because the guided policy editor's forty forms
+   per render are markup rather than behaviour and the in-process suite that
+   holds its grammar cannot see them. This runner is SERIAL, so there is never a
+   second Chrome open; `--no-browser` leaves them out and says so.
 
    **And the jobs are COPIES here rather than read out of the parent**, so a
-   machine with only this repository on it runs all thirty-nine. It does NOT
+   machine with only this repository on it runs all forty-one. It does NOT
    replace bumping the pin, because it runs on a developer's machine and CI
    over there still drives what the gitlink names.
 2. **A VENDORED JOB CAN BE AHEAD OF THIS TREE, and vendoring changed what that
@@ -1239,10 +1241,10 @@ REST IS ARGUED.**
    read off the service itself and a container torn down at the last line is
    gone by the time the report says to look at it. `startStack()` already
    brought its own project down before bringing it up, so the next run meets
-   no leftover; `--tear-down` is the old behaviour. The fifteen jobs are node
+   no leftover; `--tear-down` is the old behaviour. The seventeen jobs are node
    processes on this machine exactly as they were, which is what keeps the
    loop short, what lets the five jobs that load this service's modules IN
-   PROCESS keep doing so, and what lets the browser job drive the Chrome that
+   PROCESS keep doing so, and what lets the browser jobs drive the Chrome that
    is already installed here.
 
    **What the container buys is that the thing under test is the IMAGE** — the
@@ -1298,7 +1300,7 @@ REST IS ARGUED.**
    `docker-compose-run-tests.yml` brings up two services on a private bridge —
    the mock from this repository's Dockerfile, and a runner built from
    `tests/Dockerfile` with node, a Chrome and this working tree in it — runs
-   all thirty-nine jobs against the service by its compose DNS name, and exits
+   all forty-one jobs against the service by its compose DNS name, and exits
    with the suite's status (`--exit-code-from tests`).
 
    **WHAT IT BUYS IS THAT THE HOST NEEDS DOCKER AND NOTHING ELSE**: no node, no
@@ -1307,7 +1309,7 @@ REST IS ARGUED.**
    2026-08-28 vendoring — the jobs became this repository's own files that day,
    and until this they still needed a developer's machine to run on. It is also
    what to reach for when a run is green here and red somewhere else: the two
-   launchers drive the SAME thirty-nine jobs through the same runner, so a
+   launchers drive the SAME forty-one jobs through the same runner, so a
    difference between them is a difference in the environment and nothing else.
 
    **THE TWO LAUNCHERS ARE NOT REDUNDANT AND NEITHER REPLACES THE OTHER.**
@@ -1339,10 +1341,10 @@ REST IS ARGUED.**
    image, same compose file, different shape, and its own compose project so
    that the two runs cannot reach each other's containers.
 
-Ten tests need only this service, and since 2026-08-28 they are OWNED by two
+Twelve tests need only this service, and since 2026-08-28 they are OWNED by two
 different repositories — which is the first thing to know about the table below,
 because every one of them but the last ran from the parent's suite before that
-date. **SIX are this repository's own**: `sts_metadata.js`, `admin_api.js`,
+date. **EIGHT are this repository's own**: `sts_metadata.js`, `admin_api.js`,
 `sts_admin_api_operations.js` and `sts_admin_console.js`, deleted over there and
 kept here, because each asserts something about this service's `/admin` console
 or its `/admin-api` and the tree that adds a control is the tree that should
@@ -1355,13 +1357,22 @@ protocol test and by the rule below belongs over there; the other half grants a
 GLOBAL CONSENT through `/admin-api/consent` and then watches a sign-in stop
 being asked, and the assertion that matters is that a console control changed
 what the AUTHORIZATION ENDPOINT does. A test with the grant in one repository
-and the sign-in in the other could not make it. **The other four are still the parent's**, and this repository
+and the sign-in in the other could not make it. **And `sts_xacml_endpoints.js`
+and `sts_xacml_editor.js`, written here on 2026-09-05, are here for that third
+reason and are the strongest case of it**: a PDP with an empty repository
+answers NotApplicable to everything, so there is no question worth asking
+`/xacml/pdp` until a policy exists, and the only way to put one there over HTTP
+is `/admin-api/xacml`. Every assertion in either file therefore spans a console
+door and a protocol door — a template built on `/admin-api` deciding at
+`/xacml/pdp`, a policy disabled on the console vanishing from what a remote PEP
+pulls, a rule built by pressing buttons on `/admin/xacml/editor` changing what
+`/xacml/protected` allows. **The other four are still the parent's**, and this repository
 holds copies of three of them — `sts_persistence_postgres.js` is not vendored,
 because it needs docker.
 
-**Fifteen jobs run from `tests/vendored/`** — the ten below that a lone mock
-can satisfy, plus five others — so they run against this working tree with no
-parent checkout present. The paths in the first column are where each file is
+**Seventeen jobs run from `tests/vendored/`** — the twelve below that a lone
+mock can satisfy, plus five others — so they run against this working tree with
+no parent checkout present. The paths in the first column are where each file is
 READ FROM here; for the four the parent still owns, that copy is not the source
 of truth.
 
@@ -1378,12 +1389,15 @@ of truth.
 | `tests/vendored/sts_admin_console.js` **(ours)** | **the `/admin` console itself, IN A REAL BROWSER since 2026-08-28: the gate, all thirty-eight pages, every link, every GET form and every button on them — and the value that comes back afterwards.** It was an HTTP job, and the argument for that (this console has no script on it, so a control IS a form and pressing a button IS posting it) is still true; what it missed is that a hand-built submission is the TEST's reading of the markup rather than the browser's, that the twenty-two GET forms had no POST target to walk and so were never checked at all, that the nested-`<form>` guard is a PARSER question the old file had to reason about instead of asking, and that a notice is not a value. Status codes and headers come from **WebDriver BiDi**, because `default-src 'none'` blocks a `fetch()` from the page — the thing under test. Plus: every link really visited, which covers the seven routes with no nav row by construction; the five handlers nothing had ever pressed, `/admin/rbac`'s own grant and revoke among them; refusals split into what the BROWSER will not send and what the handler will not accept; the realm switcher; and the browser's own console, which on this console must be empty |
 | `tests/vendored/sts_delegated_permissions_example.js` **(ours)** | **THE DELEGATED PERMISSION REGISTER AS A RING, AND THE ONE JOB HERE THAT LEAVES ITS WORK BEHIND ON PURPOSE.** `abcapp1`–`abcapp5` in the DEFAULT realm, each declared for OAuth 2.0 and OpenID Connect with its supporting fields filled in, each exposing `read` and `write` under a base URI of its own, and each granted both on THE NEXT ONE ROUND — `abcapp1`→`abcapp2`→`abcapp3`→`abcapp4`→`abcapp5`→`abcapp1`: five resources, ten permissions, ten grants. **It was a complete mesh of forty grants until 2026-09-01** and the file argues the change rather than merely recording it: the mesh was the stronger test and the weaker EXAMPLE, and this job is both — forty lines between five boxes is the one graph shape that looks the same however it is drawn and however it is wrong, and this example exists to be LOOKED at. What survives is the assertion that matters: every grant still resolves to the RIGHT resource among five whose bases differ only in a digit, so a lookup matching on a prefix, a host or the bare name is wrong for four of the five pairs. What replaced the mesh's arithmetic is an EXACT-LIST assertion per entry — `abcapp2` holding `abcapp4`'s `read` would keep every count right and be wrong about the only thing the example says. Plus the two halves landing on the right ENTRIES (a grant written to the resource instead of the client reads correctly on `/permissions` and finds nothing at the token endpoint), the PICTURE — five boxes, ten lines, `may-reach` on every one and `acts` zero everywhere, because a configured grant has been exercised nought times and the renderer colours `acts && !issued` as a refusal — and the TOKEN, audienced to the one base URI of five that was asked for (its own successor, the only one it holds anything on), carrying the bare names on its scope claim, and moving exactly two of the ten grants to `asked`. It is IDEMPOTENT (the identifiers are fixed, so every previous `abcapp*` is forgotten first) and it does not tear down, because the example exists to be READ at `/admin/delegation/allowed`. **Since 2026-09-02 it also asserts the GROUPING** — that the five are ONE group and that nothing else in the default realm is in it, which are two different failures (a partition too fine, and one too coarse) that a service with only these five configured could not tell apart, and that all five applications resolve to it, since every one of them is both a client and a resource. What it deliberately does NOT assert is the direction decision: a ring is connected whichever way you walk it |
 | `tests/vendored/sts_consent.js` **(ours)** | **THE CONSENT SCREEN, AND THE OVERRIDE THAT MAKES IT NOT APPEAR.** Mostly negatives, for `sts_dpop.js`'s reason: a screen that draws, takes an Allow and hands over a code looks finished and can be worth nothing. What it asserts is that a GET of the screen records NOTHING (or anything that prefetches a link has consented for somebody), that a consent id is spendable ONCE, that a consent asked of one person cannot be drawn OR answered by another's session and that every one of those refusals leaves the pending record answerable by the person it belongs to, that Deny records nothing and the refused scope is asked again, that a second request is silent and a new scope asks about ITSELF ALONE, that `prompt=none` answers `consent_required` and `prompt=consent` asks again without destroying what was already agreed. **And the half that is not drivable from the parent's suite and is why this file is here**: a delegated permission consented globally on an application's entry stops a person who has never been here being asked — with NOTHING written about them — while a second application asking for the same permission is still asked, and removing the override asks everybody again including the people it was covering |
+| `tests/vendored/sts_xacml_endpoints.js` **(ours)** | **THE SEVEN `/xacml` ENDPOINTS, IN A THROWAWAY TRUST REALM.** Until it existed every route in `xacml/xacml.js` was uncovered — the in-process XACML suite holds the ENGINE to 455 OASIS cases and makes not one HTTP request. What is here is the surface in front of it: a template built on `/admin-api` deciding at `POST /xacml/pdp` against an attribute the request never carried; four malformed requests refused **400 and never Indeterminate**, which is the distinction a PEP most needs, since an Indeterminate would be enforced by its bias; the embedded PEP's two biases disagreeing on the one answer they are supposed to disagree on (NotApplicable, reachable only in a realm whose repository is empty); an obligation this PEP cannot discharge turning a Permit into a refusal and the SAME Permit standing once it is renamed to the one it knows; a remote PEP's pull, its ETag, its 304, and a disabled policy reaching nobody; **a registration named from the client CERTIFICATE and never from the body**, on the registration and on the heartbeat alike, which is the one defect in this family that would be a security bug; a PEP an administrator disabled staying disabled when it reconnects; a policy save that does not wait on an unreachable PEP; and both off-switches answering 501 in the realm while the default realm goes on answering. Mutation-tested against six mutants |
+| `tests/vendored/sts_xacml_editor.js` **(ours)** | **THE GUIDED POLICY EDITOR, IN A REAL BROWSER.** `tests/xacml_pap.js` holds the editor's GRAMMAR in process; what it cannot see is whether any of it reaches a page — forty forms in one table, a hidden `path` per row, an `action` that is sometimes hidden and sometimes a `<select>`, and a nested-`<form>` hazard that is a parser question rather than a taste one. So this presses buttons: every row's menu equals the grammar's own answer for that row and Remove is drawn exactly where something may be removed; a Match offers no Add menu and its function list is the two-argument boolean predicates rather than the library; a rule stops offering a second Condition once it has one; an edit that would leave the policy invalid is refused, explained, and **the stored document is byte-for-byte what it was**, which is the property that makes a live editor tolerable. **And the assertion the file is for**: a rule built out of four form submissions makes `/xacml/protected` permit somebody it refused, alternatives are shown to be ORed and matches ANDed by watching that decision move, and removing the rule on the page brings the refusal back. It found one defect on its first run — every refusal on the three `/admin/xacml` pages redirected with an EMPTY `error=` — and was mutation-tested against four more |
 | `tests/sts_persistence_postgres.js` | **`persistence.mode=postgres`, and the only test anywhere that RESTARTS this service.** It starts its own database and its own mock, so it touches the shared one not at all. What survives — the realm registry with each realm's overrides, the directory in both realms, the appconfig overrides with their source — and, just as much, **what must not**: the signing key is regenerated, so the `kid` differs and a token minted before the restart is dead at introspection. Plus the two claims nothing else could check: that two processes on one database do NOT see each other's writes (`coordinates: false`, demonstrated rather than read back), and that a database that is not there leaves this service RUNNING out of its seeded directory. Skips, naming which, without docker or without a complete checkout to run |
 
 They are plain node scripts using `assert` and `bunyan`, and they take
-`WSTRUST_STS_URL` / `OID4VCI_ISSUER_URL` to locate the service. **Eight of the
-nine are driven over HTTP with no browser; `sts_admin_console.js` is the
-exception** and has been a Selenium job since 2026-08-28 — the reasoning is in
+`WSTRUST_STS_URL` / `OID4VCI_ISSUER_URL` to locate the service. **All but two
+are driven over HTTP with no browser; `sts_admin_console.js` and
+`sts_xacml_editor.js` are the exceptions** and the first has been a Selenium job
+since 2026-08-28 — the reasoning is in
 its own header and in `docs/test-suite-map.md` over there, and the short version
 is that a console whose every control is a form is exactly the case where the
 BROWSER is the independent implementation of what a form submits.
