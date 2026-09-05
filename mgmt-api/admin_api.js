@@ -4463,7 +4463,8 @@ const ROUTES = [
                  'caller can walk the tree, read the legal moves, and POST ' +
                  'one, without a second copy of the grammar.',
     mirrors: 'GET /admin/xacml/editor',
-    responseDescription: 'The policy as a tree of editable nodes.',
+    responseDescription: 'The policy as a tree of editable nodes, with the ' +
+                         'stored XML and the same policy rendered as ALFA.',
     responseSchema: { $ref: '#/components/schemas/XacmlEditor' },
     handler: function (req, res) {
       log.debug("Entering the management API XACML editor endpoint.");
@@ -4496,6 +4497,27 @@ const ROUTES = [
                      'a document that will not parse.\n\nThe FIRST policy in ' +
                      'an empty repository becomes the root, because a ' +
                      'repository with a policy and no root decides nothing.' },
+      { action: 'import-alfa', operationId: 'importXacmlAlfa',
+        summary: 'Create a policy from ALFA',
+        description: 'ALFA — the Abbreviated Language For Authorization — is ' +
+                     'the readable syntax for XACML: forty lines of XML are ' +
+                     'eight of ALFA. Send it as `alfa` and a name as ' +
+                     '`name`.\n\nIT IS PARSED, CONVERTED AND STORED AS ' +
+                     'XACML XML. The repository holds ONE representation, ' +
+                     'because two would be two documents that could disagree ' +
+                     '— GET /admin-api/xacml/editor renders the ALFA back ' +
+                     'from the model whenever you want to read it.\n\nEVERY ' +
+                     'ATTRIBUTE MUST BE DECLARED BEFORE IT IS USED. That is ' +
+                     'ALFA\'s own rule and it is the most useful refusal in ' +
+                     'the parser: a typo in an attribute name is otherwise a ' +
+                     'policy that quietly matches nothing, which looks ' +
+                     'exactly like a policy that is working and denying ' +
+                     'you.\n\nALFA IS AN OASIS COMMITTEE SPECIFICATION ' +
+                     'DRAFT, not a ratified standard — no conformance suite, ' +
+                     'no schema, no second implementation to disagree with. ' +
+                     'The contract offered is the one that can be kept: ' +
+                     'anything this service EMITS as ALFA it reads back, and ' +
+                     'the policy decides identically either way.' },
       { action: 'enable', operationId: 'enableXacmlPolicy',
         summary: 'Put a policy back into the decision',
         description: 'Sets `xacmlEnabled` on its directory entry.' },

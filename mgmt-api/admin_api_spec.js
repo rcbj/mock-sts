@@ -2530,6 +2530,12 @@ const SCHEMAS = {
       document: { type: 'string',
         description: 'The XACML XML as stored. The document is the truth; ' +
                      'everything else on the entry is derived from it.' },
+      alfa: { type: ['string', 'null'],
+        description: 'The same policy rendered as ALFA. EMITTED, not stored ' +
+                     '— ALFA is a view of the model here rather than a ' +
+                     'second copy of the policy, because a stored ALFA text ' +
+                     'and a stored XML one would be two documents that could ' +
+                     'disagree.' },
       tree: { type: 'array', items: openObject('One node.', {
         path: { type: 'string',
           description: 'The node\'s address, e.g. ' +

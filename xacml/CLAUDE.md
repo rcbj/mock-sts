@@ -1,13 +1,13 @@
 # xacml/ — the XACML 3.0 engine
 
-**Phases one to three are here: the ENGINE, the STORE, the PIP, a service
-surface and the PAP.** `server.js` requires `xacml.js` at 23c, four routes
-answer under `/xacml`, four console pages under `/admin/xacml`, twelve
+**Phases one to four are here: the ENGINE, the STORE, the PIP, a service
+surface, the PAP and ALFA.** `server.js` requires `xacml.js` at 23c, four
+routes answer under `/xacml`, four console pages under `/admin/xacml`, thirteen
 operations under `/admin-api/xacml`, and policies live in `ou=policies` in the
 embedded directory.
 
-**What is NOT here is ALFA and the remote PEP** — phases four and five. See
-*What is not here yet*.
+**What is NOT here is the remote PEP** — phase five. See *What is not here
+yet*.
 
 ## What is here
 
@@ -25,14 +25,59 @@ embedded directory.
 | `xacml.js` | The protocol routes: four under `/xacml`, plus the embedded PEP. |
 | `xacml_templates.js` | RBAC and ABAC starting points. **Adding one is a row in `TEMPLATES` and nothing else.** No DOM. |
 | `xacml_editor.js` | The editor's GRAMMAR: what may be added where, and how one edit is applied. **No DOM** — which is what lets the menus be asserted in node. |
+| `xacml_alfa.js` | ALFA read and written — the third rendering, and the one people want to look at. **No DOM.** |
 | `xacml_admin.js` | The four `/admin/xacml` console pages and their actions. |
 | `conformance/` | The vendored OASIS suite. `PROVENANCE.md` is the argument, `MANIFEST.js` the drift check. **Not edited here, ever.** |
 
-Three tests, all in-process, no port, no container:
+Four tests, all in-process, no port, no container:
 `tests/xacml_conformance.js` (the engine, against 455 cases somebody else
 wrote), `tests/xacml_service.js` (the store, the PIP, the JSON Profile and the
-PEP) and `tests/xacml_pap.js` (the templates, the editor grammar and the XML
-writer).
+PEP), `tests/xacml_pap.js` (the templates, the editor grammar and the XML
+writer) and `tests/xacml_alfa.js` (ALFA, both directions).
+
+## ALFA
+
+The third rendering of the model, and the one worth reading — forty lines of
+XML are eight of ALFA:
+
+```
+policy staffAccess {
+    apply denyUnlessPermit
+    rule allowStaff {
+        permit
+        target clause employeeType == "staff" and actionId == "GET"
+    }
+}
+```
+
+**It is an OASIS Committee Specification Draft, not a ratified standard.** No
+conformance suite, no schema, no second implementation to disagree with — a
+completely different footing from the engine. So the contract stated and
+asserted is the one that can actually be kept:
+
+> **Anything the emitter writes, the parser reads, and the policy decides
+> identically either way.**
+
+`tests/xacml_alfa.js` checks all three halves of that over every policy the
+templates build and the seeded one — stable bytes, still type-checks, **and
+the same decisions on seven probes**. The third is the one a round-trip test
+usually omits, and the only one that would catch a swapped comparison: `age >
+18` becoming `18 > age` round-trips perfectly and decides the opposite. That is
+what `mirrorOperator()` is for.
+
+**ALFA is a VIEW, never a second stored copy.** An imported policy is parsed,
+converted and stored as XACML XML; the editor renders the ALFA back from the
+model. A stored ALFA text beside a stored XML one would be two documents that
+could disagree.
+
+Three places the dialect is explicit where ALFA is vague, all argued in the
+file's header: **typed literals** (`date("2026-01-01")`, because ALFA has
+native syntax for four datatypes and nothing agreed for the other thirteen),
+**the three target levels** mapping onto `clause` / `or` / `and`, and
+**attributes declared before use** — which is ALFA's own rule and the most
+useful refusal in the parser, because a typo in an attribute name is otherwise
+a policy that quietly matches nothing and looks exactly like one that is
+working and denying you.
 
 ## The console
 
@@ -239,13 +284,8 @@ where somebody has to remember to wrap one.
 
 ## What is not here yet
 
-Phases four and five. Neither is started.
+Phase five, and one gap in the engine.
 
-* **ALFA** — `xacml_alfa.js`, a parser and an emitter over the same model, and
-  a third tab on the editor. The XML writer landed in phase three, so ALFA in →
-  model → XML out is now the whole of what an ALFA compiler is here. ALFA is an
-  OASIS **Committee Specification Draft** rather than a ratified standard, and
-  the page will say so — the way `docs/xmldsig-pqc.md` labels every draft URI.
 * **The remote PEP** — `xacml-pep/`, its own container, registering over mutual
   TLS **on the main port**, which already asks for a client certificate
   (`server.js`'s `requestCert: true`), so no new listener is needed. The
@@ -271,7 +311,8 @@ For the next person adding a console surface, following the shape
   row (its absence is what the boot warning was about), an `XACML` group of
   four in `SECTIONS` with a `blurb` each, and three helpers exported that had
   been private: `configFormsFor`, `configSettingsJson` and `respondToAction`.
-* `mgmt-api/admin_api.js` — three GETs and a POST with nine documented actions;
+* `mgmt-api/admin_api.js` — three GETs and a POST with ten documented actions
+  (`import-alfa` arrived in phase four);
   `mgmt-api/admin_api_spec.js` — `Xacml`, `XacmlPolicies` and `XacmlEditor`.
 * `sts_metadata.js` — **eight** `ENDPOINTS` rows, four of them console pages
   and four management API, which are again the ones a checklist forgets.
@@ -282,3 +323,22 @@ JSON counterpart of `configFormsFor()`. It is keyed by admin.js's own
 carry — correct for the pages that file generates, and a 500 for one drawn
 anywhere else. `configSettingsJson()` is the right function and is now
 exported beside the renderer it belongs to.
+
+## And what phase four cost, which was almost nothing outside this directory
+
+ALFA is a SYNTAX, not a second policy system — the model, the validator and the
+XML writer were already there — so it landed as one new module, one console
+`<details>`, one `import-alfa` action and its `/admin-api` operation. No new
+setting, no new route, no metadata row beyond the action's own.
+
+**One defect, and it is the same one twice.** The emitter first wrote a policy's
+`<Description>` as a `//` comment — and the tokenizer discards comments, so
+every explanation survived being read by a person and was DELETED by the next
+round trip. The XML reader had had exactly this defect a phase earlier. It is a
+`description = "..."` property now, which reads back.
+
+**The one thing a round trip through ALFA can still change**: a policy naming a
+LEGACY 1.0 or 1.1 combining algorithm comes back naming the 3.0 one. They share
+an ALFA name and they are genuinely different functions (see `xacml_pdp.js`), so
+this is a normalisation rather than a no-op. It is called out where
+`ALGORITHM_NAMES` is declared.

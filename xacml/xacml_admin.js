@@ -71,6 +71,7 @@ const store = require('./xacml_store');
 const editor = require('./xacml_editor');
 const templates = require('./xacml_templates');
 const validate = require('./xacml_validate');
+const alfa = require('./xacml_alfa');
 const pip = require('./xacml_pip');
 
 const esc = admin.esc;
@@ -279,6 +280,26 @@ app.get('/admin/xacml/policies', function (req, res) {
     '<table><tr><th>Name</th><th>PolicyId</th><th>Kind</th>' +
     '<th>Combining</th><th>State</th><th>Actions</th></tr>' + rows +
     '</table>' +
+    (writable
+      ? '<h2>Import ALFA</h2>' + admin.note(
+          '<p>ALFA is the readable syntax for XACML. Paste one here and it ' +
+          'is parsed, converted and STORED AS XACML XML — the repository ' +
+          'holds one representation, because two would be two things to ' +
+          'keep in step.</p>' +
+          '<p>Every attribute must be DECLARED before it is used. That is ' +
+          'ALFA\'s own rule and it is the most useful refusal in the ' +
+          'parser: a typo in an attribute name is otherwise a policy that ' +
+          'quietly matches nothing, which looks exactly like a policy that ' +
+          'is working and denying you. Open any policy in the editor to see ' +
+          'the shape.</p>',
+          'What this accepts') +
+        '<form method="post" action="/admin/xacml/policies">' +
+        hidden('action', 'import-alfa') +
+        '<p>Name ' + textField('name', 'imported', 24) + '</p>' +
+        '<textarea name="alfa" rows="14" cols="88" ' +
+        'placeholder="namespace example { ... }"></textarea>' +
+        '<p><button type="submit">Import</button></p></form>'
+      : '') +
     (templateForms
       ? '<h2>Create from a template</h2>' + admin.note(
           '<p>A template is the first twenty clicks of the editor already ' +
@@ -306,7 +327,7 @@ app.get('/admin/xacml/policies', function (req, res) {
 // turns those checks off with nothing failing.
 // ---------------------------------------------------------------------------
 const POLICY_ACTIONS = ['enable', 'disable', 'set-root', 'delete',
-                        'create-from-template'];
+                        'create-from-template', 'import-alfa'];
 
 function policyAction(body, req) {
   log.debug('Entering policyAction(). action=' + (body || {}).action);
@@ -319,6 +340,37 @@ function policyAction(body, req) {
              why: 'Unknown action "' + action + '". The ' +
                   numberWord(POLICY_ACTIONS.length) + ' are: ' +
                   POLICY_ACTIONS.join(', ') + '.' };
+  }
+
+  if (action === 'import-alfa') {
+    // ALFA IN, MODEL, XML OUT — which is the whole of what an ALFA compiler
+    // is here, and is why this action is nine lines rather than a subsystem.
+    // The document that gets STORED is XACML XML, because the store holds one
+    // representation and a second would be a second thing to keep in step.
+    let policy;
+    try {
+      policy = alfa.parse(String(body.alfa || ''));
+    } catch (error) {
+      log.debug('Leaving policyAction(). The ALFA would not parse.');
+      return { ok: false, why: error.message };
+    }
+    const document = xml.writePolicy(policy);
+    const isRoot = !store.root();
+    const written = store.write(name || 'imported', document,
+                                { isRoot: isRoot, enabled: true,
+                                  description: policy.description });
+    if (!written.ok) {
+      log.debug('Leaving policyAction(). The store refused.');
+      return written;
+    }
+    audit.audit({ action: 'xacml.policy.write', actor: '', protocol: 'XACML',
+                  detail: 'Imported "' + (name || 'imported') +
+                          '" from ALFA.' });
+    log.debug('Leaving policyAction(). Imported.');
+    return { ok: true,
+             what: 'Imported "' + (name || 'imported') + '" as ' + policy.id +
+                   '.' + (isRoot ? ' It is the root, because the repository ' +
+                                   'had none.' : '') };
   }
 
   if (action === 'create-from-template') {
@@ -434,6 +486,21 @@ app.post('/admin/xacml/policies', function (req, res) {
 // `xacml_editor.js`; every row carries the menu of what may legally be added
 // UNDER it, computed by the same process that will validate the result.
 // ---------------------------------------------------------------------------
+// The ALFA rendering, or a note saying why there is none. Never throws: this
+// is a VIEW, and a policy whose ALFA cannot be produced is still a policy the
+// page has to draw.
+function alfaOf(policy) {
+  log.debug('Entering alfaOf().');
+  try {
+    const text = alfa.write(policy);
+    log.debug('Leaving alfaOf(). ' + text.length + ' bytes.');
+    return text;
+  } catch (error) {
+    log.debug('Leaving alfaOf(). Could not be rendered.');
+    return '// This policy cannot be rendered as ALFA: ' + error.message;
+  }
+}
+
 function editorJson(name) {
   log.debug('Entering editorJson(). name=' + name);
   const rows = store.all();
@@ -463,7 +530,12 @@ function editorJson(name) {
                options: editor.optionsAt(parsed, row.path) };
     }) : [],
     problems: parsed ? validate.problemsIn(parsed) : [problem],
-    document: chosen.document
+    document: chosen.document,
+    // Emitted rather than stored. ALFA is a VIEW of the model here, not a
+    // second copy of the policy — a stored ALFA text and a stored XML one
+    // would be two documents that could disagree, which is the whole thing
+    // this directory is arranged to avoid.
+    alfa: parsed ? alfaOf(parsed) : null
   };
   log.debug('Leaving editorJson(). ' + json.tree.length + ' node(s).');
   return json;
@@ -672,6 +744,19 @@ app.get('/admin/xacml/editor', function (req, res) {
   const body = chooser + liveWarning + problems + explain +
     '<table><tr><th>Element</th><th>Kind</th><th>Add / remove</th></tr>' +
     rows + '</table>' +
+    '<details><summary>The same policy as ALFA</summary>' +
+    admin.note(
+      '<p>ALFA — the Abbreviated Language For Authorization — is the third ' +
+      'rendering of this policy and the one worth reading. Forty lines of ' +
+      'XML are eight of ALFA and the eight say the same thing.</p>' +
+      '<p>It is an OASIS <strong>Committee Specification Draft</strong> ' +
+      'rather than a ratified standard: there is no conformance suite for ' +
+      'it and no second implementation to disagree with. So the contract ' +
+      'here is the one that can actually be kept — <em>anything this emits, ' +
+      'it reads back, and the policy decides identically either way</em> — ' +
+      'and not that it reads every ALFA document in the world.</p>',
+      'What ALFA is') +
+    '<pre>' + esc(json.alfa || '') + '</pre></details>' +
     '<details><summary>The document as stored</summary><pre>' +
     esc(json.document) + '</pre></details>';
 
