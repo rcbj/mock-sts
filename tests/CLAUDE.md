@@ -18,12 +18,12 @@ rule that governs them is `common/vendored/`'s: **edit the parent's copy, then
 overwritten by the next sync and never reaches the stack that gates that
 project.
 
-**THE EIGHT JOBS MARKED `local: true` IN THAT MANIFEST ARE THE EXCEPTION, AND
+**THE NINE JOBS MARKED `local: true` IN THAT MANIFEST ARE THE EXCEPTION, AND
 THE RULE IS EXACTLY INVERTED FOR THEM.** `sts_metadata.js`, `admin_api.js`,
 `sts_admin_api_operations.js`, `sts_admin_console.js`,
 `sts_delegated_permissions_example.js`, `sts_consent.js`,
-`sts_xacml_endpoints.js` and `sts_xacml_editor.js` drive this service's OWN
-`/admin` console and its `/admin-api`. The first four ran from the parent's
+`sts_xacml_endpoints.js`, `sts_xacml_editor.js` and `sts_roles.js` drive this
+service's OWN `/admin` console and its `/admin-api`. The first four ran from the parent's
 suite until 2026-08-28 and were deleted there that day, on the argument that a
 test asserting something about this console belongs in the tree where a control
 is ADDED to that console — the tree that should go red when the control loses
@@ -908,3 +908,63 @@ restoring a *plausible* value is not restoring: `null` is right only in a
 process where `ldap_server.js` was never loaded, which is a fact about the file
 list rather than about the test. `applications.directoryInstalled()` exists so
 the honest restore is available; it is called by nothing in the service.
+
+## `roles.js` and `sts_roles.js`: the same feature, split on the usual line
+
+They landed together on 2026-09-05 and the split between them is the cleanest
+illustration of this directory's one rule — *can it be asserted by driving the
+running service over HTTP?*
+
+**`tests/roles.js` is in process because five of its assertions have no HTTP
+shape at all.** A gate with NO DECIDER installed (which is what `npm test`, the
+parent's in-process Kerberos jobs and the remote PEP container all are, and the
+state in which every issuance must be ALLOWED); a decider that THROWS, which
+must also allow, because an authorization subsystem that bricks a mock by being
+half-loaded is the worst thing to put in front of one; the three shapes an
+incoming roles claim can take; a directory that throws under a lookup; and the
+six built-in roles answered across their four contexts. A running service cannot
+be asked to have no decider — that is a property of how the process was started,
+which is the same line `config_realm_layer.js` and `crypto_module.js` sit on.
+
+**`tests/vendored/sts_roles.js` is a protocol job and is THIS repository's own**
+(`local: true`), for the third reason `sts_consent.js` gives and at its widest:
+every assertion in it spans an AUTHORING door and a DECIDING door. A role is
+made on `/admin-api/roles`, an application is narrowed on
+`/admin-api/applications`, and what that changes is what `/oauth2/token`,
+`/oauth2/authorize`, `/wstrust`, `/wsfed` and both SAML profiles answer. A test
+with the two halves in two repositories could not make the assertion that
+matters.
+
+### It runs in a throwaway realm, and the reason is sharper than tidiness
+
+`ou=roles` and `ou=applications` are both per realm, so a realm of its own gives
+the job a register whose entire contents it wrote — which is what makes "alice
+holds exactly one role" an exact claim rather than "at least one".
+
+**But the load-bearing reason is that this feature REFUSES people.** A job that
+narrowed an application in the DEFAULT realm and died before clearing it would
+leave every later job in the run signing in to a service that turned them away,
+and the failure would name the wrong file. Inside a realm nothing it does
+reaches anything else, and removing the realm takes the roles, the applications
+and the settings with it. `roles.enforceIssuance` is turned off and on inside it
+for the same reason — it is process-wide at the top level and realm-scoped
+there.
+
+### Mostly negatives, and one of them is about the ERROR CODE
+
+A service that issues a token to somebody who holds the role looks finished and
+can be worth nothing: it is what an unmodified service does for everybody. What
+is worth asserting is that somebody is REFUSED, that the refusal is in the
+protocol's own words, that the person beside them is not refused, and that
+clearing the requirement lets them back in — the only shape that distinguishes a
+working gate from a service refusing for some other reason.
+
+The one to keep when editing it: the token endpoint's refusal is read as the
+RFC 6749 error CODE (`access_denied`) and not as a 400. A gate that works and a
+handler that has fallen over both produce a 400, and only the code tells them
+apart.
+
+It carries a FLOOR on its own check count, for `sts_admin_console.js`'s reason:
+a section that stops being called takes its assertions with it and the run still
+says "passed", which is the one failure mode a suite cannot report about itself.
+Mutation-tested against eight mutants before it was committed.

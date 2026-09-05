@@ -139,6 +139,11 @@ const spMetadata = require('./sp_metadata');
 // own: `beginAuthentication()` sends the browser to authn.js's screen and back.
 const { sessionOf, endSession, beginAuthentication, notePresented } =
   require('../authn/authn');
+// THE ROLE GATE. A LEAF (rule 3) requiring only `helpers` and `config`, so it
+// can be required from 10a without moving a route or closing a cycle — which
+// is the whole reason `common/issuance_gate.js` exists rather than this module
+// reaching into `xacml/` at 23c. An unfilled decider answers "allowed".
+const gate = require('../common/issuance_gate');
 // The application registry, which lives under ou=applications in the embedded
 // directory. A library that registers no route, so requiring it here changes
 // nothing about the route order this module's position in server.js fixes.
@@ -1398,6 +1403,52 @@ function singleSignOn(req, res) {
   // site gives: this is the branch that HONOURS the session, and the two
   // above it — IsPassive with nothing usable, and a sign-in that came back
   // carrying `authn_error` — end in a Response carrying a status instead.
+  // THE ROLE GATE, asked once the session is known to be the one that will
+  // answer this request and before anything is minted. A refusal is a
+  // <samlp:Response> carrying a status and NOT a page on this service, for the
+  // reason the AuthnFailed branch above gives: section 3.2.2 has a status for
+  // this and a service provider's handling of it is worth exercising — a
+  // person who is refused should land back at the application that sent them,
+  // with the application knowing why.
+  //
+  // `Responder` with a second-level `RequestDenied`: the failure is at THIS
+  // end (the request was well formed and the identity provider declined it),
+  // which is what Responder means, and RequestDenied is the second-level code
+  // the specification gives for a request the responder refused to act on.
+  // AuthnFailed would be the wrong word — the person authenticated perfectly
+  // well and is not permitted to have an assertion for this service provider.
+  const roleAnswer = gate.check({
+    application: spEntityId,
+    kind: gate.ISSUANCE.SAML_ASSERTION,
+    subject: { kind: 'user', name: String((session.user || {}).username || ''),
+               authenticated: true },
+    claims: null
+  });
+  if (!roleAnswer.allowed) {
+    log.info('saml2: the issuance policy refused an assertion for "' +
+             String((session.user || {}).username) + '" to "' + spEntityId +
+             '". ' + roleAnswer.why);
+    pendingRequests.delete(String(params.rid || ''));
+    const denied = buildResponse({
+      issuer: idpEntityId, sp: spEntityId,
+      destination: acsUrl, inResponseTo: request.id,
+      status: STATUS_RESPONDER,
+      subStatus: 'urn:oasis:names:tc:SAML:2.0:status:RequestDenied',
+      statusMessage: roleAnswer.why
+    });
+    deliver(res, {
+      binding: wanted.binding, destination: acsUrl, field: 'SAMLResponse',
+      xml: denied.xml, relayState: relayState, issuer: idpEntityId,
+      spEntityId: spEntityId, inResponseTo: request.id,
+      note: { title: 'Refused by policy — SAML 2.0', who: 'the service provider',
+              sub: 'A <samlp:Response> carrying RequestDenied. The person ' +
+                   'signed in; the XACML issuance policy would not let this ' +
+                   'service provider have an assertion for them.' }
+    });
+    log.debug("Leaving singleSignOn(). RequestDenied.");
+    return;
+  }
+
   pendingRequests.delete(String(params.rid || ''));
   notePresented(session, 'SAML 2.0', req);
   issueSignInResponse(res, {

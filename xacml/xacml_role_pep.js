@@ -104,20 +104,76 @@ function issuancePolicyName() {
 }
 
 // ---------------------------------------------------------------------------
-// THE POLICY, OR WHY THERE IS NOT ONE.
+// THE BUILT-IN ISSUANCE POLICY, AND WHY THIS DOCUMENT IS NOT SEEDED.
+//
+// It was, for one afternoon, and the realm case is what killed it.
+// `ou=policies` is PER REALM and the seed is written once — at require time,
+// in the default realm — so a realm created five minutes later had no issuance
+// policy at all. Every application narrowed in that realm then met the
+// fail-closed branch below and was issued NOTHING, with a sentence naming a
+// policy the administrator had never deleted. A feature that is on by default
+// cannot have a state where creating a realm breaks it.
+//
+// The two alternatives were both worse. Seeding on `realms.onChange` puts a
+// policy in every realm's repository, which changes what `/xacml/policies`
+// answers, what a remote PEP pulls and what every count in
+// `tests/vendored/sts_xacml_endpoints.js` asserts — for a document that has
+// nothing to do with anybody else's boundary. Falling back to the DEFAULT
+// realm's copy couples two realms, which is the one thing the realm design
+// does not do.
+//
+// **SO THE POLICY IS BUILT IN AND A REPOSITORY ENTRY OVERRIDES IT.** Three
+// states, and each says something different:
+//
+//   no entry            the built-in document, identical to what the
+//                       `role-issuance` template builds — because it IS that
+//                       template, called here. Every realm has it, out of the
+//                       box, with nothing seeded and nothing to delete.
+//   an entry, enabled   that document. Somebody wrote one, and it wins.
+//   an entry, DISABLED  a deliberate act, and it does NOT fall back: somebody
+//                       took the issuance policy out of the decision, which is
+//                       exactly what the console's Disable button is for while
+//                       editing, and quietly evaluating a different document
+//                       instead would make that button a lie.
+//
+// The override is authored the ordinary way — `/admin/xacml/policies`, create
+// from the `role-issuance` template, named whatever `xacml.issuancePolicy`
+// says — so this costs no new control anywhere.
+//
+// **IT IS NOT SENT TO REMOTE PEPs**, which falls out of it not being in the
+// repository and is right rather than incidental: `GET /xacml/pep/policies`
+// carries the policies about somebody ELSE's boundary, and this one is about
+// this service's own issuance. A remote PEP has nothing to enforce with it.
 //
 // Answers `{ policy }` or `{ why }`. Kept apart from the decision below so
 // that "there is no policy" is a state with its own sentence rather than an
 // Indeterminate somebody has to interpret.
 // ---------------------------------------------------------------------------
+function builtInPolicy() {
+  log.debug('Entering builtInPolicy().');
+  const built = templates.build('role-issuance', {},
+                                { name: issuancePolicyName() });
+  if (!built.ok) {
+    // A DEFECT AND NOT A STATE. The template is in this repository and takes
+    // no required parameter, so it cannot fail for anything an administrator
+    // did — which is why this reads as a fault rather than as "there is no
+    // policy".
+    log.debug('Leaving builtInPolicy(). The template would not build.');
+    return { why: 'the built-in issuance policy could not be built from the ' +
+                  '`role-issuance` template, which is a defect in this ' +
+                  'service rather than a configuration: ' + built.why };
+  }
+  log.debug('Leaving builtInPolicy(). Built.');
+  return { policy: built.policy, name: issuancePolicyName(), builtIn: true };
+}
+
 function issuancePolicy() {
   log.debug('Entering issuancePolicy().');
   const name = issuancePolicyName();
   const row = store.read(name);
   if (!row) {
-    log.debug('Leaving issuancePolicy(). There is no such policy.');
-    return { why: 'there is no policy called "' + name + '" in the ' +
-                  'repository (xacml.issuancePolicy names it)' };
+    log.debug('Leaving issuancePolicy(). Using the built-in one.');
+    return builtInPolicy();
   }
   if (!row.enabled) {
     // A DISABLED POLICY IS A DELIBERATE ACT and reads differently from a
@@ -125,7 +181,11 @@ function issuancePolicy() {
     // is exactly what the console's Disable button is for while editing.
     log.debug('Leaving issuancePolicy(). It is disabled.');
     return { why: 'the policy "' + name + '" is DISABLED, so it is not ' +
-                  'evaluated' };
+                  'evaluated — and this does NOT fall back to the built-in ' +
+                  'one, because disabling it is a deliberate act and a ' +
+                  'button that quietly evaluated something else instead ' +
+                  'would be a lie. Enable it, or delete it and the built-in ' +
+                  'policy answers again' };
   }
   try {
     const policy = store.parseDocument(row.document);
@@ -222,9 +282,9 @@ function decide(asked) {
                  'every application that has not been narrowed requires ' +
                  'EVERYBODY, which everybody holds, so nothing is refused ' +
                  'that would have been permitted. An application whose entry ' +
-                 'names a role WILL be refused until the policy is back — ' +
-                 'create it from the `role-issuance` template on ' +
-                 '/admin/xacml/policies.');
+                 'names a role WILL be refused until it is back — enable it, ' +
+                 'or delete it on /admin/xacml/policies and the BUILT-IN ' +
+                 'issuance policy answers again.');
       }
       log.debug('Leaving decide(). No policy, and nothing narrowed.');
       return allowed('No issuance policy is loaded, and "' +
@@ -238,8 +298,10 @@ function decide(asked) {
       loaded.why + ' — so the restriction cannot be evaluated. It is refused ' +
       'rather than permitted BECAUSE somebody asked for it: an application ' +
       'that requires only ' + roles.DEFAULT_REQUIRED_ROLE + ' would have ' +
-      'been let through. Create the policy from the `role-issuance` template ' +
-      'on /admin/xacml/policies, or clear appRequiredRole on the application.',
+      'been let through. Enable or delete the policy on ' +
+      '/admin/xacml/policies — deleting it puts the BUILT-IN issuance policy ' +
+      'back, which is what a service that never had one uses — or clear ' +
+      'appRequiredRole on the application.',
       'NotApplicable', held, required, null);
   }
 
@@ -311,6 +373,28 @@ function refused(why, decision, held, required, answer) {
 }
 
 // ---------------------------------------------------------------------------
+// WHICH OF THE THREE STATES THE ISSUANCE POLICY IS IN, for the console.
+//
+// It answers an OBJECT and not the name, because the name is the one thing
+// /admin/roles already knows — `xacml.issuancePolicy` is a setting drawn on
+// that very page — and the three states read completely differently to
+// somebody looking at a refusal: the built-in document, an override somebody
+// wrote, and an override somebody disabled, which is the only one of the three
+// where a narrowed application is refused.
+// ---------------------------------------------------------------------------
+function issuancePolicyState() {
+  log.debug('Entering issuancePolicyState().');
+  const name = issuancePolicyName();
+  const loaded = issuancePolicy();
+  const out = { name: name, ok: !!loaded.policy,
+                builtIn: !!loaded.builtIn, why: loaded.why || '' };
+  log.debug('Leaving issuancePolicyState(). ' +
+            (out.ok ? (out.builtIn ? 'Built in.' : 'Overridden.')
+                    : 'Not evaluated.'));
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // A DRY RUN, FOR THE CONSOLE.
 //
 // The same decision, asked without anything being issued, so that
@@ -341,6 +425,27 @@ function preview(question) {
 // that never loads the XACML family — the gate answers "allowed" and this
 // service is what it always was.
 // ---------------------------------------------------------------------------
+// AND THE CONSOLE'S PREVIEW, which is admin.js's ELEVENTH slot. Filled from
+// here rather than that module requiring this one, and rule 3e's test answers
+// yes both ways round: a require from `admin-ui/admin.js` (18) to this file
+// would load the XACML engine there and — much worse — fill the DECIDER above
+// from the console, so a process that loaded the console and not
+// `xacml/xacml.js` would gate every issuance in the service with half this
+// family present. A require from here to `admin.js` would close a cycle,
+// because `xacml_admin.js` requires it for the page shell.
+//
+// It carries TWO functions and `admin.js` validates them together: a preview
+// that could be installed without `policy()` would be a page able to ask the
+// question and unable to say which document answered.
+const admin = require('../admin-ui/admin');
+if (typeof admin.setRolePreviewer === 'function') {
+  admin.setRolePreviewer({ preview: preview, policy: issuancePolicyState });
+} else {
+  log.warn('xacml: admin-ui/admin.js offers no setRolePreviewer(), so ' +
+           '/admin/roles cannot preview an issuance decision. Enforcement is ' +
+           'unaffected — the gate below is what decides.');
+}
+
 if (typeof gate.setDecider === 'function') {
   gate.setDecider(decide);
 } else {
@@ -351,6 +456,8 @@ if (typeof gate.setDecider === 'function') {
 
 module.exports = {
   decide: decide,
+  builtInPolicy: builtInPolicy,
+  issuancePolicyState: issuancePolicyState,
   preview: preview,
   issuancePolicy: issuancePolicy,
   issuancePolicyName: issuancePolicyName,

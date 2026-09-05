@@ -733,3 +733,125 @@ being dropped.
 Fixed in `admin-ui/admin.js` rather than in the three handlers, so that a fourth
 handler written in that shape cannot reintroduce it and so that the console and
 `/admin-api` cannot disagree about what a refusal said.
+
+## AND SINCE 2026-09-05 IT DECIDES THIS SERVICE'S OWN ISSUANCE
+
+`xacml_role_pep.js` is the exception to the sentence at the top of this file.
+Everything else here answers a question about SOMEBODY ELSE'S boundary — that is
+what a PDP is. This one turns THIS service's issuances into XACML requests and
+refuses the ones the PDP will not permit.
+
+It fills `common/issuance_gate.js`'s decider at require time, which is what arms
+every issuance site in the service: nine kinds of issuance, eight `gate.check()`
+calls, seven modules, all of them required BEFORE 23c. So `xacml/xacml.js`
+requiring this module is the line that turns a service which answers "allowed"
+to everything into one that asks a policy.
+
+**There is no second implementation of the rule.** No `if (roles.includes(...))`
+in `oauth2.js`, no membership test in the SAML builder. The reason somebody was
+refused is a document an administrator can read, edit, test on
+`/admin/xacml/decide` and see in the audit log — which is the whole point of
+routing an internal decision through a policy engine that is already here.
+
+### The request it builds is the contract
+
+| Category | Attribute | What it is |
+|---|---|---|
+| access-subject | `subject-id` | who is being authenticated |
+| | `urn:sts-mock:xacml:role` | the roles they hold |
+| | `urn:sts-mock:xacml:role-from-token` | roles read out of a token they PRESENTED |
+| resource | `resource-id` | the application |
+| | `urn:sts-mock:xacml:required-role` | what it demands |
+| action | `action-id` | `issue-access-token`, `start-session`, and the rest of `issuance_gate`'s `ISSUANCE` |
+
+**The subject is the party being authenticated and not always a person.** In a
+browser flow it is whoever signed in; in a `client_credentials` grant there is
+nobody there and it is the CLIENT. That is the case `common/roles.js` exists to
+be able to answer, and it is why an application is a first-class member of a
+role.
+
+**The application is the resource and also, often, the subject's employer.** A
+client asking for a token for itself appears in both categories, which is not a
+confusion: as a resource it is the thing being reached, as a subject it is the
+party whose roles are read. A policy may name either.
+
+### The policy is BUILT IN, called rather than seeded
+
+The `role-issuance` template answers by being CALLED. It is not written into
+`ou=policies` at startup, and that is a correction rather than a preference:
+`ou=policies` is per realm, so a seed written once in the default realm left
+every later realm unable to use roles at all. A repository entry named by
+`xacml.issuancePolicy` overrides it, so an administrator who wants to see and
+edit the document still can.
+
+### The two ways it can fail get OPPOSITE answers
+
+This is the part to read before changing anything in that file.
+
+**A missing or broken issuance policy fails OPEN for an application that
+requires only `EVERYBODY`, and CLOSED for one that requires anything else.**
+
+An application that names no required role is the default state of every
+application here. It requires `EVERYBODY`, everybody holds `EVERYBODY`, and the
+only answer the policy could give is Permit — so a missing policy costs it
+nothing, and refusing it would mean a service whose issuance policy was deleted
+stops issuing ANYTHING to ANYBODY, including the session an administrator needs
+to put the policy back. That is not a security posture, it is a locked room with
+the key inside.
+
+An application whose entry names `staff` is a different sentence entirely:
+somebody deliberately asked for a restriction, and answering Permit because the
+document implementing it is missing would be the one failure this feature must
+not have — a configured refusal silently not happening. So that one is refused,
+and the refusal NAMES the policy and the template that rebuilds it.
+
+**An error is not a decision.** A throw out of the engine is a defect, and
+`issuance_gate.js` answers a throw by allowing, for the locked-room reason. A
+Deny, a NotApplicable and an Indeterminate are not throws — they are answers,
+and every one of them refuses here, because the policy is `deny-unless-permit`
+and an issuance decision must not rest on a PEP's bias. **`xacml.pepBias` is
+deliberately not read here**: that setting belongs to the demo PEP at
+`/xacml/protected`, which exists to SHOW what bias does, and this one is
+enforcing.
+
+### It fills `admin.js`'s eleventh slot
+
+`setRolePreviewer()`, carrying TWO functions — the preview, and the thing that
+says WHICH POLICY answered. Validated together for `setLogoutReader()`'s reason:
+a preview installed without the explanation would be a page able to ask a
+question and unable to explain the answer.
+
+Rule 3e's test answers yes both ways round. A require from `admin.js` (18) to
+this module would load the engine there and — much worse — fill the issuance
+decider FROM THE CONSOLE, so a process that loaded the console and not
+`xacml/xacml.js` would gate every issuance in the service with half this family
+present. A require the other way closes a cycle, because `xacml_admin.js`
+requires `admin.js` for the page shell.
+
+## THE FOURTEENTH DEFECT: TWO CONTAINERS CLAIMING A PAGE THAT WAS NEVER WRITTEN
+
+`xacml_store.js` and `xacml_pep_registry.js` each carry a `SCHEMA` whose comment
+says it is "Published on `/admin/ldap/*` the way every other container's is".
+Neither was. The export was dead in the first since phase two and in the second
+since phase five, and `common/roles.js` copied the same comment on 2026-09-05
+and made three.
+
+The pages exist now — `/admin/ldap/policies` and `/admin/ldap/peps`, drawn by
+`ldap/ldap_server.js` beside the other six, because that module already requires
+both of these to fill their `setDirectory()` slots and therefore already holds
+both schemas. No new require, no cycle, no route moved.
+
+**What writing them exposed is the reason a dead export is worth chasing.** The
+store lower-cases every attribute name (`@ldapjs/attribute` does), and
+`ldap_server.js` un-lower-cases it through `learnName()` from a table each
+owning module contributes to — a merge `applications.js` has had for months and
+neither of these had. So the first draft of the policies page showed every
+policy's kind as `(unstated)` and, worse, **drew a DISABLED policy as enabled**,
+because a missing `xacmlEnabled` is not the string `FALSE`. Both are fixed by
+merging the schemas rather than by reading case-insensitively at each site: a
+lookup that silently misses answers something plausible, and these three pages
+are not the only readers of these entries.
+
+The booleans are `TRUE` and `FALSE` — RFC 4517's Boolean syntax, which is upper
+case, and what both of these modules write. A page comparing against `'false'`
+is a page that overstates what is switched on.

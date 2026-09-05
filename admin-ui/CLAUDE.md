@@ -2882,3 +2882,80 @@ too many.
 routinely a URL, `code` is `word-break: break-all`, and a fifteen-column table
 gives it about three characters of width — so the untruncated value wrapped to
 six lines and made every row that tall.
+
+## `/admin/roles` — the fourth register, and the ELEVENTH SLOT (2026-09-05)
+
+The page has two tables because a role has two relations, and drawing them as
+one is the mistake this page exists to avoid: **MEMBERSHIP** — who holds a role,
+stored on the role entry under `ou=roles` and edited here — and
+**REQUIREMENT** — which roles an application demands before anything is issued
+for it, stored as `appRequiredRole` on the APPLICATION entry and edited on the
+application's own page. An application appears in both and means opposite things
+in each. `common/CLAUDE.md` argues the split; this file's job is that the page
+never implies one is the other.
+
+Five actions: `create-role`, `delete-role`, `add-member`, `remove-member`,
+`describe-role`. Creating and populating are separate because a role is worth
+creating before anybody holds it.
+
+**The six BUILT-IN roles are drawn and are not editable**, because they are
+computed from the context of the decision rather than stored. That is worth a
+table of its own rather than a footnote: an empty `ou=roles` is the ORDINARY
+state of a service that is deciding every issuance against `EVERYBODY` and
+refusing nobody, and a page that showed nothing at all would read as a feature
+that had failed to load.
+
+### The preview is the same call the nine issuance sites make
+
+"Would alice be issued a token for this application" is answered by
+`common/issuance_gate.check()` through `xacml/xacml_role_pep.js` — the exact
+call `/oauth2/token` makes — so the page cannot drift from the enforcement. It
+arrives through **the ELEVENTH SLOT, `setRolePreviewer()`**, and that slot passed
+rule 3e's test in BOTH directions, which is the bar a proposal is held to:
+
+* A require from THIS file (18) to `xacml/xacml_role_pep.js` would load the
+  XACML engine here and — much worse — **fill `issuance_gate.js`'s DECIDER from
+  the console**, so a process that loaded the console and not `xacml/xacml.js`
+  would gate every issuance in the service with half that family present.
+* A require the other way closes a cycle, because `xacml_admin.js` requires this
+  module for the page shell.
+
+It carries TWO functions, validated together for `setLogoutReader()`'s reason: a
+preview installed without the thing that says WHICH POLICY answered would be a
+page able to ask a question and unable to explain the answer.
+
+**The preview's four query parameters are deliberately NOT in `LIST_PARAMS`.**
+They are a question somebody asked once, not a view — carrying them through a
+Remove button would re-ask the question on every write and put a stale answer
+above the table, which is the same reasoning `notice` and `error` are excluded
+under.
+
+### Nothing on this page is what makes a refusal happen
+
+Worth stating because the page invites the opposite reading. Whether anything is
+refused at all is `roles.enforceIssuance` and whether the XACML family is loaded
+at all — the two different "offs" `GET /admin-api/roles` reports as `enforced`
+and `gated`. This page narrows and populates; the decision is a policy, and the
+document that implements it is on `/admin/xacml`.
+
+## The directory group grew to EIGHT pages (2026-09-05)
+
+`/admin/ldap/roles`, `/admin/ldap/policies` and `/admin/ldap/peps` joined the
+five that moved in on 2026-09-01. They are `SECTIONS` rows with a `path`, a
+`label` and a `blurb` like every other page, and they are DRAWN by
+`ldap/ldap_server.js` — the arrangement `/admin/sts-metadata` has had since
+2026-08-24, and the reason `DIRECTORY_PAGE_NAMES` is checked WHOLE when
+`setDirectoryPages()` is filled.
+
+They are the layer beneath three pages that already exist — `/admin/roles`,
+`/admin/xacml` and `/admin/xacml/peps` — which is exactly the test the group
+heading was written for: *does the heading name more than the page under it
+does?* Each of the three publishes the container's SCHEMA, which is the thing
+its console twin has no room for and which this schemaless directory has nowhere
+else to say.
+
+`ldap/CLAUDE.md` carries what writing them exposed, and it is worth knowing here
+too because it is a hazard for the ninth: the store lower-cases attribute names,
+so a page reading `xacmlEnabled` off an entry gets `undefined` — and a
+comparison against `'false'` then draws a DISABLED policy as enabled. The fix is
+in `learnName()`, not at the reading site.

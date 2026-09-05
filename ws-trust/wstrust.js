@@ -62,6 +62,11 @@ const stats = require('../common/admin_stats');
 // library that registers no route, so it cannot move anything in the require
 // order this module sits in.
 const applications = require('../common/applications');
+// THE ROLE GATE. A LEAF (rule 3) requiring only `helpers` and `config`, so a
+// require from 7 — the first protocol module in the route order — moves no
+// route and closes no cycle. See `common/issuance_gate.js`; an unfilled
+// decider answers "allowed".
+const gate = require('../common/issuance_gate');
 // The delegation register (/admin/delegation). Two of the eight mechanisms that
 // page knows are this module's — OnBehalfOf and ActAs — and they are the two
 // where nothing is checked at all, which is a fact the page states beside the
@@ -537,6 +542,40 @@ function handleRst(rawBody, contentType, options) {
       subject = renewNamed;
     }
   }
+  // THE ROLE GATE, and this is the one issuance site here where the
+  // application may be ABSENT and that is not an error. AppliesTo is optional
+  // in an RST, and a token with no audience restriction is a state this
+  // service deliberately allows — so there is no application to have a
+  // requirement, and `issuance_gate.check()` answers "allowed" for a call that
+  // names none. Its header says why that is the honest answer rather than a
+  // hole: this service issues nothing to nobody, so a call with no application
+  // is a caller that does not know who it is serving.
+  //
+  // THE SUBJECT MAY BE `anonymous`, which is this protocol's own word and not
+  // a missing value — a Renew with no credential is renewing somebody else's
+  // token. `authenticated` follows the credential and not the name, so an
+  // anonymous Renew is decided as an unauthenticated subject and can be
+  // refused by ALL_UNAUTHENTICATED_USERS, which is the one place in this
+  // service besides the sign-in screen where that role means anything.
+  //
+  // A REFUSAL IS A SOAP FAULT, because that is the only answer this protocol
+  // has: an RST is answered with an RSTR or with a Fault, and an RSTR carrying
+  // no token would be a success that issued nothing.
+  const roleAnswer = gate.check({
+    application: audience,
+    kind: gate.ISSUANCE.WSTRUST_TOKEN,
+    subject: { kind: 'user', name: String(subject || ''),
+               authenticated: subject !== 'anonymous' },
+    claims: null
+  });
+  if (!roleAnswer.allowed) {
+    log.info('wstrust: the issuance policy refused a token for "' +
+             String(subject) + '" to "' + audience + '". ' + roleAnswer.why);
+    log.debug("Leaving the RST handler. The issuance policy refused it.");
+    return { status: 403, version: version,
+             body: soapFault(version, roleAnswer.why) };
+  }
+
   const tokenType = (tokenTypeReq === JWT_TOKEN_TYPE) ? JWT_TOKEN_TYPE : SAML2_TOKEN_TYPE;
   const tok = buildToken(tokenType, subject, audience, lifetimeMin);
 

@@ -88,6 +88,14 @@ const applications = require('../common/applications');
 // For one thing only: whether the main port is an HTTPS listener, which decides
 // the Secure attribute on the session cookie below.
 const config = require('../common/config');
+// THE ROLE GATE. A LEAF (rule 3): it registers nothing and requires only
+// `helpers` and `config`, so this require cannot move a route and cannot close
+// a cycle — which is the whole reason `common/issuance_gate.js` exists rather
+// than this module reaching into `xacml/`, which is at 23c and would bring
+// seven `/xacml` routes and five console pages to position 8. In a process
+// that never loaded the XACML family the gate answers "allowed" and this
+// screen behaves exactly as it did.
+const gate = require('../common/issuance_gate');
 // For one decision: whether ending a session should revoke the refresh tokens
 // issued on it (RFC 9700 section 2.2.2). The policy is that module's, with the
 // rest of the mode; the session and the token registry are here, which is why
@@ -2287,6 +2295,39 @@ app.post(LOGIN_PATH, function (req, res) {
   if (!passwordless && String(body.password || '') === 'invalid') {
     log.debug("Leaving the authentication endpoint. The reserved password was used, so the form is shown again.");
     return sendLoginPage(res, loginPage(base, record, 'Authentication failed for ' + username + '.'));
+  }
+
+  // THE ROLE GATE, AND IT IS ASKED BEFORE THE SECOND FACTOR RATHER THAN AFTER
+  // IT. A person who holds none of the roles this application requires is not
+  // going to be signed in whatever their security key says, and asking them to
+  // perform a ceremony first would be a screen that takes a credential it has
+  // already decided to ignore.
+  //
+  // THE SUBJECT IS NOT AUTHENTICATED YET, and `authenticated: false` says so
+  // rather than flattering the request. That is what makes
+  // ALL_UNAUTHENTICATED_USERS a role somebody can be refused BY at this door —
+  // it is the one point in this service where the distinction is real, since
+  // every other issuance happens after a session exists. A policy that wants
+  // the other reading matches on the roles the register answers, which are the
+  // same either way.
+  //
+  // A REFUSAL IS THIS PAGE AGAIN WITH THE REASON ON IT, because there is
+  // nowhere else to send them: `record.returnTo` is a path on THIS service
+  // belonging to the protocol module that started the sign-in, and bouncing
+  // somebody back into an authorization endpoint that would refuse them a
+  // second time is a loop. The protocol's own refusal happens at its own door
+  // — `access_denied` at /oauth2/authorize — for a session that already exists.
+  const roleAnswer = gate.check({
+    application: String(record.application || ''),
+    kind: gate.ISSUANCE.SESSION,
+    subject: { kind: 'user', name: username, authenticated: false },
+    claims: null
+  });
+  if (!roleAnswer.allowed) {
+    log.info('authn: the issuance policy refused a session for "' + username +
+             '" at "' + String(record.application) + '". ' + roleAnswer.why);
+    log.debug("Leaving the authentication endpoint. The issuance policy refused the session.");
+    return sendLoginPage(res, loginPage(base, record, roleAnswer.why));
   }
 
   // The security key, in whichever role. On the second-factor path the password

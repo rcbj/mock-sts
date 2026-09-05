@@ -70,6 +70,25 @@
 //    designator it meets and the parser refuses a name it has not seen — which
 //    is the single most useful refusal in this file, because a typo in an
 //    attribute name is otherwise a policy that quietly matches nothing.
+//
+// 4. A BARE NAME MAY ALSO BE A FUNCTION, AND THAT IS WHAT A HIGHER-ORDER
+//    FUNCTION TAKES. `anyOfAny(stringEqual, a, b)` passes the FUNCTION
+//    `string-equal` as an argument — a `<Function>` element in XACML, not an
+//    `<AttributeValue>` and not a designator — and the seven higher-order
+//    functions this engine implements are the only place one appears. The
+//    emitter has always written it as the bare short name, which is the only
+//    spelling ALFA has; the parser read it as an attribute reference and
+//    refused the document, so `anyOfAny` round-tripped in one direction only.
+//    It was found the day the first policy here used one — the `role-issuance`
+//    template, whose whole condition is an intersection test.
+//
+//    **A DECLARATION WINS.** A name that is BOTH declared as an attribute and
+//    the short name of a function is the attribute, because the declaration is
+//    something somebody wrote in this document on purpose. The emitter makes
+//    sure the two can never collide from its side: `collectAttributes()` will
+//    not hand a designator a short name that a function already owns, and
+//    numbers it instead. Point 3's refusal is unchanged for every name that is
+//    neither — it just says so about both kinds now.
 // ---------------------------------------------------------------------------
 
 const { log } = require('../common/helpers');
@@ -238,7 +257,14 @@ function collectAttributes(policy) {
     // `...:resource:role` — and giving both the name `role` would make the
     // second declaration silently replace the first, so a policy would read an
     // attribute out of the wrong category. Numbered instead.
-    while (order.some(function (one) { return one.name === name; })) {
+    // AND NOT A NAME A FUNCTION ALREADY OWNS. A bare word in an expression is
+    // an attribute reference OR a function reference (header point 4), and the
+    // parser resolves it by looking at the declarations first — so a
+    // designator called `stringEqual` would shadow the function of that name
+    // for the whole document and turn a higher-order argument into a bag. It
+    // is vanishingly rare and costs one comparison to make impossible.
+    while (order.some(function (one) { return one.name === name; }) ||
+           FUNCTION_BY_SHORT_NAME[name]) {
       name = base + n;
       n += 1;
     }
@@ -809,7 +835,10 @@ function parse(text) {
         'The attribute "' + name + '" is used at line ' +
         (token ? token.line : '?') + ' and never declared. ALFA references ' +
         'attributes by a short name; the category, id and type come from an ' +
-        '`attribute ' + name + ' { ... }` declaration.' +
+        '`attribute ' + name + ' { ... }` declaration. It is not the name of ' +
+        'a function this engine implements either, which is the OTHER thing ' +
+        'a bare word may be — the first argument of a higher-order function ' +
+        'such as `anyOfAny`.' +
         (Object.keys(attributes).length
           ? ' Declared here: ' + Object.keys(attributes).sort().join(', ') +
             '.'
@@ -819,6 +848,25 @@ function parse(text) {
              attributeId: declared.attributeId,
              dataType: declared.dataType, issuer: null,
              mustBePresent: false };
+  }
+
+  // A BARE WORD IN AN EXPRESSION IS ONE OF TWO THINGS, and header point 4
+  // argues the order they are tried in: an attribute the document DECLARED,
+  // or — where nothing declared it — the short name of a function, which is
+  // what the seven higher-order functions take as their first argument. Only
+  // a name that is neither reaches the refusal, which is point 3's and is the
+  // most useful one in this file.
+  function nameReference(name, token) {
+    if (attributes[name]) {
+      return designatorFor(name, token);
+    }
+    const uri = FUNCTION_BY_SHORT_NAME[name];
+    if (uri) {
+      log.debug('nameReference(): "' + name + '" is the function ' + uri +
+                '.');
+      return { kind: 'function', functionId: uri };
+    }
+    return designatorFor(name, token);
   }
 
   // --- expressions ---------------------------------------------------------
@@ -879,7 +927,7 @@ function parse(text) {
         }
         return { kind: 'apply', functionId: uri, args: args };
       }
-      return designatorFor(token.value, token);
+      return nameReference(token.value, token);
     }
     throw model.syntaxError('Unexpected "' + token.value + '" at line ' +
                             token.line + '.');
@@ -897,24 +945,31 @@ function parse(text) {
     return left;
   }
 
-  function conjunction() {
-    let left = comparison();
-    while (is('&&') || is('and')) {
+  // A CHAIN OF `&&` OR `||` IS ONE n-ARY APPLY AND NOT A NEST OF TWO-ARGUMENT
+  // ONES, and that is worth the four extra lines. XACML's `and` and `or` take
+  // any number of arguments, every template here that builds one builds it
+  // n-ary, and the emitter writes `(a || b || c)` for all three shapes — so a
+  // left-associative parse read that back as `or(or(a, b), c)`, which DECIDES
+  // identically and re-emits as `((a || b) || c)`. The contract in this file's
+  // header is that a round trip is byte-identical, not merely equivalent, and
+  // an ALFA edit that silently re-bracketed every condition it touched would
+  // make the XML diff of a policy somebody changed one word in unreadable.
+  function chain(operand, functionId, symbol, word) {
+    const args = [operand()];
+    while (is(symbol) || is(word)) {
       next();
-      const right = comparison();
-      left = { kind: 'apply', functionId: F1 + 'and', args: [left, right] };
+      args.push(operand());
     }
-    return left;
+    return args.length === 1 ? args[0]
+      : { kind: 'apply', functionId: functionId, args: args };
+  }
+
+  function conjunction() {
+    return chain(comparison, F1 + 'and', '&&', 'and');
   }
 
   function expression() {
-    let left = conjunction();
-    while (is('||') || is('or')) {
-      next();
-      const right = conjunction();
-      left = { kind: 'apply', functionId: F1 + 'or', args: [left, right] };
-    }
-    return left;
+    return chain(conjunction, F1 + 'or', '||', 'or');
   }
 
   // The function a comparison means, chosen from the DECLARED TYPE of

@@ -1763,6 +1763,84 @@ const SCHEMAS = {
                         items: openObject('One attested agent.', {}) }
     }),
 
+  // THE THREE ADDED ON 2026-09-05. Each of these containers' owning modules
+  // published a SCHEMA whose comment said it was drawn under `/admin/ldap/*`,
+  // and for three of them no page had ever been written — the export was dead
+  // in `common/roles.js`, `xacml/xacml_store.js` and
+  // `xacml/xacml_pep_registry.js`. The pages exist now, so rule 7 owes each of
+  // them an operation here.
+  DirectoryRoleList: openObject(
+    'The MEMBERSHIP half of the role register as the directory holds it. The ' +
+    'other half is not in this container: which roles an application DEMANDS ' +
+    'is `appRequiredRole` on the application entry, so nothing here refuses ' +
+    'anybody by itself. `builtIn` names the six roles that are COMPUTED and ' +
+    'in no container at all, which is why an empty `roles` array is the ' +
+    'ordinary state rather than the feature being off.',
+    Object.assign({
+      baseDn: { type: 'string' },
+      container: { type: 'string', description: 'The ou=roles DN.' },
+      count: { type: 'integer' },
+      matched: { type: 'integer' },
+      shown: { type: 'integer' },
+      max: { type: 'integer', description: 'The cap, roles.maxRoles.' },
+      filter: openObject('What was asked for; null where nothing was.', {}),
+      sourceOfTruth: { type: 'string' },
+      builtIn: { type: 'array', items: { type: 'string' },
+                 description: 'The six built-in role names. They have no ' +
+                              'entry here and never will.' },
+      schema: openObject('The object classes and the attributes, read out of ' +
+                         'common/roles.js.', {}),
+      roles: { type: 'array', items: openObject('One role entry, whole.', {}) }
+    }, PAGING_PROPERTIES)),
+
+  DirectoryPolicyList: openObject(
+    'The XACML policy repository as the directory holds it — `ou=policies` IS ' +
+    'the repository. A WRITE HERE SKIPS THE TYPECHECKER, which is not true of ' +
+    'any other door into it: every write through /admin/xacml and ' +
+    '/admin-api/xacml is statically validated so that a policy which does not ' +
+    'typecheck is refused rather than answering Indeterminate on every ' +
+    'request, and an ldapmodify reaches the entry directly. Nothing caches ' +
+    'these entries.',
+    Object.assign({
+      baseDn: { type: 'string' },
+      container: { type: 'string', description: 'The ou=policies DN.' },
+      count: { type: 'integer' },
+      matched: { type: 'integer' },
+      shown: { type: 'integer' },
+      max: { type: 'integer', description: 'The cap, xacml.maxPolicies.' },
+      filter: openObject('What was asked for; null where nothing was.', {}),
+      sourceOfTruth: { type: 'string' },
+      schema: openObject('The object classes and the attributes, read out of ' +
+                         'xacml/xacml_store.js.', {}),
+      policies: { type: 'array',
+                  items: openObject('One policy entry, whole, including the ' +
+                                    'document itself.', {}) }
+    }, PAGING_PROPERTIES)),
+
+  DirectoryPepList: openObject(
+    'The remote Policy Enforcement Points that have registered with this PDP. ' +
+    'Almost every attribute is a RECORD this service wrote rather than ' +
+    'configuration somebody typed — an identity here was taken from the ' +
+    'CLIENT CERTIFICATE the PEP presented and never from the body it sent. ' +
+    'The two that are not a record are `xacmlPepEnabled`, which an ' +
+    'administrator sets and a reconnecting PEP does not clear, and ' +
+    '`xacmlPepNotifyUrl`. An empty `peps` array is not a feature that is off: ' +
+    'a PEP pulls the repository and converges without ever registering.',
+    Object.assign({
+      baseDn: { type: 'string' },
+      container: { type: 'string', description: 'The ou=peps DN.' },
+      count: { type: 'integer' },
+      matched: { type: 'integer' },
+      shown: { type: 'integer' },
+      max: { type: 'integer', description: 'The cap, xacml.maxPeps.' },
+      filter: openObject('What was asked for; null where nothing was.', {}),
+      sourceOfTruth: { type: 'string' },
+      schema: openObject('The object classes and the attributes, read out of ' +
+                         'xacml/xacml_pep_registry.js.', {}),
+      peps: { type: 'array',
+              items: openObject('One registered PEP, whole.', {}) }
+    }, PAGING_PROPERTIES)),
+
   DirectoryService: openObject(
     'What the embedded directory IS right now, as opposed to what it is SET ' +
     'to be — which is GET /admin-api/ldap. The two disagree on a host whose ' +
@@ -4029,6 +4107,14 @@ const TAG_DESCRIPTIONS = {
   Groups: 'The embedded LDAP directory\'s groups. A group here GRANTS ' +
           'NOTHING: no token, assertion, ticket or PAC carries one and no ' +
           'endpoint reads one.',
+  Roles: 'Who holds a role, and what requires one. A role is a name a ' +
+         'person, a GROUP or an APPLICATION can be mapped into, and holding ' +
+         'one is what an ISSUANCE is decided on — which is the whole ' +
+         'difference from Groups above, where a group grants nothing. The ' +
+         'decision is made by the XACML PDP against a policy, never by an ' +
+         '`if` in an issuance site, so a refusal is a document somebody can ' +
+         'read. It is not Admin roles either: those are two directory groups ' +
+         'that grant the /admin console and nothing else.',
   Tokens: 'What has been issued, and the revocation of the three kinds that ' +
           'can be revoked.',
   SCIM: 'The SCIM 2.0 provisioning endpoints under /scim/v2 — what they have ' +

@@ -96,6 +96,10 @@ const { log, logArtifact, STS, xmlEscape, genId, iso, baseUrlOf, randomId,
 // presented one against. They shared a value until config.js split them and
 // still default to the same string.
 const config = require('../common/config');
+// THE ROLE GATE. A LEAF (rule 3) requiring only `helpers` and `config`, so a
+// require from 10 moves no route and closes no cycle. See
+// `common/issuance_gate.js`; an unfilled decider answers "allowed".
+const gate = require('../common/issuance_gate');
 const { buildSamlAssertion } = require('../saml/saml2');
 const { buildSaml11Assertion } = require('../saml/saml11');
 // The session, from the service that owns it. This module has a sign-in screen
@@ -845,6 +849,34 @@ function signIn(req, res, params) {
 
 function issueSignInResponse(req, res, params, session, realm, wreply, tokenType) {
   log.debug("Entering issueSignInResponse(). tokenType=" + tokenType);
+
+  // THE ROLE GATE, first thing in the one funnel every sign-in response goes
+  // through — before the registry sighting below, because that call records a
+  // token having been ISSUED and nothing has been. A refusal is a PAGE, for
+  // this profile's usual reason and stated once more because it is the reason
+  // this file refuses everything else the same way: section 13 has no error
+  // response at all, a sign-in request is a browser navigation, and there is
+  // nothing to redirect an error to. 403 rather than 400 — the request was
+  // well formed and the answer is about who is asking.
+  const roleAnswer = gate.check({
+    application: realm,
+    kind: gate.ISSUANCE.WSFED_TOKEN,
+    subject: { kind: 'user', name: String((session.user || {}).username || ''),
+               authenticated: true },
+    claims: null
+  });
+  if (!roleAnswer.allowed) {
+    log.info('wsfed: the issuance policy refused a token for "' +
+             String((session.user || {}).username) + '" to "' + realm + '". ' +
+             roleAnswer.why);
+    log.debug("Leaving issueSignInResponse(). The issuance policy refused it.");
+    return wsfedError(res, 403, 'Refused by policy', roleAnswer.why,
+      '<p>The person is signed in. The XACML issuance policy would not let ' +
+      'this relying party have a token for them &mdash; the roles a ' +
+      '<code>wtrealm</code> requires are on its application entry, and who ' +
+      'holds a role is on <a href="/admin/roles">/admin/roles</a>.</p>');
+  }
+
   // THE APPLICATION. wtrealm is WS-Federation's name for the relying party, and
   // this is the point at which this service has decided to issue it a token —
   // every refusal above answered instead. It is recorded here rather than at the

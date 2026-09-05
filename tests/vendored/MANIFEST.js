@@ -151,6 +151,7 @@ const JOBS = [
   { file: 'sts_dpop.js',                 browser: false },
   { file: 'sts_jws_verification.js',     browser: false },
   { file: 'sts_metadata.js',             browser: false, local: true },
+  { file: 'sts_roles.js',                browser: false, local: true },
   { file: 'sts_saml11.js',               browser: false },
   { file: 'sts_saml_encryption.js',      browser: false },
   { file: 'sts_userinfo_protected.js',   browser: false },
