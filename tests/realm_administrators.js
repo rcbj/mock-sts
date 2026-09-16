@@ -236,9 +236,14 @@ function childMain() {
     const refused = function (st, p, body, query) {
       return scope.refusalFor(st, p, body || null, query || {});
     };
+    // `/admin/kerberos/principals` LEFT THE SERVICE PAGES on 2026-09-15: a
+    // trust realm has a Kerberos realm, a principal database and keys of its
+    // own, so its people and service principals are the realm administrator's
+    // to manage. What is still the service's is per SETTING — the two sockets
+    // and the development trust — and is asserted below.
     note(refused(realmState, '/admin/tls/trust') &&
          refused(realmState, '/admin/persistence') &&
-         refused(realmState, '/admin/kerberos/principals') &&
+         !refused(realmState, '/admin/kerberos/principals') &&
          !refused(realmState, '/admin/tokens') &&
          !refused(realmState, '/admin/tlsx'),
          'service pages are refused a realm authority at a segment boundary, ' +
@@ -276,7 +281,20 @@ function childMain() {
          // A per-process row that no prefix above names: the rule reads the
          // table's own `perProcess` flag rather than a list.
          refused(realmState, '/admin/config',
-                 { action: 'set', key: 'spiffe.maxRecordedConnections' }),
+                 { action: 'set', key: 'spiffe.maxRecordedConnections' }) &&
+         // KERBEROS, PER KEY SINCE 2026-09-15. The rows a realm's principal
+         // database is built from are the realm administrator's — it has a
+         // Kerberos realm of its own — and the two SOCKETS and the
+         // development-mode trust are still the service's. This was the
+         // `krb5.` prefix until that date, which refused all of them.
+         !refused(realmState, '/admin/config',
+                  { action: 'set', key: 'krb5.realm' }) &&
+         !refused(realmState, '/admin/config',
+                  { action: 'set', key: 'krb5.enabled' }) &&
+         refused(realmState, '/admin/config',
+                 { action: 'set', key: 'krb5.kdcPort' }) &&
+         refused(realmState, '/admin/config',
+                 { action: 'set', key: 'krb5.trustedRealm' }),
          'settings naming the service are refused by name wherever they are ' +
          'posted, and a realm\'s own are not',
          JSON.stringify(settings && settings.settings));

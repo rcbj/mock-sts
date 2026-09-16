@@ -160,11 +160,21 @@ function checksTable(checks) {
 // is behind, and what a client has to do — which is the part a real intranet
 // site never tells you and the part that is always wrong.
 // ---------------------------------------------------------------------------
-const SPN = exchange.SPN;
+// A FUNCTION AND NOT A CONSTANT SINCE 2026-09-15. `exchange.SPN` became a
+// getter for the AMBIENT realm when `krb5.servicePrincipal` became a setting a
+// trust realm may carry, and reading it once here froze the DEFAULT realm's SPN
+// into every page this file draws — so `/realm/acme/spnego` advertised
+// `HTTP/web.example.com@ACME.EXAMPLE.COM`, a principal that exists in no realm,
+// and a client that believed it asked for a ticket nobody can issue.
+function spn() {
+  log.debug("Entering spn().");
+  log.debug("Leaving spn().");
+  return exchange.SPN;
+}
 
 app.get('/spnego', function (req, res) {
   log.debug('Entering GET /spnego.');
-  const principal = SPN + '@' + principals.REALM;
+  const principal = spn() + '@' + principals.REALM;
   if (String(req.query.format || '').toLowerCase() === 'json') {
     log.debug('Leaving GET /spnego. JSON.');
     return res.status(200).json({
@@ -333,7 +343,7 @@ function detailFor(verdict) {
         'the client is expected to know the rest already.</p><p>What the ' +
         'client has to work out for itself, with no help from this exchange: ' +
         'that the service principal name is <code>' +
-        xmlEscape(SPN) + '</code>, which realm that is in, and where that ' +
+        xmlEscape(spn()) + '</code>, which realm that is in, and where that ' +
         'realm&rsquo;s KDC is.</p>';
       break;
     case 'wrong-scheme':
@@ -440,7 +450,7 @@ function acceptedPage(verdict) {
   const inner = '<h1>' + HEADINGS.accepted[1] + '</h1>' +
     '<div class="ok">Authenticated as <strong>' +
     xmlEscape(verdict.client || 'unknown') + '</strong> to <code>' +
-    xmlEscape(SPN) + '</code>.</div>' +
+    xmlEscape(spn()) + '</code>.</div>' +
     '<p>This is the protected content. Getting here took a Kerberos AP-REQ ' +
     'inside an RFC 4121 GSS token inside an RFC 4178 negotiation inside an ' +
     'RFC 4559 HTTP header &mdash; four layers, of which HTTP shows you one.' +
@@ -539,7 +549,13 @@ app.get('/spnego/protected', function (req, res) {
 });
 
 module.exports = {
-  SPN: SPN,
+  // A getter since 2026-09-15, for `spn()`'s reason above: the SPN belongs to
+  // the AMBIENT realm.
+  get SPN() {
+    log.debug("Entering SPN().");
+    log.debug("Leaving SPN().");
+    return spn();
+  },
   SUPPORTED_MECHS: SUPPORTED_MECHS,
   // THE SHELL AND THE CHECK TABLE, for `spnego_authn.js` and for nothing else.
   //

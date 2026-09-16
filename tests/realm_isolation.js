@@ -681,6 +681,47 @@ function checkChildStores(t) {
 }
 
 // ---------------------------------------------------------------------------
+// 5b-ii. KERBEROS'S THREE STORES (2026-09-15).
+//
+// They were `realms.sharedMap({ scope: 'shared' })` — declared shared ON
+// PURPOSE, and this file's own rule was satisfied by the word: the KDC answered
+// in no realm, so its principal database, the acceptor's replay cache and the
+// SPNEGO negotiations it held were the process's. Each trust realm now has a
+// KDC of its own, told apart by the Kerberos realm name, so all three are
+// `realms.map()` and the DECLARATION is what says so.
+//
+// The declaration is what is checked, for the reason this file checks scim's
+// and federation's that way: `handleFor()` reports the scope a store was
+// declared with, and a store declared shared cannot be made per realm by any
+// amount of care at its call sites. The BEHAVIOUR — a realm's principals are
+// its own, a realm removed takes them with it — is
+// `tests/kerberos_realm_routing.js`, which drives the KDC.
+// ---------------------------------------------------------------------------
+function checkKerberosStores(t) {
+  log.debug("Entering checkKerberosStores().");
+  t.log.info('the Kerberos stores');
+  // Required for their declarations rather than their behaviour, which is why
+  // the two socket owners are loaded here and never started.
+  require('../kerberos/krb5_principals.js');
+  require('../kerberos/krb5_service.js');
+  require('../kerberos/spnego_exchange.js');
+  [['krb5.principals', 'the principal database'],
+   ['krb5.replayCache', 'the acceptor\'s replay cache'],
+   ['spnego.pending', 'the unfinished SPNEGO negotiations']].forEach(
+      function (pair) {
+    const handle = realms.handleFor(pair[0]);
+    t.check(!!handle, pair[0] + ' is a declared store');
+    if (handle) {
+      t.equal(handle.scope, 'realm',
+              pair[1] + ' (' + pair[0] + ') is declared PER REALM — it was ' +
+              'scope: \'shared\' until each trust realm had a KDC of its own',
+              String(handle.scope));
+    }
+  });
+  log.debug("Leaving checkKerberosStores().");
+}
+
+// ---------------------------------------------------------------------------
 // 5c. GNAP (2026-09-12): twelve stores in `gnap/gnap_store.js`, the approver
 // index in `gnap/gnap_signals.js` and the counters in `gnap/gnap_monitor.js`.
 //
@@ -797,6 +838,7 @@ function run(t) {
   checkPurge(t);
   checkScimCounters(t);
   checkSignalRegisters(t);
+  checkKerberosStores(t);
   checkGnapStores(t);
   checkChildStores(t);
   checkDefaultUnchanged(t);

@@ -2043,10 +2043,13 @@ random keys are the same pair under `ou=applications`, `krb5ServiceKeys` and
 `krb5ServiceKeyInfo`, which are rows in `applications.js`'s schema.
 `kerberos/CLAUDE.md` argues the design; three things are this file's.
 
-* **THE SLOT IS PINNED TO THE DEFAULT REALM**, with `inDefaultRealm()`, for a reason
-  that is not the console roster's: the KDC's sockets and `krb5.realm` are the
-  process's, so its people are the default realm's people. Six functions, validated
-  whole — the person read and write, the service read and write, and the two lists.
+* **THE SLOT FOLLOWS THE AMBIENT REALM SINCE 2026-09-15**, where all six functions
+  were wrapped in `inDefaultRealm()` before it. The reason for the pin — *the KDC's
+  sockets and `krb5.realm` are the process's, so its people are the default realm's
+  people* — went when each trust realm got a Kerberos realm and a principal database
+  of its own (#33): the KDC ENTERS the realm a request is for, so the person it then
+  reads is that realm's. Six functions, validated whole — the person read and write,
+  the service read and write, and the two lists.
 * **THE WRITES GO STRAIGHT ONTO THE STORED ENTRY**, both halves of a pair in one
   `touchDirectory(dn)`, so the public half never describes keys the secret half does
   not hold. For an application entry that bypasses `updateApplication()` on purpose:

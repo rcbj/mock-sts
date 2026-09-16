@@ -5116,8 +5116,11 @@ const ENDPOINTS = [
           'one set of people, groups and applications for every realm, since ' +
           'LDAP answers on a socket with no path in it — so OAuth client ' +
           'registrations, SAML service provider entries and the two admin ' +
-          'roles are shared, as are Kerberos, the two TLS listeners and ' +
-          'SPIFFE\'s four sockets. What a realm separates is what this ' +
+          'roles are shared, as are the two TLS listeners and SPIFFE\'s four ' +
+          'sockets. KERBEROS left that list on 2026-09-15: a realm with a ' +
+          'krb5.realm of its own and krb5.enabled on has a KDC, a principal ' +
+          'database and keys of its own, on the shared port 88, routed by the ' +
+          'realm name inside each request. What a realm separates is what this ' +
           'service ISSUES about them, and everything it holds while doing ' +
           'it. It keeps no store of its own: the registry is ' +
           'common/realms.js\'s and a realm\'s settings go through the same ' +
@@ -5220,15 +5223,19 @@ const ENDPOINTS = [
   { path: '/admin/kerberos', group: 'Admin', name: 'Kerberos settings',
     specs: ['rfc4120', 'rfc3961', 'rfc4178', 'rfc4559', 'ms-kkdcp', 'ms-sfu'],
     effect: 'changes the KDC, and most of it only on the next start',
-    what: 'NON-SPEC. The nineteen krb5.* settings: the realm and the two raw ' +
+    what: 'NON-SPEC. The twenty krb5.* settings: whether this realm\'s KDC ' +
+          'answers at all (krb5.enabled, off on a new trust realm), the ' +
+          'realm and the two raw ' +
           'ports, the clock skew and the deliberate clock OFFSET that makes ' +
           'KRB_AP_ERR_SKEW reachable without touching a system clock, the ' +
           'one password every user account shares, the names that stay ' +
           'unknown so KDC_ERR_C_PRINCIPAL_UNKNOWN is reachable too, the ' +
           'long-term keys behind krbtgt and the inter-realm trust, ' +
           's2kparams, and the two that decide whether a ticket may start a ' +
-          'browser session at /authn/spnego. Most are restart-only because ' +
-          'the principal database is built from them at startup. Add ' +
+          'browser session at /authn/spnego. Most are restart-only for the ' +
+          'PROCESS because its principal database is built from them at ' +
+          'startup — and ten of those are settable on a TRUST REALM, whose ' +
+          'database is built when its Kerberos is turned on. Add ' +
           '?format=json.' },
   { path: '/admin/ldap', group: 'Admin', name: 'LDAP / LDAPS settings',
     specs: ['rfc4511', 'rfc4512', 'rfc4513', 'rfc4519', 'rfc8446'],

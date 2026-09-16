@@ -2721,8 +2721,12 @@ function truststoreJson(req) {
 // which is the question somebody arrives with after a KDC refused a person
 // with "sign in once".
 //
-// It answers the same under every realm prefix, for the truststore's reason:
-// the KDC is the PROCESS's, so its principals are the default trust realm's.
+// **IT ANSWERS FOR THE REALM IT IS READ IN SINCE 2026-09-15.** It read the same
+// under every realm prefix while the KDC was the process's; a trust realm now
+// has a Kerberos realm and a principal database of its own, so the people and
+// service principals here are that realm's — and a realm whose `krb5.enabled`
+// is off has none, which `kerberos` below says rather than showing an empty
+// table that looks like a service with nothing in it.
 // ---------------------------------------------------------------------------
 function kerberosPrincipalsJson(req) {
   log.debug("Entering kerberosPrincipalsJson().");
@@ -2743,10 +2747,15 @@ function kerberosPrincipalsJson(req) {
   log.debug("Leaving kerberosPrincipalsJson(). " + people.length + " " +
       "person(s), " +
             services.length + " service principal(s).");
+  const kerberos = krb5Principals.kerberosRealmOf();
   return {
     installed: krb5PersonKeys.installed(),
     realm: krb5Principals.REALM,
-    trustRealm: realms.DEFAULT_ID,
+    trustRealm: realms.currentId(),
+    // WHETHER THIS REALM HAS A KDC AT ALL, and if not why (2026-09-15):
+    // `enabled` is the realm's own `krb5.enabled`, `served` the Kerberos realm
+    // names its KDC answers for, and `reason` the sentence behind an off one.
+    kerberos: kerberos,
     productKdc: krb5PersonKeys.productKdc(),
     personKeys: krb5PersonKeys.personKeysEnabled(),
     enctypes: krb5Principals.KDC_ETYPES.slice(),
@@ -2779,8 +2788,15 @@ function kerberosPrincipalsJson(req) {
         : 'This KDC is a DEVELOPMENT one: every user is keyed from ' +
           'krb5.userPassword and people are never given stored keys. Service ' +
           'principals created here are used in both modes.',
-      realm: 'ONE KDC FOR THE PROCESS: its principals are the default trust ' +
-        'realm\'s people and applications whatever realm this page is read in.',
+      realm: kerberos.enabled
+        ? 'A KDC PER TRUST REALM: these are the people and applications of ' +
+          'the trust realm this page is read in, as principals of its own ' +
+          'Kerberos realm ' + (kerberos.kerberosRealm || '') + '.'
+        : 'THIS TRUST REALM HAS NO KDC: ' + (kerberos.reason ||
+          'krb5.enabled is off for it') + '. Set krb5.realm on the realm ' +
+          'and turn ' +
+          'krb5.enabled on to give it one; port 88 routes a request by the ' +
+          'Kerberos realm name inside it.',
       window: 'Keys are derived AFTER a password is set or verified and take ' +
         'a few tens of milliseconds to land; until they do, the KDC refuses ' +
         'the person rather than accepting an older key.',

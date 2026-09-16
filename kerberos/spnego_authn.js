@@ -88,15 +88,16 @@
 // does not satisfy the default realm's `/oauth2/authorize`, exactly as every
 // other sign-in here behaves.
 //
-// **What is NOT per realm is the KDC**, which is one of the three socket
-// families `realmSupport()` reports as shared: a raw TCP socket on 88 has no
-// path to put a realm segment in and no name inside the protocol to put one in
-// either. So every realm here trusts the SAME principal database and the same
-// long-term keys, and a ticket good for one realm's door is good for all of
-// them. That is stated rather than left to be discovered — it is not a hole,
-// because a Kerberos realm and a trust realm are two different words for two
-// different things and this service has never claimed to give each of the
-// second one a KDC of its own.
+// **AND SINCE 2026-09-15 THE KDC BEHIND IT IS PER REALM TOO.** This paragraph
+// read *what is NOT per realm is the KDC … so every realm here trusts the SAME
+// principal database and the same long-term keys, and a ticket good for one
+// realm's door is good for all of them*. It is not: each trust realm whose
+// Kerberos is on has a Kerberos realm name of its own, and the acceptor behind
+// this door refuses a ticket from a realm the door's trust realm does not
+// serve (STS-KRB-0126). So a ticket good for `acme`'s door is good for `acme`,
+// and the session this module mints in `acme` was authenticated by `acme`'s
+// KDC. A realm with Kerberos OFF has no acceptor to reach: every ticket is
+// refused there, whoever issued it.
 //
 // ---------------------------------------------------------------------------
 // THE FALLBACK IS PART OF THE DESIGN AND NOT AN AFTERTHOUGHT.

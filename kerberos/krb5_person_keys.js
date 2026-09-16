@@ -80,16 +80,22 @@
 // so every page listing principals can say what is held without opening a key.
 //
 // ---------------------------------------------------------------------------
-// WHICH TRUST REALM, AND WHY THERE IS NO CHOICE.
+// WHICH TRUST REALM: THE AMBIENT ONE, SINCE 2026-09-15.
 //
-// The KDC's sockets and `krb5.realm` are PROCESS-WIDE: a raw Kerberos socket
-// has no path to put a trust-realm segment in, and the realm name inside the
-// protocol is the KERBEROS realm. So the KDC answers in no trust realm, and
-// this file reads and writes the **DEFAULT trust realm's directory** — the
-// directory's slot is pinned there by `ldap_server.js`, as the admin console's
-// role roster is. A password set or verified inside another trust realm derives
-// NOTHING: that person is not a principal of this KDC, and keys for them would
-// be password-equivalent material nothing ever reads.
+// This read *the KDC answers in no trust realm, so this file reads and writes
+// the DEFAULT trust realm's directory* — pinned there by `ldap_server.js`'s
+// slot — and *a password set or verified inside another trust realm derives
+// NOTHING*. Both halves are gone: a trust realm whose Kerberos is on has a
+// Kerberos realm and a principal database of its own, so a person in THAT
+// realm's directory is a principal of THAT realm's KDC, and their keys belong
+// on their own entry in their own realm.
+//
+// So every function here works in the AMBIENT realm — the realm a password was
+// set in, or the realm the KDC entered for the request it is answering — and
+// `principals.REALM` answers for that realm. What decides whether keys are
+// derived at all is no longer "is this the default realm" but
+// `principals.enabledIn()`: a realm with no KDC has nothing to hold keys for,
+// which is the same sentence the old rule made about every realm but one.
 //
 // ---------------------------------------------------------------------------
 // SERVICE PRINCIPALS, AND THE ONE TIME A KEY LEAVES THIS SERVICE.
@@ -624,13 +630,23 @@ function serviceKeys(spn) {
 // sequential and the re-read before the write — is the hash still the one this
 // derivation started beside? — makes a superseded one abandon itself.
 // ---------------------------------------------------------------------------
+// KEYED BY REALM AND NAME SINCE 2026-09-15. It was the name alone, which was
+// one queue per person while there was one KDC; with a KDC per trust realm the
+// same username exists in several realms as several people, and a derivation
+// for one would serialise behind — and be waited on by — another realm's.
 const inFlight = new Map();
+
+function inFlightKey(name) {
+  log.debug("Entering inFlightKey().");
+  log.debug("Leaving inFlightKey().");
+  return realms.currentId() + '|' + String(name);
+}
 
 function observePassword(name, password, info) {
   log.debug('Entering observePassword(). name=' + name);
   const event = (info && info.event) || 'verified';
   if (!productKdc() || !directory || !personKeysEnabled() ||
-      personNameProblem(name) || !realms.isDefault()) {
+      personNameProblem(name) || !principals.enabledIn(realms.currentId())) {
     // Nothing to do, and deliberately said at debug: this is called on every
     // verified sign-in in the service.
     log.debug('Leaving observePassword(). Not deriving (' +
@@ -638,10 +654,11 @@ function observePassword(name, password, info) {
                 : !directory ? 'no directory'
                 : !personKeysEnabled() ? 'krb5.personKeys is off'
                 : personNameProblem(name) ? 'not a principal name'
-                : 'not the default trust realm') + ').');
+                : 'this trust realm has no KDC') + ').');
     return;
   }
-  const previous = inFlight.get(name) || Promise.resolve();
+  const queue = inFlightKey(name);
+  const previous = inFlight.get(queue) || Promise.resolve();
   const next = previous.then(function () {
     return derive(name, password, event);
   }).catch(function (e) {
@@ -656,18 +673,19 @@ function observePassword(name, password, info) {
                'unaffected'
     });
   });
-  inFlight.set(name, next);
+  inFlight.set(queue, next);
   next.then(function () {
-    if (inFlight.get(name) === next) {
-      inFlight.delete(name);
+    if (inFlight.get(queue) === next) {
+      inFlight.delete(queue);
     }
   });
   log.debug('Leaving observePassword(). A derivation is queued.');
 }
 
-// Every derivation now running, settled. For a caller that needs to know the
-// keys have landed — a test, or a console action that clears keys and must
-// not race a derivation writing them back.
+// Every derivation now running, settled — in EVERY realm, which is what a
+// caller of this wants: a test, or a console action that clears keys and must
+// not race a derivation writing them back, cares that nothing is still in
+// flight rather than that one realm's queue is empty.
 function idle() {
   log.debug("Entering idle().");
   log.debug("Leaving idle().");
@@ -838,6 +856,34 @@ function refusal(code, message) {
   return errorCodes.mark({ ok: false, errors: [message] }, code);
 }
 
+// ---------------------------------------------------------------------------
+// NO KDC IN THIS TRUST REALM, NO KEYS IN IT (2026-09-15).
+//
+// Every act below writes key material for a principal of the AMBIENT realm's
+// KDC, and a realm whose `krb5.enabled` is off has no such KDC: no Kerberos
+// realm name, no principal database, no etypes. Without this guard those acts
+// did not refuse — they SUCCEEDED emptily, which is worse than either: the SPN
+// was stored as `HTTP/web.acme.test@` (the realm name is the empty string), the
+// key list was built from an empty etype list, and the caller was handed a
+// keytab with no entries and told it was created. `observePassword()` has asked
+// the same question since the split; these six had been left with the
+// register's older assumption that there was always exactly one KDC.
+// ---------------------------------------------------------------------------
+function noKdcHere() {
+  log.debug("Entering noKdcHere().");
+  const state = principals.kerberosRealmOf();
+  if (state.enabled && state.active) {
+    log.debug("Leaving noKdcHere(). This realm has a KDC.");
+    return null;
+  }
+  log.debug("Leaving noKdcHere(). No KDC here.");
+  return refusal('STS-KRB-0128', 'Trust realm "' + state.trustRealm + '" ' +
+    'has no KDC, so there is nothing here to hold a Kerberos key for: ' +
+    (state.reason || 'krb5.enabled is off for it') + '. Give the realm a ' +
+    'krb5.realm of its own and turn krb5.enabled on, and its principals ' +
+    'become the people and applications in its own directory.');
+}
+
 // Random keys, sealed, written, and the keytab that carries them. The one
 // function a create and a rotate share, so that they cannot disagree about what
 // a stored service key is.
@@ -947,6 +993,11 @@ function mintServiceKeys(spn, kvno, act, context, outgoing) {
 
 function createServicePrincipal(raw, context) {
   log.debug('Entering createServicePrincipal().');
+  const noKdc = noKdcHere();
+  if (noKdc) {
+    log.debug('Leaving createServicePrincipal(). No KDC in this trust realm.');
+    return noKdc;
+  }
   const spn = normaliseSpn(raw);
   if (!spn.ok) {
     log.debug('Leaving createServicePrincipal(). Not an SPN.');
@@ -966,16 +1017,15 @@ function createServicePrincipal(raw, context) {
                    'current one.');
   }
   if (!existing) {
-    // THE APPLICATION ENTRY, in the DEFAULT trust realm whatever realm the
-    // request arrived in — see the header. Created through the registry's own
-    // door, so it is the same entry a ticket for this SPN would have made.
-    const created = realms.run(realms.DEFAULT_REALM, function () {
-      return applications.createApplication({
-        identifier: spn.identifier, kind: 'kerberos-service',
-        protocols: ['krb5'],
-        fields: { krb5ServicePrincipalName: spn.identifier },
-        actor: String((context || {}).actor || '')
-      });
+    // THE APPLICATION ENTRY, in the AMBIENT trust realm since 2026-09-15 — the
+    // realm whose KDC will issue tickets for this SPN, which is the realm this
+    // request is in. Created through the registry's own door, so it is the same
+    // entry a ticket for this SPN would have made.
+    const created = applications.createApplication({
+      identifier: spn.identifier, kind: 'kerberos-service',
+      protocols: ['krb5'],
+      fields: { krb5ServicePrincipalName: spn.identifier },
+      actor: String((context || {}).actor || '')
     });
     if (!created.ok || !directory.readService(spn.identifier)) {
       log.debug('Leaving createServicePrincipal(). No application entry.');
@@ -995,6 +1045,11 @@ function createServicePrincipal(raw, context) {
 
 function rotateServicePrincipal(raw, context) {
   log.debug('Entering rotateServicePrincipal().');
+  const noKdc = noKdcHere();
+  if (noKdc) {
+    log.debug('Leaving rotateServicePrincipal(). No KDC in this trust realm.');
+    return noKdc;
+  }
   const spn = normaliseSpn(raw);
   if (!spn.ok) {
     log.debug('Leaving rotateServicePrincipal(). Not an SPN.');
@@ -1026,6 +1081,11 @@ function rotateServicePrincipal(raw, context) {
 
 function deleteServicePrincipal(raw, context) {
   log.debug('Entering deleteServicePrincipal().');
+  const noKdc = noKdcHere();
+  if (noKdc) {
+    log.debug('Leaving deleteServicePrincipal(). No KDC in this trust realm.');
+    return noKdc;
+  }
   const spn = normaliseSpn(raw);
   if (!spn.ok) {
     log.debug('Leaving deleteServicePrincipal(). Not an SPN.');
@@ -1069,6 +1129,11 @@ function deleteServicePrincipal(raw, context) {
 
 function clearPersonKeys(name, context) {
   log.debug('Entering clearPersonKeys(). name=' + name);
+  const noKdc = noKdcHere();
+  if (noKdc) {
+    log.debug('Leaving clearPersonKeys(). No KDC in this trust realm.');
+    return noKdc;
+  }
   const who = String(name == null ? '' : name).trim();
   if (!directory) {
     log.debug('Leaving clearPersonKeys(). No directory.');
@@ -1083,8 +1148,8 @@ function clearPersonKeys(name, context) {
   if (!current) {
     log.debug('Leaving clearPersonKeys(). Nobody by that name.');
     return refusal('STS-ADMIN-0608', 'There is nobody called "' + who + '" ' +
-                   'in the default trust realm\'s directory, which is the ' +
-                   'one this KDC reads.');
+                   'in this trust realm\'s directory, which is the ' +
+                   'one its KDC reads.');
   }
   if (!current.keys && !current.info) {
     log.debug('Leaving clearPersonKeys(). Nothing held.');
@@ -1197,6 +1262,11 @@ function dropPrevious(kind, label, current, context, write) {
 
 function dropPreviousPersonKeys(name, context) {
   log.debug('Entering dropPreviousPersonKeys(). name=' + name);
+  const noKdc = noKdcHere();
+  if (noKdc) {
+    log.debug('Leaving dropPreviousPersonKeys(). No KDC in this trust realm.');
+    return noKdc;
+  }
   const who = String(name == null ? '' : name).trim();
   if (!directory) {
     log.debug('Leaving dropPreviousPersonKeys(). No directory.');
@@ -1211,8 +1281,8 @@ function dropPreviousPersonKeys(name, context) {
   if (!current) {
     log.debug('Leaving dropPreviousPersonKeys(). Nobody by that name.');
     return refusal('STS-ADMIN-0608', 'There is nobody called "' + who + '" ' +
-                   'in the default trust realm\'s directory, which is the ' +
-                   'one this KDC reads.');
+                   'in this trust realm\'s directory, which is the ' +
+                   'one its KDC reads.');
   }
   const result = dropPrevious('person', who + '@' + principals.REALM, current,
     context,
@@ -1228,6 +1298,11 @@ function dropPreviousPersonKeys(name, context) {
 
 function dropPreviousServiceKeys(raw, context) {
   log.debug('Entering dropPreviousServiceKeys().');
+  const noKdc = noKdcHere();
+  if (noKdc) {
+    log.debug('Leaving dropPreviousServiceKeys(). No KDC in this trust realm.');
+    return noKdc;
+  }
   const spn = normaliseSpn(raw);
   if (!spn.ok) {
     log.debug('Leaving dropPreviousServiceKeys(). Not an SPN.');

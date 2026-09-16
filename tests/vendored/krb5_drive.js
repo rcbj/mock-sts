@@ -15,10 +15,17 @@
 // and this uses the third. Two reasons, and the second is the one that decides
 // it: the proxy is on the SAME port and the same base URL the rest of the suite
 // already talks to, so a job driving it needs no second address, no second
-// firewall hole and no knowledge of whether 88 bound at all — and **88 is
-// SHARED ACROSS TRUST REALMS while the proxy is not**. A test running in a
-// throwaway realm reaches that realm's KDC through
-// `/realm/<id>/KdcProxy` and nothing else can.
+// firewall hole and no knowledge of whether 88 bound at all.
+//
+// **AND A REALM'S OWN `/realm/<id>/KdcProxy` IS PINNED TO THAT REALM
+// (2026-09-15).** This paragraph said *88 is SHARED ACROSS TRUST REALMS while
+// the proxy is not*, which was true of the URL and not of the KDC behind it —
+// every door reached one principal database. Each trust realm whose
+// `krb5.enabled` is on now has a Kerberos realm and a database of its own, so
+// port 88 and a bare `/KdcProxy` route by the realm NAME in the request, and
+// this address refuses a name the realm does not serve. Driving a throwaway
+// realm's KDC therefore means giving that realm a `krb5.realm` of its own,
+// turning `krb5.enabled` on, and asking for THAT name.
 //
 // ---------------------------------------------------------------------------
 // THE EXCHANGE, AND THE ONE THING ABOUT IT THAT SURPRISES EVERYBODY.

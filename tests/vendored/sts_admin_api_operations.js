@@ -739,11 +739,17 @@ function documentedActions(doc) {
 //                    Exercised in theTruststoreRoundTrips(), with a CA this
 //                    file mints and removes.
 // ---------------------------------------------------------------------------
-//   * `kerberos/principals/*` (2026-09-12) — the KDC is ONE for the process,
-//                    so a service principal created under any realm prefix is
-//                    the DEFAULT realm's, and the documented example names a
+//   * `kerberos/principals/*` (2026-09-12) — the documented example names a
 //                    fixed SPN a replay would leave holding a random key for
 //                    every later run to meet as "already holds a stored key".
+//                    **The FIRST half of this reason expired on 2026-09-15**:
+//                    it read *the KDC is ONE for the process, so a service
+//                    principal created under any realm prefix is the DEFAULT
+//                    realm's*, and each trust realm has a KDC of its own now —
+//                    so a replay under a realm prefix would strand the SPN in
+//                    that realm instead of the default one, which is the same
+//                    problem in a different place. The second half is why it
+//                    stays held back.
 //                    Exercised in theKerberosPrincipalsRoundTrip(), with an SPN
 //                    carrying this run's realm id, created and deleted.
 //   * `pki/build-root` (2026-09-13) — it replaces the service Root AND the
@@ -3760,13 +3766,30 @@ async function theKerberosPrincipalsRoundTrip() {
       "THE READ MUST CARRY NO KEY MATERIAL: neither the keytab nor a sealed " +
       "value");
 
-    // THE SAME KDC UNDER THIS REALM'S PREFIX.
+    // A KDC PER TRUST REALM SINCE 2026-09-15 (#33), AND THIS IS WHERE THE OLD
+    // RULE WAS ASSERTED. It read: *THE SAME KDC UNDER THIS REALM'S PREFIX …
+    // must list the same principal: the KDC is the process's*, with
+    // `trustRealm === "default"` under every prefix. Each trust realm now has
+    // a Kerberos realm and a principal database of its own, so this realm —
+    // which the suite creates without one — reports ITSELF as the trust realm,
+    // has no KDC, and lists none of the default realm's service principals.
+    // That last clause is the one worth having: a key created in one realm
+    // appearing in another would be exactly the leak the split exists to
+    // prevent.
     const inRealm = await kerberosPrincipalsHeld(false);
-    assert.ok(inRealm.body.trustRealm === "default" &&
-              inRealm.body.services.some(function (
-                  one) { return one.spn === spn; }),
-      "GET /realm/" + REALM + "/admin-api/kerberos/principals must list the " +
-      "same principal: the KDC is the process's.");
+    assert.strictEqual(inRealm.body.trustRealm, REALM,
+      "GET /realm/" + REALM + "/admin-api/kerberos/principals must report " +
+      "the realm it was read in as its trustRealm, not the default realm: " +
+      JSON.stringify(inRealm.body.trustRealm));
+    assert.ok(inRealm.body.kerberos && inRealm.body.kerberos.enabled === false &&
+              typeof inRealm.body.kerberos.reason === "string" &&
+              inRealm.body.kerberos.reason.length > 0,
+      "a realm created without a krb5.realm of its own must say it has no " +
+      "KDC, and why: " + JSON.stringify((inRealm.body || {}).kerberos || null));
+    assert.ok(inRealm.body.services.every(function (one) {
+      return one.spn !== spn;
+    }), "and it must NOT list a service principal created in the default " +
+        "realm — its keys belong to that realm's KDC alone");
 
     await refused("/kerberos/principals/create-service", { spn: spn },
       /already holds a stored key/, "a second create of the same SPN", true);
@@ -3876,8 +3899,9 @@ async function theKerberosPrincipalsRoundTrip() {
     }
   }
   log.info("[kerberos] OK — a service principal created with a keytab, read " +
-           "back at the root and under the realm prefix with no key " +
-           "material, refused a second create, rotated to the next kvno with " +
+           "back at the root with no key material and ABSENT under a realm " +
+           "prefix whose own Kerberos is off, refused a second create, " +
+           "rotated to the next kvno with " +
            "the previous version kept in the keytab and the list, that " +
            "version dropped and read back gone, deleted and read back " +
            "absent; krbtgt, a one-component name and two drops with nothing " +

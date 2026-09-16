@@ -473,8 +473,12 @@ function childMain() {
            JSON.stringify({ code: aliceDone.code, cookies: cookies }));
       const carol = negotiation('carol@EXAMPLE.COM');
       pend(carol);
+      // No `realm`, so the claim lands in the AMBIENT realm — which is what
+      // the real continuation does since SPNEGO became per trust realm
+      // (2026-09-15). It read `realm: ''` while the store was shared, and a
+      // claim in a realm nothing claims in would no longer collide with it.
       await claims.claim({ scope: 'spnego.continuation', value: carol.id,
-                           realm: '', ttlMs: 60000 });
+                           ttlMs: 60000 });
       const carolAgain = await exchange.negotiate(
         await continuationFor(carol, carol.id, false), { door: DOOR });
       note(!carolAgain.ok && carolAgain.code === 'no-pending-continuation' &&

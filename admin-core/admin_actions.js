@@ -4809,10 +4809,12 @@ async function spiffeAction(body) {
 // Nothing reads a stored key back out afterwards, so a keytab that was lost is
 // replaced by rotating, never re-downloaded.
 //
-// **THEY ACT ON THE DEFAULT TRUST REALM WHATEVER PREFIX A CALL CARRIES**, and
-// the result says so. The KDC's sockets and `krb5.realm` are the process's, so
-// its principals are the default realm's; a service principal "in acme" would
-// be a key nothing ever asks for.
+// **THEY ACT ON THE TRUST REALM THE CALL IS IN** (2026-09-15), and the result
+// says which. This read *they act on the DEFAULT trust realm whatever prefix a
+// call carries … a service principal "in acme" would be a key nothing ever asks
+// for*: acme now has a Kerberos realm and a KDC of its own, so a service
+// principal there is a key that realm's KDC issues tickets for. A realm whose
+// Kerberos is off has no database to put one in, and the register refuses.
 // ---------------------------------------------------------------------------
 // The last two (2026-09-12) end the PREVIOUS-KEY-VERSION window early — a
 // rotation or a password change keeps the version it replaced for as long as a
@@ -4854,7 +4856,7 @@ function kerberosPrincipalsAction(body, context) {
       ': ' + KERBEROS_PRINCIPAL_ACTIONS.join(', ') + '.'] });
   }
   if (result && result.ok) {
-    result.trustRealm = realms.DEFAULT_ID;
+    result.trustRealm = realms.currentId();
   }
   log.debug("Leaving kerberosPrincipalsAction(). ok=" +
             !!(result && result.ok));

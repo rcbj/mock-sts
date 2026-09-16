@@ -6614,6 +6614,43 @@ const CODES = [
       'because the store that records completed negotiations could not be ' +
       'asked; it was refused (fail closed).',
     spec: 'RFC 4178 section 4.2.2, a reject NegTokenResp; HTTP 401' },
+  { code: 'STS-KRB-0121',
+    summary: 'A TGS-REQ named a realm this KDC does not serve. Until ' +
+      '2026-09-15 such a request was answered as the default realm.',
+    spec: 'KDC_ERR_WRONG_REALM (68)' },
+  { code: 'STS-KRB-0122',
+    summary: 'A KDC request sent to a trust realm\'s own ' +
+      '/realm/<id>/KdcProxy named a Kerberos realm that realm does not ' +
+      'serve (another ' +
+      'realm\'s name, or one whose Kerberos is off).',
+    spec: 'KDC_ERR_WRONG_REALM (68)' },
+  { code: 'STS-KRB-0123',
+    summary: 'Kerberos was turned on for a trust realm that has no ' +
+      'krb5.realm of its own.',
+    spec: 'none (a refused administrative change)' },
+  { code: 'STS-KRB-0124',
+    summary: 'A trust realm was given a krb5.realm another realm already ' +
+      'answers to (another realm\'s, the default realm\'s, or ' +
+      'krb5.trustedRealm), compared without regard to case.',
+    spec: 'none (a refused administrative change)' },
+  { code: 'STS-KRB-0125',
+    summary: 'A trust realm\'s krb5.realm was changed or cleared while its ' +
+      'Kerberos was on.',
+    spec: 'none (a refused administrative change)' },
+  { code: 'STS-KRB-0126',
+    summary: 'The acceptor was presented a ticket for a Kerberos realm the ' +
+      'trust realm it was reached in does not serve.',
+    spec: 'KRB_AP_ERR_NOT_US (35); over SPNEGO, HTTP 401' },
+  { code: 'STS-KRB-0127',
+    summary: 'Two trust realms answer to one Kerberos realm name (a restored ' +
+      'or replicated realm the registry did not re-judge), so the KDC routes ' +
+      'that name to the first and not the second.',
+    spec: 'none (logged when the router finds it)' },
+  { code: 'STS-KRB-0128',
+    summary: 'A Kerberos key act — creating, rotating, deleting or clearing a ' +
+      'stored key — was asked of a trust realm that has no KDC, so there is ' +
+      'no principal for the key to belong to.',
+    spec: 'HTTP 400 { ok: false, errors } / 303 with error=' },
   // ===== LDAP ==============================================================
   { code: 'STS-LDAP-0001',
     summary: 'An LDAP simple bind presented the reserved password this ' +

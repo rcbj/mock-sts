@@ -176,8 +176,29 @@ function checkMarker(t) {
   // is not started then — it is created OFF, its authorities are built on
   // first use and its listeners are bound when it is turned on. So for a realm
   // none of the six was consumed at any startup.
+  //
+  // KERBEROS'S TEN ARRIVED TOGETHER on 2026-09-15 and are one argument too,
+  // made at the head of the Kerberos group in config.js: this process builds
+  // ONE principal database when it starts, from these settings, and that is
+  // what made them restart-only — but a TRUST REALM's Kerberos is not started
+  // then. A realm is created with `krb5.enabled` off, builds its own principal
+  // database when it is turned on, and rebuilds it when one of these changes on
+  // that realm. So for a realm none of the ten was consumed at any startup. The
+  // sockets (`krb5.kdcPort`, `krb5.servicePort`) and the development trust
+  // (`krb5.trustedRealm` and its three) are NOT here, and must not be: those
+  // are bound and built for the process.
   const EXPECTED_REALM_RUNTIME = [
     'oauth2.rfc9700',
+    'krb5.realm',
+    'krb5.domainSid',
+    'krb5.krbtgtPassword',
+    'krb5.servicePrincipal',
+    'krb5.servicePassword',
+    'krb5.serviceSalt',
+    'krb5.kvno',
+    'krb5.enctypes',
+    'krb5.userPassword',
+    'krb5.autoServicePassword',
     // OAuth 2.1 mode (2026-09-13). It implies RFC 9700 mode and moves the
     // socket for the same one reason, argued at its row in config.js.
     'oauth2.oauth21',
@@ -368,7 +389,22 @@ function checkReadingEnd(t) {
   // If a derived setting is ever meant to vary per realm, this assertion is
   // where that decision gets written down — do not simply delete it.
   // ---------------------------------------------------------------------
-  const derived = config.SETTINGS.filter(function (s) { return s.derived; });
+  // ---------------------------------------------------------------------
+  // THE ONE EXEMPTION, AND IT IS THE DECISION THIS BLOCK ASKS FOR
+  // (2026-09-15). `krb5.serviceDomains` derives its default from
+  // `krb5.realm` — the hosts a KDC will invent a service principal for are
+  // the hosts in its own domain — and `krb5.realm` became a setting a trust
+  // realm carries when each realm got a KDC of its own. A realm named
+  // ACME.EXAMPLE.COM that went on being willing to be
+  // `HTTP/web.example.com`, the DEFAULT realm's domain, would invent service
+  // principals for another realm's hosts. So this derived row follows the
+  // realm deliberately, and `krb5_principals.js` reads it inside the realm
+  // whose database it is building.
+  // ---------------------------------------------------------------------
+  const FOLLOWS_THE_REALM = ['krb5.serviceDomains'];
+  const derived = config.SETTINGS.filter(function (s) {
+    return s.derived && FOLLOWS_THE_REALM.indexOf(s.key) === -1;
+  });
   const flipped = {};
   config.SETTINGS.filter(function (s) { return s.realmRuntime; })
     .forEach(function (s) {

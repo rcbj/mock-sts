@@ -11571,8 +11571,12 @@ const ROUTES = [
   // key back out afterwards — a lost keytab is replaced by rotating. The GET is
   // built from the public half of each pair of attributes and opens nothing.
   //
-  // **ONE KDC FOR THE PROCESS**, so every realm prefix reads and writes the
-  // DEFAULT trust realm's principals, and each reply says `trustRealm`.
+  // **A KDC PER TRUST REALM SINCE 2026-09-15**, so a call under a realm prefix
+  // reads and writes THAT realm's principals — the people in its directory and
+  // the service principals in its registry — and each reply says `trustRealm`.
+  // A realm whose `krb5.enabled` is off has no principals and says so. Until
+  // that date there was one KDC for the process and every prefix reached the
+  // default realm's.
   // ---------------------------------------------------------------------------
   { method: 'GET', path: BASE + '/kerberos/principals', tag: 'Kerberos',
     operationId: 'getKerberosPrincipals',

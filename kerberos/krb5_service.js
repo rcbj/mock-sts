@@ -58,9 +58,9 @@ const { listenHost } = require('../common/helpers');
 const mode = require('../common/mode');
 const msgs = require('./krb5_messages.js');
 const kcrypto = require('./krb5_crypto.js');
-// PER PROCESS AND NOT PER REALM — see the store below. Required only for
-// `sharedMap()`, and it is a LEAF that registers no route, so this cannot
-// move a route or join a cycle.
+// PER TRUST REALM SINCE 2026-09-15 — see the store below and accept()'s step
+// 2a, which enters the realm whose Kerberos realm issued the ticket. A LEAF
+// that registers no route, so this cannot move a route or join a cycle.
 const realms = require('../common/realms');
 const prim = require('./krb5_primitives.js');
 const gss = require('./krb5_gss.js');
@@ -90,7 +90,15 @@ const clusterClaims = require('../cluster/cluster_claims');
 const capabilities = require('../cluster/cluster_capabilities');
 
 const SERVICE_PORT = config.value('krb5.servicePort');
-const SERVICE_PRINCIPAL = config.value('krb5.servicePrincipal').split('/');
+// THE SPN THIS ACCEPTOR HOLDS, in the AMBIENT trust realm. It was read once
+// here, from `krb5.servicePrincipal`; since 2026-09-15 that setting is one a
+// trust realm may carry, so it is asked of the realm's principal database —
+// which is where the account it names is built — per call.
+function servicePrincipal() {
+  log.debug("Entering servicePrincipal().");
+  log.debug("Leaving servicePrincipal().");
+  return principals.servicePrincipal();
+}
 // A function, because krb5.clockSkew is settable at runtime: the tolerance a
 // request is judged against has to be the one in force when it arrives.
 function clockSkewSeconds() {
@@ -124,19 +132,28 @@ function maxReplayEntries() {
   return config.value('krb5.replayCacheMaxEntries');
 }
 // -------------------------------------------------------------------------
-// PERSISTED, AND SHARED RATHER THAN PER REALM (2026-09-06).
-// `realms.sharedMap()` is a plain Map that reports its writes so product mode
-// can write them down; `scope: 'shared'` is what says the store deliberately
-// has no realm in it, which is the discriminator `tests/realm_isolation.js`
-// checks against.
+// PERSISTED (2026-09-06), AND PER TRUST REALM SINCE 2026-09-15.
+// It was `realms.sharedMap()` while the acceptor answered in no realm. Now a
+// ticket is accepted INSIDE the trust realm whose Kerberos realm issued it, so
+// the cache is `realms.map()` — one partition per realm, which is what
+// `tests/realm_isolation.js` holds every per-realm store to. An Authenticator
+// is keyed by its client's REALM, name, ctime and cusec, so one realm's
+// partition cannot shadow another's entries.
+//
+// **THE ONE CASE WHERE THAT IS NOT ENOUGH IS A NAME TWO REALMS CLAIM.** The
+// registry refuses a duplicate `krb5.realm` (STS-KRB-0124) but never re-judges
+// a realm RESTORED from the store or REPLICATED from another node, so two
+// realms can hold one name and STS-KRB-0127 reports it. A replay would then be
+// refused in one partition and unseen in the other — which is why accept()'s
+// step 2a answers only for the realm the ROUTER picks for that name, the same
+// one the KDC picks, rather than for any realm that merely serves it.
 // -------------------------------------------------------------------------
 // **PERSISTING A REPLAY CACHE IS A CORRECTNESS FIX AND NOT A CONVENIENCE.**
 // Until this, a restart emptied it — so every Authenticator this service had
 // already refused became replayable again for as long as the clock skew
 // window allows. A mock is allowed to be permissive about passwords and is
 // not allowed to be accidentally permissive about replay.
-const replayCache = realms.sharedMap({ persist: 'krb5.replayCache',
-                                       scope: 'shared' });
+const replayCache = realms.map({ persist: 'krb5.replayCache' });
 
 // How much longer than the replay window an Authenticator's cluster claim
 // lives: two nodes' clocks may disagree about when the window ends (#46).
@@ -190,7 +207,7 @@ function errorReply(code, eText) {
     susec: (stime.getMilliseconds() * 1000) % 1000000,
     errorCode: code,
     realm: principals.REALM,
-    sname: { type: 3, name: SERVICE_PRINCIPAL },
+    sname: { type: 3, name: servicePrincipal() },
     eText: eText
   });
 }
@@ -204,8 +221,8 @@ function errorReply(code, eText) {
 // The authentication is recorded here for the same reason — recording it in the
 // two callers instead would be two call sites and, before long, a third that
 // forgot.
-async function accept(tokenBytes, opts) {
-  log.debug('Entering accept(). bytes=' + tokenBytes.length);
+async function acceptInRealm(tokenBytes, opts) {
+  log.debug('Entering acceptInRealm(). bytes=' + tokenBytes.length);
   const via = (opts && opts.via) || 'AP-REQ over raw TCP';
   const checks = [];
   function check(name, ok, detail) {
@@ -216,7 +233,7 @@ async function accept(tokenBytes, opts) {
   }
 
   if (tokenBytes.length > maxTokenBytes()) {
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     return { errorCode: 'STS-KRB-0063',
              reply: errorReply(60, 'the token is ' + tokenBytes.length + ' ' +
       'bytes, over this service\'s limit'), checks: checks, ok: false };
@@ -231,7 +248,7 @@ async function accept(tokenBytes, opts) {
       (token.tokIdName || prim.toHex(new Uint8Array(token.tokId))));
   } catch (e) {
     check('GSS InitialContextToken', false, e.message);
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     return { errorCode: 'STS-KRB-0064', reply: errorReply(60, e.message),
              checks: checks,
              ok: false };
@@ -239,7 +256,7 @@ async function accept(tokenBytes, opts) {
   if (token.tokIdName !== 'AP_REQ') {
     check('token is an AP-REQ', false,
           'it is ' + (token.tokIdName || 'unrecognised'));
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     return { errorCode: 'STS-KRB-0065', reply: errorReply(40, 'this service ' +
         'accepts an AP-REQ; it was sent ' +
       (token.tokIdName || 'something else')), checks: checks, ok: false };
@@ -251,13 +268,83 @@ async function accept(tokenBytes, opts) {
     apReq = msgs.readApReq(token.inner);
   } catch (e) {
     check('AP-REQ decodes', false, e.message);
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     return { errorCode: 'STS-KRB-0066',
              reply: errorReply(60, 'the AP-REQ does not decode: ' + e.message),
              checks: checks, ok: false };
   }
   check('AP-REQ decodes', true, 'ap-options: ' +
     (msgs.apOptionNames(apReq.apOptions).join(', ') || '(none)'));
+
+  // ---------------------------------------------------------------------
+  // 2a. WHICH TRUST REALM'S ACCEPTOR THIS IS (2026-09-15).
+  //
+  // The ticket names the Kerberos realm that issued it, and since each trust
+  // realm has a Kerberos realm of its own that name says whose key should open
+  // it — the same discriminator the KDC routes on. Two doors, the KDC's two
+  // rules:
+  //
+  //   * REACHED IN A TRUST REALM (a `/realm/<id>/…` SPNEGO request): pinned.
+  //     A ticket from another realm is refused KRB_AP_ERR_NOT_US rather than
+  //     opened with a key from the realm the path named.
+  //   * REACHED IN NO REALM (the raw socket on krb5.servicePort, or an
+  //     unprefixed SPNEGO request): routed by the name, so one socket accepts
+  //     every realm's tickets.
+  //
+  // The re-entry is what puts the rest of accept() — the account lookup, the
+  // keys, the replay cache, the statistics and the audit row — in that realm.
+  // It re-does the two decoding checks above and nothing else.
+  // ---------------------------------------------------------------------
+  const here = realms.currentId();
+  const ticketRealm = String(apReq.ticket.realm || '');
+  if (!(opts && opts.realmRouted)) {
+    // WHICH TRUST REALM ANSWERS TO THIS TICKET'S REALM, asked the same way the
+    // KDC's router asks it, so a name two realms claim resolves to ONE realm
+    // here as it does there (krb5_principals.js's STS-KRB-0127).
+    const target = principals.trustRealmFor(ticketRealm);
+    if (here !== realms.DEFAULT_ID) {
+      // PINNED. The path named a realm, so this address answers for that realm
+      // or for nothing — and `servedIn()` alone is not enough: two realms can
+      // hold one Kerberos realm name (a restored or replicated realm the
+      // registry never judged), and the one the router does NOT pick must not
+      // open the other's tickets with a key derived from the same name.
+      if (principals.servedIn(here).indexOf(ticketRealm) === -1 ||
+          !target || target.id !== here) {
+        const serves = principals.servedIn(here).join(' and ') ||
+                       'no Kerberos realm';
+        check('the ticket is from a realm this address serves', false,
+              'it is from ' + ticketRealm + ', and trust realm "' + here +
+              '" serves ' + serves);
+        log.debug("Leaving acceptInRealm(). Another trust realm's ticket.");
+        return { errorCode: 'STS-KRB-0126',
+                 reply: errorReply(35, 'this ticket is from ' + ticketRealm +
+                   '; this address serves ' + serves),
+                 checks: checks, ok: false };
+      }
+    } else if (target && target.id !== realms.DEFAULT_ID) {
+      log.debug("Leaving acceptInRealm(). Routed to trust realm " +
+                target.id + ".");
+      return await realms.run(target, function () {
+        return accept(tokenBytes, Object.assign({}, opts || {},
+                                                { realmRouted: true }));
+      });
+    } else if (!target) {
+      // NOBODY SERVES IT, so this acceptor holds no key for the account the
+      // ticket names — including when the SERVICE's own Kerberos was turned
+      // off at runtime (`krb5.enabled`), which used to stop the KDC and leave
+      // the acceptor opening tickets out of a database nothing routed to.
+      const serves = principals.servedIn(here).join(' and ') ||
+                     'no Kerberos realm';
+      check('the ticket is from a realm this service serves', false,
+            'it is from ' + ticketRealm + ', and this service serves ' +
+            serves);
+      log.debug("Leaving acceptInRealm(). No trust realm serves that name.");
+      return { errorCode: 'STS-KRB-0126',
+               reply: errorReply(35, 'this ticket is from ' + ticketRealm +
+                 '; this service serves ' + serves),
+               checks: checks, ok: false };
+    }
+  }
 
   // 3. The ticket is for me. Checked BEFORE decrypting, because the answer is
   //    more
@@ -288,7 +375,7 @@ async function accept(tokenBytes, opts) {
   // service proves nothing to another" — the sentence the whole workflow rests
   // on. Two tests caught exactly that when this check was first widened, which
   // is why the distinction is spelled out here rather than left to the code.
-  const wanted = SERVICE_PRINCIPAL.join('/');
+  const wanted = servicePrincipal().join('/');
   const presented = apReq.ticket.sname.name.join('/');
   const found = principals.findOrCreateService(apReq.ticket.sname.name,
       apReq.ticket.realm);
@@ -315,7 +402,7 @@ async function accept(tokenBytes, opts) {
             (principals.SERVICE_DOMAINS.join(', ') || '(nothing configured)');
     check('the ticket is for this service', false, 'it is for ' + presented +
       ', not ' + wanted + ' — ' + why);
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     return { errorCode: 'STS-KRB-0067', reply: errorReply(35, 'this ticket ' +
         'is for ' + presented +
       '; this service is ' + wanted + ' — ' + why), checks: checks, ok: false };
@@ -345,7 +432,7 @@ async function accept(tokenBytes, opts) {
       ' and this service holds kvno ' + me.kvno +
       (kept.length ? ' (and keeps previous kvno ' + kept.join(', ') + ')' :
        ''));
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     return { errorCode: 'STS-KRB-0068', reply: errorReply(44, 'the ticket ' +
         'was encrypted with key version ' +
       ticketKvno + ' and this service holds version ' + me.kvno +
@@ -372,7 +459,7 @@ async function accept(tokenBytes, opts) {
         'key usage 2');
   } catch (e) {
     check('ticket decrypts with this service\'s key', false, e.message);
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     return { errorCode: 'STS-KRB-0069',
              reply: errorReply(31, 'the ticket does not decrypt with this ' +
                                    'service\'s key: ' + e.message),
@@ -389,7 +476,7 @@ async function accept(tokenBytes, opts) {
     check('Authenticator decrypts with the session key', true, 'key usage 11');
   } catch (e) {
     check('Authenticator decrypts with the session key', false, e.message);
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     return { errorCode: 'STS-KRB-0070',
              reply: errorReply(31, 'the Authenticator does not decrypt with ' +
       'the ticket\'s session key at key usage ' +
@@ -403,7 +490,7 @@ async function accept(tokenBytes, opts) {
       'the Authenticator says ' + authenticator.cname.name.join('/') + ', ' +
           'the ticket says ' +
       ticketPart.cname.name.join('/'));
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     return { errorCode: 'STS-KRB-0071',
              reply: errorReply(36, 'the Authenticator and the ticket name ' +
                                    'different clients'),
@@ -420,7 +507,7 @@ async function accept(tokenBytes, opts) {
     check('clock skew within tolerance', false, Math.round(skew) + 's ' +
         'against a ' +
       clockSkewSeconds() + 's tolerance');
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     return { errorCode: 'STS-KRB-0072', reply: errorReply(37, 'the ' +
         'Authenticator\'s clock is ' + Math.round(skew) +
       ' seconds from this service\'s (tolerance ' + clockSkewSeconds() + 's)'),
@@ -431,7 +518,7 @@ async function accept(tokenBytes, opts) {
   if (ticketPart.endtime <= nowDate) {
     check('ticket is inside its validity window', false, 'it expired at ' +
       ticketPart.endtime.toISOString());
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     return { errorCode: 'STS-KRB-0073',
              reply: errorReply(32,
                                'the ticket expired at ' +
@@ -448,7 +535,7 @@ async function accept(tokenBytes, opts) {
   if (replayCache.has(key)) {
     check('not a replay', false, 'this Authenticator (client, ctime, cusec) ' +
                                  'has been seen before');
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     return { errorCode: 'STS-KRB-0074', reply: errorReply(34, 'this ' +
       'Authenticator has been seen before — a replay. The triple (client, ' +
       'ctime, cusec) is what identifies one, per RFC 4120 section 3.2.3.'),
@@ -460,7 +547,7 @@ async function accept(tokenBytes, opts) {
     check('not a replay', false, 'the replay cache holds its maximum of ' +
       maxReplayEntries() + ' Authenticators, every one still inside the ' +
                            'replay window');
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     return { errorCode: 'STS-KRB-0075', reply: errorReply(60, 'this ' +
         'acceptor\'s replay cache is full (' +
       maxReplayEntries() + ' Authenticators seen in the last ' +
@@ -489,15 +576,19 @@ async function accept(tokenBytes, opts) {
   // await, so two copies arriving at this process together are still refused
   // by the cache; the claim then decides between processes.
   //
-  // SHARED, NOT PER REALM (`realm: ''`), for the reason the cache is: this
-  // acceptor has no realm, and a replay must be refused whichever path it
-  // arrives on. The claim lives for the cache's own window — twice the skew,
+  // IN THE TRUST REALM THE TICKET WAS ISSUED BY, for the reason the cache is
+  // partitioned that way since 2026-09-15: the ticket was accepted inside that
+  // realm, and its Kerberos realm name — which is in the claim's value as well,
+  // through the Authenticator's crealm — belongs to one trust realm alone. A
+  // replay is therefore refused whichever path it arrives on, and one realm's
+  // traffic cannot spend another's claim. The claim lives for the cache's own
+  // window — twice the skew,
   // see pruneReplayCache() — plus CLAIM_SKEW_MS for two nodes' clocks. A
   // store that cannot be asked refuses (fail closed), and forgets the local
   // entry, because an Authenticator refused unproven has not been used and a
   // retry of it once the store answers is not a replay.
   const claimed = await clusterClaims.claim({
-    scope: 'krb5.authenticator', value: key, realm: '',
+    scope: 'krb5.authenticator', value: key,
     ttlMs: replayWindowSeconds() * 1000 + CLAIM_SKEW_MS });
   if (!claimed.ok && claimed.reason === 'used') {
     check('not a replay', false, 'this Authenticator (client, ctime, cusec) ' +
@@ -506,7 +597,7 @@ async function accept(tokenBytes, opts) {
     log.warn(errorCodes.tag('STS-KRB-0116') + 'krb5-service: an ' +
              'Authenticator this process had not seen was ALREADY ACCEPTED ' +
              'by another node — a replay delivered to a different node.');
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     return { errorCode: 'STS-KRB-0116', reply: errorReply(34, 'this ' +
       'Authenticator has been seen before — a replay. The triple (client, ' +
       'ctime, cusec) is what identifies one, per RFC 4120 section 3.2.3.'),
@@ -521,7 +612,7 @@ async function accept(tokenBytes, opts) {
     log.error(errorCodes.tag('STS-KRB-0117') + 'krb5-service: the claim ' +
               'store could not be asked about an Authenticator (' +
               (claimed.why || 'no reason given') + '). It is refused.');
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     return { errorCode: 'STS-KRB-0117', reply: errorReply(60, 'this ' +
       'acceptor could not confirm the Authenticator is not a replay; retry ' +
       'shortly.'), checks: checks, ok: false };
@@ -544,7 +635,7 @@ async function accept(tokenBytes, opts) {
             'channel bindings'));
     } catch (e) {
       check('0x8003 checksum parses', false, e.message);
-      log.debug("Leaving accept().");
+      log.debug("Leaving acceptInRealm().");
       return { errorCode: 'STS-KRB-0076',
                reply: errorReply(50, 'the Authenticator\'s 0x8003 checksum ' +
                                      'is malformed: ' + e.message),
@@ -555,7 +646,7 @@ async function accept(tokenBytes, opts) {
           'the checksum is type ' + authenticator.cksum.type +
       ', not 0x8003 (32771) — a GSS caller must send the ' +
       'channel-bindings-and-flags structure');
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     return { errorCode: 'STS-KRB-0077',
              reply: errorReply(50,
                                'checksum type ' + authenticator.cksum.type +
@@ -653,7 +744,7 @@ async function accept(tokenBytes, opts) {
     (mutualWanted ? ', mutual authentication requested' : '') + ')');
 
   if (!mutualWanted) {
-    log.debug("Leaving accept().");
+    log.debug("Leaving acceptInRealm().");
     // Nothing to send back. Worth noting rather than silently returning
     // nothing: without mutual authentication the CLIENT has no idea whether it
     // just talked to the real service.
@@ -700,7 +791,7 @@ async function accept(tokenBytes, opts) {
                                           encApRepPart)
     }
   });
-  log.debug("Leaving accept().");
+  log.debug("Leaving acceptInRealm().");
   return {
     reply: gss.encodeInitialContextToken(gss.TOK_ID.AP_REP, apRep),
     checks: checks,
@@ -718,6 +809,27 @@ async function accept(tokenBytes, opts) {
     sessionKey: sessionKey,
     sessionKeyEtype: ticketPart.key.etype
   };
+}
+
+// ---------------------------------------------------------------------------
+// WHICH TRUST REALM ANSWERED, ON EVERY RESULT (2026-09-15).
+//
+// `acceptInRealm()` may enter another realm at step 2a, and by the time it
+// returns that realm is out of scope again — so a caller recording anything
+// about the acceptance (the raw socket's audit row below) that asked the
+// AMBIENT realm would name the wrong one, and file the row in the wrong
+// realm's audit log. This wrapper stamps the realm the answer was made in, and
+// leaves one already stamped alone — which is what makes the inner call of a
+// routed request the one that names it.
+// ---------------------------------------------------------------------------
+async function accept(tokenBytes, opts) {
+  log.debug("Entering accept().");
+  const result = await acceptInRealm(tokenBytes, opts);
+  if (result && typeof result === 'object' && !result.trustRealm) {
+    result.trustRealm = realms.currentId();
+  }
+  log.debug("Leaving accept().");
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -773,12 +885,17 @@ function startTcp(port) {
         if (!result.ok && result.errorCode) {
           // The raw socket is the one transport with no HTTP funnel, so the
           // acceptor's refusal is recorded here. The SPNEGO doors mark theirs.
-          audit.failure(result.errorCode, {
-            protocol: 'Kerberos', channel: 'kerberos',
-            target: SERVICE_PRINCIPAL.join('/') + '@' + principals.REALM,
-            summary: 'the Kerberos service refused an AP-REQ over raw TCP',
-            // error-code: none — the code is the one accept() named at the refusal site
-            outcome: 'refused'
+          // IN THE REALM THAT ANSWERED, which for a routed AP-REQ is not the
+          // one this socket handler is in — see accept()'s wrapper.
+          realms.run(realms.get(result.trustRealm) || realms.DEFAULT_REALM,
+                     function () {
+            audit.failure(result.errorCode, {
+              protocol: 'Kerberos', channel: 'kerberos',
+              target: servicePrincipal().join('/') + '@' + principals.REALM,
+              summary: 'the Kerberos service refused an AP-REQ over raw TCP',
+              // error-code: none — the code is the one accept() named at the refusal site
+              outcome: 'refused'
+            });
           });
         }
         if (!reply) {
@@ -809,7 +926,8 @@ function startTcp(port) {
   // — so a service confined to 127.0.0.1 still offered this acceptor on every
   // interface. Brackets are URL syntax and are stripped for the socket.
   server.listen(port, listenHost().replace(/^\[|\]$/g, ''), function () {
-    log.info('krb5-service: ' + SERVICE_PRINCIPAL.join('/') + ' listening on ' +
+    log.info('krb5-service: ' + servicePrincipal().join('/') + ' listening ' +
+        'on ' +
         'TCP ' +
       server.address().port + ' — present a GSS-wrapped AP-REQ');
   });
@@ -829,7 +947,7 @@ let lastExchange = null;
 app.get('/krb5/service', function (req, res) {
   log.debug('Entering GET /krb5/service.');
   res.status(200).json({
-    principal: SERVICE_PRINCIPAL.join('/') + '@' + principals.REALM,
+    principal: servicePrincipal().join('/') + '@' + principals.REALM,
     // Every SPN this service will answer for, not just the canonical one: a
     // real service account carries several and one keytab holds a key for each.
     // See the identity check in accept().
@@ -893,6 +1011,13 @@ module.exports = {
   accept: acceptAndRecord,
   acceptRaw: accept,
   SERVICE_PORT: SERVICE_PORT,
-  SERVICE_PRINCIPAL: SERVICE_PRINCIPAL,
+  // The SPN this acceptor holds in the AMBIENT realm. A getter since
+  // 2026-09-15, for `krb5_principals.js`'s reason: a trust realm may carry
+  // `krb5.servicePrincipal`.
+  get SERVICE_PRINCIPAL() {
+    log.debug("Entering SERVICE_PRINCIPAL().");
+    log.debug("Leaving SERVICE_PRINCIPAL().");
+    return servicePrincipal();
+  },
   replayCache: replayCache
 };
