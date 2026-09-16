@@ -53,12 +53,19 @@
 // IT RUNS IN THE DEFAULT REALM, WHICH EVERY OTHER JOB LIKE IT AVOIDS.
 //
 // That is forced and it is worth knowing why rather than reading it as
-// carelessness. **The TLS listeners and the Kerberos KDC are SHARED ACROSS
-// TRUST REALMS** — the root CLAUDE.md lists them among the three socket
-// families with no path to put a realm segment in and no name inside the
-// protocol to put one in either. A throwaway realm therefore cannot have an
-// X.509 sign-in or a TGT of its own, and two of the ten protocols would drop
-// out of a test whose whole point is that none of them does.
+// carelessness. **The TLS listeners are SHARED ACROSS TRUST REALMS** — the root
+// CLAUDE.md lists them among the socket families with no path to put a realm
+// segment in and no name inside the protocol to put one in either — so a
+// throwaway realm cannot have an X.509 sign-in of its own, and one of the ten
+// protocols would drop out of a test whose whole point is that none of them
+// does.
+//
+// **KERBEROS LEFT THAT LIST ON 2026-09-15**, and this file has not moved with
+// it: a trust realm whose `krb5.enabled` is on now has a Kerberos realm and a
+// principal database of its own, so a throwaway realm COULD have a TGT of its
+// own — it would have to be given a `krb5.realm` nothing else answers to, and
+// the TLS half would still hold this job here. Doing it would be a way to
+// exercise a realm's KDC end to end, which nothing does yet.
 //
 // What makes that safe is that **a global sign-out is keyed on an IDENTITY**.
 // The username here is unique per run, so the sweep cannot reach any other

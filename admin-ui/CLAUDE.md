@@ -3388,18 +3388,27 @@ For the console AND `/admin-api`, so rule 7 cannot come apart here. Three
 tables, each refused only to a realm authority (`refusalFor()`):
 
 * **`SERVICE_PAGES`** — persistence, database, encryption, secrets, debugger,
-  TLS (and its truststore), Kerberos, the LDAP service page, the API explorer.
-  Hidden from the nav and `consoleGuide()` (`pageVisible()`), refused whatever
-  the method (`STS-ADMIN-0787`).
+  TLS (and its truststore), the LDAP service page, the API explorer. Hidden from
+  the nav and `consoleGuide()` (`pageVisible()`), refused whatever the method
+  (`STS-ADMIN-0787`). **KERBEROS LEFT THIS LIST ON 2026-09-15 (#33)**: a trust
+  realm has a Kerberos realm, a principal database and keys of its own, so
+  `/admin/kerberos` and `/admin/kerberos/principals` show that realm's and a
+  realm administrator manages them. What is still the process's is refused per
+  SETTING below.
 * **`SERVICE_ACTIONS`** — creating or removing a realm, or naming another realm
   on `/admin/realms`; `build-root` or a `*` scope on `/admin/pki`; exporting the
   `tls-server` key. `REALM_READS` refuses `/admin/realms?realm=<another>`.
 * **SETTINGS** — every `perProcess` row (a realm write of one lands PROCESS-WIDE
   in `config.setOverride()`, so a Save on a realm's page would change the
   process), the `admin.`, `adminApi.`, `realms.`, `workers.`, `persistence.`,
-  `debugger.`, `tls.`, `krb5.`, `keys.` prefixes, `security.passwordHash*`, and
-  a short key list (`global.mode`, `global.publicBaseUrl`, listener and file
-  settings). Any field of a body naming one is refused (`STS-ADMIN-0788`).
+  `debugger.`, `tls.`, `keys.` prefixes, `security.passwordHash*`, and a short
+  key list (`global.mode`, `global.publicBaseUrl`, listener and file settings).
+  Any field of a body naming one is refused (`STS-ADMIN-0788`). **The `krb5.`
+  PREFIX BECAME SIX KEYS on 2026-09-15**, for the reason Kerberos left
+  `SERVICE_PAGES`: the ten rows a realm's principal database is built from are
+  the realm administrator's, and what stays the service's is the two sockets
+  (`krb5.kdcPort`, `krb5.servicePort`) and the development-mode trust
+  (`krb5.trustedRealm` and its three).
   **The `admin.*` and `adminApi.*` gate settings were made `perProcess` for the
   same reason** — a realm override of the console's own groups would otherwise
   be a way round the roster.
@@ -5397,10 +5406,17 @@ the other two, and every next link reloaded page 1
   download the browser would swallow.
 * **A JSON CALLER GETS THE ACTION RESULT**, keytab included, through
   `respondToAction()` exactly as before; only a browser form gets the page.
-* **THE TRUST REALM IS THE DEFAULT ONE WHEREVER THE PAGE IS REACHED**, and the
-  page says so — the KDC is one process-wide socket family, and drawing a realm
-  prefix's own directory here would describe people the KDC will never ask
-  about.
+* **THE TRUST REALM IS THE ONE THE PAGE IS READ IN, SINCE 2026-09-15 (#33)**, and
+  the page says which. This read *THE TRUST REALM IS THE DEFAULT ONE WHEREVER THE
+  PAGE IS REACHED … the KDC is one process-wide socket family, and drawing a realm
+  prefix's own directory here would describe people the KDC will never ask about*.
+  That KDC is per realm now, told apart by the Kerberos realm name on the shared
+  port, so the people drawn here are exactly the ones this realm's KDC asks about.
+  **A realm whose Kerberos is OFF says so** rather than showing two empty tables
+  that read as a service holding nothing, and the page left
+  `admin_scope.js`'s SERVICE_PAGES the same day: a realm administrator manages
+  their own realm's principals and keytabs. What stayed service-only is per
+  SETTING — the two sockets and the development-mode trust.
 
 `encryption_admin.js`'s `DATA_CLASSES` gained a `kerberos-keys` row, because the
 two key attributes are sealed under that label and the encryption report refuses

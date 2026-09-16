@@ -144,9 +144,20 @@
 // certificate, the Kerberos principal database, the directory tree — is
 // consumed for the whole process, realms included, so `realmRuntime` on one of
 // those would be the silent disagreement this file warns about rather than an
-// exemption from it. `krb5.realm` is the one somebody will reach for first, and
-// it is the clearest no: see `realms.js`'s NAMED_BY_REALM, which says the same
-// thing from the other end.
+// exemption from it.
+//
+// **THIS PARAGRAPH CALLED `krb5.realm` "THE CLEAREST NO", AND ON 2026-09-15 IT
+// STOPPED BEING ONE — BY THE TEST ABOVE, NOT AGAINST IT.** The objection was
+// that the principal database is built for the whole process at startup. That
+// was the fact to change rather than the rule: a trust realm now builds a
+// principal database of its OWN, lazily, when its Kerberos is turned on —
+// SPIFFE made the same move for its authorities on 2026-09-12 — so for a realm
+// nothing
+// was consumed at startup, and the nine rows that database is built from are
+// `realmRuntime`. What is still consumed for the process stays refused on a
+// realm: the sockets (`krb5.kdcPort`, `krb5.servicePort`) and the
+// development-mode trust with `krb5.trustedRealm`. The test is still the rule;
+// a setting whose material stays process-wide is still a no.
 //
 // ---------------------------------------------------------------------------
 // This module is a LIBRARY (rule 3): it registers no route, and it requires
@@ -554,6 +565,14 @@ function certificateHeaderSetting(key, group, env, label, what) {
                  'anything. Settable per realm.'
   };
 }
+
+// The sentence every Kerberos row a trust realm's principal database is built
+// from adds to its restart reason (2026-09-15). One copy, because nine rows
+// saying it nine slightly different ways is how one of them ends up wrong.
+const REALM_BUILDS_ITS_OWN = '. A TRUST REALM may carry it even so: a ' +
+  'realm\'s principal database is built when its Kerberos is turned on and ' +
+  'rebuilt when this changes, so nothing about the realm\'s value was ' +
+  'consumed at startup';
 
 const SETTINGS = [
   // --- Global --------------------------------------------------------------
@@ -6490,13 +6509,43 @@ const SETTINGS = [
                  'Verifier\'s request name.' },
 
   // --- Kerberos ------------------------------------------------------------
+  //
+  // **A TRUST REALM HAS A KERBEROS OF ITS OWN SINCE 2026-09-15**, on the same
+  // port 88, routed by the Kerberos realm name inside each request. The rows a
+  // realm's principal database is BUILT from are `realmRuntime`: restart-only
+  // for the process, whose database is built when it starts, and settable on a
+  // realm, whose database is built when its Kerberos is turned on and again
+  // whenever one of them changes (kerberos/krb5_principals.js). The sockets and
+  // the development-mode trust with krb5.trustedRealm stay the process's.
+  { key: 'krb5.enabled', group: 'Kerberos', label: 'Enable Kerberos',
+    env: 'KRB5_ENABLED', type: 'bool', dflt: true, runtime: true,
+    description: 'Whether this realm\'s KDC answers. ON THE SERVICE AS A ' +
+                 'WHOLE it is on, which is the service this repository has ' +
+                 'always been; the sockets on krb5.kdcPort stay bound either ' +
+                 'way. **ON A TRUST REALM it decides whether that realm ' +
+                 'has a Kerberos realm at all**, and a realm is CREATED WITH ' +
+                 'IT OFF. Turning it on is refused until the realm has a ' +
+                 'krb5.realm of its own that no other realm answers to — ' +
+                 'port 88 routes a request by that name — and it builds that ' +
+                 'realm\'s principal database from its own settings.' },
+
   { key: 'krb5.realm', group: 'Kerberos', label: 'Realm',
     env: 'KRB5_REALM', type: 'string', dflt: 'EXAMPLE.COM', runtime: false,
-    restartReason: 'the principal database and every long-term key in it are ' +
-                   'derived from the realm at startup',
+    realmRuntime: true,
+    restartReason: 'the principal database and every long-term key in it ' +
+                   'are derived from the realm at startup. A TRUST REALM may ' +
+                   'carry it even so: a realm is created with Kerberos off ' +
+                   'and ' +
+                   'builds its database when it is turned on, so nothing ' +
+                   'about a realm\'s name was consumed at startup — and it ' +
+                   'cannot be changed while that realm\'s Kerberos is on',
     description: 'The realm this KDC serves. Its lower-cased form is the ' +
                  'domain, which is where the default service domains and the ' +
-                 'PAC\'s domain name come from.' },
+                 'PAC\'s domain name come from. On a trust realm it is the ' +
+                 'name port 88 routes that realm\'s requests by: it must be ' +
+                 'set before krb5.enabled, no two realms may share it (nor ' +
+                 'krb5.trustedRealm), and it is compared without regard to ' +
+                 'case when that is checked.' },
 
   { key: 'krb5.kdcPort', group: 'Kerberos', label: 'KDC port',
     env: 'KRB5_KDC_PORT', type: 'port', dflt: 88, runtime: false,
@@ -6514,7 +6563,9 @@ const SETTINGS = [
   { key: 'krb5.servicePrincipal', group: 'Kerberos', label: 'Service principal',
     env: 'KRB5_SERVICE_PRINCIPAL', type: 'string',
     dflt: 'HTTP/web.example.com', runtime: false,
-    restartReason: 'the account and its long-term keys are created at startup',
+    realmRuntime: true,
+    restartReason: 'the account and its long-term keys are created at startup' +
+                   REALM_BUILDS_ITS_OWN,
     description: 'The SPN that test service holds, in the usual ' +
                  'service/hostname form. The account the acceptor decrypts ' +
                  'with is created FROM this name, with krb5.servicePassword ' +
@@ -6524,8 +6575,10 @@ const SETTINGS = [
   { key: 'krb5.servicePassword', group: 'Kerberos',
     label: 'Service principal password', env: 'KRB5_SERVICE_PASSWORD',
     type: 'string', dflt: 'service-account-password', runtime: false,
+    realmRuntime: true,
     restartReason: 'the service account\'s long-term keys are derived from ' +
-                   'it at startup',
+                   'it at startup' +
+                   REALM_BUILDS_ITS_OWN,
     description: 'The password of the account krb5.servicePrincipal names — ' +
                  'the equivalent of a keytab. In PRODUCT MODE the shipped ' +
                  'default is refused: that value is printed in this ' +
@@ -6538,8 +6591,10 @@ const SETTINGS = [
 
   { key: 'krb5.serviceSalt', group: 'Kerberos', label: 'Service principal salt',
     env: 'KRB5_SERVICE_SALT', type: 'string', dflt: '', runtime: false,
+    realmRuntime: true,
     restartReason: 'the service account\'s long-term keys are derived from ' +
-                   'it at startup',
+                   'it at startup' +
+                   REALM_BUILDS_ITS_OWN,
     description: 'The string-to-key salt for that account. Empty means this ' +
                  'service\'s convention — the realm followed by the service ' +
                  'name and the host\'s first label (EXAMPLE.COMHTTPweb). A ' +
@@ -6550,8 +6605,10 @@ const SETTINGS = [
   { key: 'krb5.enctypes', group: 'Kerberos', label: 'Encryption types',
     env: 'KRB5_ENCTYPES', type: 'csv', dflt: '18,17,20,19,23',
     runtime: false,
+    realmRuntime: true,
     restartReason: 'every principal\'s supported encryption types are fixed ' +
-                   'at startup',
+                   'at startup' +
+                   REALM_BUILDS_ITS_OWN,
     description: 'The encryption types this KDC and acceptor use at all, as ' +
                  'RFC 3961 numbers, strongest first: 18 ' +
                  'aes256-cts-hmac-sha1-96, 17 aes128-cts-hmac-sha1-96, 20 ' +
@@ -6566,7 +6623,9 @@ const SETTINGS = [
   { key: 'krb5.kvno', group: 'Kerberos', label: 'Key version number',
     env: 'KRB5_KVNO', type: 'int', dflt: 3, min: 1, max: 2147483647,
     runtime: false,
-    restartReason: 'every principal\'s key version is fixed at startup',
+    realmRuntime: true,
+    restartReason: 'every principal\'s key version is fixed at startup' +
+                   REALM_BUILDS_ITS_OWN,
     description: 'The key version number every account BUILT FROM A PASSWORD ' +
                  'IN THIS CONFIGURATION holds — krbtgt, the acceptor\'s ' +
                  'account, and in development every fixture and on-demand ' +
@@ -6660,8 +6719,10 @@ const SETTINGS = [
   { key: 'krb5.userPassword', group: 'Kerberos', label: 'User password',
     env: 'KRB5_USER_PASSWORD', type: 'string', dflt: 'password!',
     runtime: false,
+    realmRuntime: true,
     restartReason:
-      'every user\'s long-term keys are derived from it at startup',
+      'every user\'s long-term keys are derived from it at startup' +
+                   REALM_BUILDS_ITS_OWN,
     description: 'The password every user account here has. It is PUBLISHED ' +
                  'by GET /krb5/principals on purpose: a debugger whose ' +
                  'accounts are unusable without reading the source is worse ' +
@@ -6695,8 +6756,10 @@ const SETTINGS = [
   { key: 'krb5.autoServicePassword', group: 'Kerberos',
     label: 'Auto-created service password', env: 'KRB5_AUTO_SERVICE_PASSWORD',
     type: 'string', dflt: 'auto-service-password', runtime: false,
+    realmRuntime: true,
     restartReason: 'those accounts\' long-term keys are derived from it at ' +
-                   'startup',
+                   'startup' +
+                   REALM_BUILDS_ITS_OWN,
     description: 'One password for every service created on demand, and it ' +
                  'is published for the same reason the user password is: it ' +
                  'is what lets a reader decrypt a service ticket this mock ' +
@@ -6706,14 +6769,18 @@ const SETTINGS = [
   { key: 'krb5.krbtgtPassword', group: 'Kerberos', label: 'krbtgt password',
     env: 'KRB5_KRBTGT_PASSWORD', type: 'string', dflt: 'krbtgt-mock-password',
     runtime: false,
-    restartReason: 'the krbtgt keys are derived from it at startup',
+    realmRuntime: true,
+    restartReason: 'the krbtgt keys are derived from it at startup' +
+                   REALM_BUILDS_ITS_OWN,
     description: 'The key that seals every Ticket-Granting Ticket this realm ' +
                  'issues.' },
 
   { key: 'krb5.domainSid', group: 'Kerberos', label: 'Domain SID',
     env: 'KRB5_DOMAIN_SID', type: 'string',
     dflt: 'S-1-5-21-1004336348-1177238915-682003330', runtime: false,
-    restartReason: 'every principal\'s PAC identity is built at startup',
+    realmRuntime: true,
+    restartReason: 'every principal\'s PAC identity is built at startup' +
+                   REALM_BUILDS_ITS_OWN,
     description: 'The domain SID every account\'s PAC is built under. A ' +
                  'Kerberos ticket says who you are; a Windows service ' +
                  'authorizes on the SIDs in the PAC.' },

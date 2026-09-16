@@ -252,10 +252,13 @@ outside it:
    the realm a person signed in through; the default realm's is the service
    roster over every realm, and `admin-ui/admin_scope.js` refuses a realm's own
    everything about the process. — `admin-ui/CLAUDE.md` 8d, `mgmt-api/CLAUDE.md`
-5. **Kerberos and the two TLS listeners are still shared**, having no path and no
-   name inside the protocol to put a realm in. SPIFFE left that list on
-   2026-09-12 — a realm gets a trust domain and sockets of its own, told apart
-   by ADDRESS. — `tls/CLAUDE.md`, `spiffe/CLAUDE.md`
+5. **The two TLS listeners are still shared**, having no path and no name
+   inside the protocol to put a realm in. SPIFFE left that list on 2026-09-12 —
+   a realm gets a trust domain and sockets of its own, told apart by ADDRESS —
+   and **Kerberos left it on 2026-09-15 (#33)**: a KDC per realm on the shared
+   port 88, told apart by the Kerberos realm NAME in the request, with the two
+   sockets and the development-mode trust still the process's. —
+   `tls/CLAUDE.md`, `spiffe/CLAUDE.md`, `kerberos/CLAUDE.md`
 6. **A realm may be in RFC 9700 mode — or OAuth 2.1 mode, which implies it —
    while the process is not** — the `realmRuntime` marker, which must not grow
    rows by analogy. — `common/CLAUDE.md`, `oauth-oidc/CLAUDE.md`
@@ -763,7 +766,7 @@ the file the row names.
 | Offer a self-service reset of a second factor | `admin-ui/CLAUDE.md` |
 | Decide who may delegate to whom IN THE ACT, in two of the three families that can | `common/CLAUDE.md`, `kerberos/CLAUDE.md`, `oauth-oidc/CLAUDE.md` |
 | ~~Give every trust realm a certificate authority of its own~~ — **reversed 2026-09-11**: one Root, an Intermediate per realm, and the boundary moved down a tier | `common/CLAUDE.md`, `docs/pki.md` |
-| Give a trust realm its own Kerberos KDC or TLS listeners (the directory and SPIFFE came off this row) | `common/CLAUDE.md`, `ldap/CLAUDE.md`, `spiffe/CLAUDE.md` |
+| Give a trust realm its own TLS listeners (the directory, SPIFFE and — **reversed 2026-09-15 (#33)** — Kerberos came off this row: a KDC, a Kerberos realm and keys per trust realm, routed by the realm name on the shared port 88) | `common/CLAUDE.md`, `ldap/CLAUDE.md`, `spiffe/CLAUDE.md`, `kerberos/CLAUDE.md` |
 | ~~Give a trust realm its own administrator~~ — **reversed 2026-09-14 (#32)**: a realm's own roster, confined to the realm; the default realm's stays the service roster | `admin-ui/CLAUDE.md`, `mgmt-api/CLAUDE.md`, `ldap/CLAUDE.md` |
 | ~~Persist anything it MINTS~~ — **reversed 2026-09-06, in product mode on postgres only** | `persistence/CLAUDE.md`, `admin-ui/CLAUDE.md` |
 | Deliver a response to an address nobody registered, **in product mode** — an address development merely observed is marked and refused until confirmed | `common/applications.js`, `saml/CLAUDE.md`, `common/oidc_rp.js` |

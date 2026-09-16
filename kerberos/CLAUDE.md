@@ -342,6 +342,14 @@ into its image. The 2026-08-23 reorganisation broke both, because they named fla
 paths (`sts/krb5_kdc.js`); **both were repaired over there on 2026-08-28** and
 this paragraph described the breakage as open until then.
 
+**THE 2026-09-15 REALM ROUTING ADDED NO FILE TO THAT CLOSURE**, which is the
+thing to check whenever this directory grows a require. `krb5_kdc.js` gained
+`require('../common/realms')` — already in the closure through
+`krb5_principals.js`, which has required it since the store was declared there —
+and `krb5_principals.js` gained nothing at all: the context, the router and the
+three refusals are functions in files those four jobs already load. So the
+`sts/` COPY set is exactly what it was.
+
 **Those four callers still pass BARE filenames, and that is correct — do not add
 directories to them.** `mockStsModule()` was fixed by making the RESOLVER search
 the mock's subdirectories rather than by making every caller name one, so
@@ -529,15 +537,83 @@ that exactly ONE authentication is recorded per sign-in rather than a ticket
 acceptance beside a session start.
 
 
+## A KDC PER TRUST REALM, ON THE SHARED PORT 88 (2026-09-15, issue #33)
+
+**The Kerberos realm name inside the request is the discriminator**, and that is
+the whole design. Kerberos has realms of its own, every AS-REQ and TGS-REQ names
+one, and until this date this service threw that away: one KDC, one principal
+database, one `krb5.realm` for the process, pinned to the default trust realm.
+
+**Where the choice is made.** `krb5_kdc.js`'s `routeOf()`, in `handleMessage()` —
+the one function both sockets and `/KdcProxy` reach — picks the trust realm and
+`realms.run()` answers inside it. Everything downstream then follows without
+being told which realm it is in: the settings each handler reads, the database it
+looks names up in, and the statistics, audit rows, delegation acts and issuance
+gate it records. **Routing at each handler instead would be two places to forget,
+and what is forgotten is silent — an answer from the wrong realm's database is a
+ticket, not an error.**
+
+**Two doors, two rules.** The sockets and a bare `/KdcProxy` route by NAME, which
+is what a client configures (`kdc = …` per realm in `krb5.conf`). A realm's own
+`/realm/<id>/KdcProxy` is PINNED to that realm and refuses another realm's name
+with `KDC_ERR_WRONG_REALM` (`STS-KRB-0122`): the prefix is an address somebody
+chose, so answering a different realm's request on it would make the prefix a
+decoration. `krb5_service.js`'s `accept()` follows the same two rules for an
+AP-REQ (step 2a), refusing with `STS-KRB-0126`.
+
+**What a realm's context holds, and when it is built.** `krb5_principals.js`
+keeps one CONTEXT per trust realm — the realm name, the domain, the SIDs, the
+etypes, the kvno, the passwords, the service account, `SEEDS_DEMO`, and the set
+of keys its settings configured. The default realm's is built at require time
+from the process's values and never rebuilt; another realm's is built when its
+Kerberos is turned on and rebuilt when a `BUILT_FROM` setting changes on it. **A
+context is put in the map BEFORE its database is built**, because building
+registers principals and `register()` asks `current()` for the defaults.
+
+**The exported constants became getters.** `principals.REALM`, `KDC_ETYPES`,
+`KVNO`, `USER_PASSWORD`, `SERVICE_DOMAINS`, `AUTO_SERVICE_PASSWORD`,
+`DOMAIN_SID` and `seedsDemoPrincipals` answer for the AMBIENT realm, which
+outside any realm is the default one — so every caller in six directories reads
+the same property and gets the right realm's answer, and the parent project's
+in-process jobs see exactly what they saw before.
+
+**The three stores are per realm** (`realms.map()`, which grew the `reconcile`
+hook `sharedMap()` had): `krb5.principals`, `krb5.replayCache` and
+`spnego.pending`. The last of those fixed a bug rather than only satisfying a
+rule — its key is `door|id` with the realm prefix already stripped, so a
+negotiation begun under one realm's prefix could be continued under another's.
+
+**Three refusals hold the routing together**, and they are in `realms.js` rather
+than here because they are about a realm's OVERRIDES and must be made before
+anything is built: Kerberos on with no `krb5.realm` of its own
+(`STS-KRB-0123`), a name another realm answers to (`STS-KRB-0124`, compared
+without regard to case, including the default realm's and `krb5.trustedRealm`),
+and a rename or clear while it is on (`STS-KRB-0125`, because every key in that
+realm's database is salted with the name).
+
+**What is still the PROCESS's**, and each for a reason that has not changed: the
+two sockets (`krb5.kdcPort`, `krb5.servicePort`), and the development-mode second
+realm and its trust (`krb5.trustedRealm` and its three settings). **Trust realms
+do not trust each other's Kerberos** — rcbj's decision — so a realm's KDC holds
+no `krbtgt/<other realm>` and a service in another realm's domain is unknown
+there rather than a referral.
+
+**What has no test yet:** a person keyed in a non-default realm signing in over
+SPNEGO end to end (the acceptor's realm routing is asserted in
+`tests/kerberos_realm_routing.js` only through the KDC), and two nodes of a
+cluster answering for the same non-default realm.
+
 ## PRODUCT MODE, AND THE LITERALS AN AUDIT FOUND IN THIS DIRECTORY (2026-09-12)
 
-**The principal database is built at REQUIRE TIME in the mode the PROCESS starts
-in, and that is captured once as `SEEDS_DEMO`.** `global.mode` is runtime and per
-trust realm, but this KDC answers in no realm and its long-term keys are material
-derived at startup — the kind `common/CLAUDE.md` says must never be marked
-runtime — so switching the mode later adds and removes no principal. `realmsServed()`
-and `realmForService()` read the same captured value, so the database and the realms
-it answers for cannot disagree.
+**The DEFAULT realm's principal database is built at REQUIRE TIME in the mode the
+PROCESS starts in, and that is captured once as `ctx.SEEDS_DEMO`.** Its long-term keys
+are material derived at startup — the kind `common/CLAUDE.md` says must never be marked
+runtime — so switching the process's mode later adds and removes no principal there.
+**Another trust realm's is built when its Kerberos is TURNED ON (2026-09-15), in THAT
+realm's mode**, and rebuilt when a setting it was built from changes on that realm —
+`global.mode` among them, because a realm's settings are exactly what may change under a
+running process. `realmsServed()` and `realmForService()` read the same captured value as
+the database they belong to, so the two cannot disagree.
 
 **What product mode (`mode.seedsDemoData()` false) does NOT create**: every entry in
 `DEFINITIONS` below `krbtgt` — alice, bob and the five misconfigured users, the
@@ -706,10 +782,15 @@ half). Six things about it are decisions:
   stamp beside the keys, so a value copied to another entry names the wrong person and one
   kept past a password change carries the wrong stamp. While keys persist a CLEAR value is
   refused, so an `ldapmodify` cannot plant a key of its choosing.
-* **THE TRUST REALM IS THE DEFAULT ONE.** The KDC's sockets and `krb5.realm` are the
-  process's; the directory slot `ldap_server.js` fills is pinned to the default realm, and a
-  password set in another realm derives nothing — keys nothing reads are password-equivalent
-  material for nobody. This is NOT per-realm Kerberos, and `realmSupport()` still says so.
+* **THE TRUST REALM IS THE AMBIENT ONE (2026-09-15).** This read *THE TRUST REALM IS THE
+  DEFAULT ONE … the directory slot `ldap_server.js` fills is pinned to the default realm, and
+  a password set in another realm derives nothing. This is NOT per-realm Kerberos*. It is
+  now: the slot's six hooks lost their `inDefaultRealm()` wrapper, the observer's gate is
+  `principals.enabledIn()` rather than `realms.isDefault()`, and a password set in a realm
+  whose Kerberos is ON derives keys onto that person's entry in that realm's own subtree,
+  salted with that realm's Kerberos realm. A realm with no KDC still derives nothing, for
+  the same reason as before: keys nothing reads are password-equivalent material for
+  nobody.
 * **NOTHING IS SHOWN.** Both key attributes are withheld from the directory dump and from an
   LDAP search (ciphertext included), from `applications.view()`, from `/admin-api` and from
   the audit log. A service key leaves this service ONCE, as the keytab the create or rotate

@@ -1435,17 +1435,23 @@ reader derives from four directory files. The short version:
   and an SVID minted on those shared sockets — which answer in the default realm
   — verifies against it wherever it was fetched. What partitioning the authority
   buys is a chain that says which realm issued an SVID; what it deliberately
-  does not touch is the trust domain, which is still one for the whole service. Kerberos is the one with an obvious way forward, and it is
-  written down in `realmSupport()` rather than left to be rediscovered: Kerberos
-  already HAS a realm, so give each trust realm a `krb5.realm` of its own and
-  dispatch a request on the realm name it carries. What stands in the way is
-  that `krb5.realm` is not runtime-settable — the principal database and its
-  long-term keys are built from it at require time — so that database has to
-  become per-realm and lazily built first.
+  does not touch is the trust domain, which is still one for the whole service.
+  **KERBEROS LEFT THIS BULLET ON 2026-09-15 (#33)**, by the route written down
+  here while it was still owed: Kerberos already HAS a realm, so each trust
+  realm gets a `krb5.realm` of its own and a request is dispatched on the realm
+  name it carries. What stood in the way — *the principal database and its
+  long-term keys are built from it at require time* — was the thing to change
+  rather than the obstacle: the DEFAULT realm's database is still built at
+  require time, another realm's is built when its Kerberos is turned on and
+  rebuilt when a setting it was built from changes, and `krb5.realm` is
+  `realmRuntime` for exactly that reason. The two sockets and the
+  development-mode trust are still the process's. `kerberos/CLAUDE.md` argues
+  it.
 * **MOVED FROM THE ROOT `CLAUDE.md`'s TRUST-REALM INDEX, AND IT IS LATER THAN
-  THE BULLET ABOVE:** Kerberos and the two TLS listeners are still shared,
-  because a socket has no path to put a segment in and — unlike the directory —
-  no name inside it to put one in either. **SPIFFE LEFT THIS LIST ON 2026-09-12
+  THE BULLET ABOVE:** the two TLS listeners are still shared, because a socket
+  has no path to put a segment in and — unlike the directory — no name inside it
+  to put one in either. **Kerberos was on this list until 2026-09-15**, when the
+  realm name inside the protocol turned out to be exactly such a name. **SPIFFE LEFT THIS LIST ON 2026-09-12
   AND THE SENTENCE IT LEFT BEHIND IS WORTH KEEPING**: it read *SPIFFE's sockets
   are still shared and its X.509 authority is not, since 2026-09-11, and the two
   facts are compatible for exactly one reason — the trust ANCHOR is the service
@@ -1588,9 +1594,11 @@ accepted change that does nothing reads as having worked. Three kinds qualify an
 is worth knowing which: a **bound socket** (the HTTP port AND ITS SCHEME — see
 `global.https`, which is why `oauth2.rfc9700` is restart-only — both TLS ports,
 both LDAP ports, both Kerberos ports); **material derived at startup** (the TLS certificate is
-issued for `tls.hostnames`/`tls.ips` at boot, and the Kerberos principal database and
-every long-term key in it comes from the realm, the SIDs and the passwords at require
-time); and **the directory tree**, which `ldap.baseDn` is the root of. Marking a
+issued for `tls.hostnames`/`tls.ips` at boot, and the DEFAULT realm's Kerberos principal
+database and every long-term key in it comes from the realm, the SIDs and the passwords at
+require time — another trust realm's is built when its Kerberos is turned on, which is why
+those ten rows are `realmRuntime`); and **the directory tree**, which `ldap.baseDn` is the
+root of. Marking a
 setting runtime when the thing derived from it is not rebuilt is worse than marking
 it restart-only, because the two then disagree silently.
 
@@ -1640,19 +1648,30 @@ requirements that are properties of the deployment come back `no` rather than
 **Do not add a second `realmRuntime` row by analogy.** The test is the paragraph
 above: the restart reason has to be something a realm demonstrably does not have.
 Anything whose value was consumed at startup to build MATERIAL — the TLS
-certificate, the Kerberos principal database, the directory tree — was consumed
-for the whole process, realms included, so marking one of those would be exactly
-the silent disagreement this section warns about. `krb5.realm` is the one
-somebody will reach for first and it is the clearest no; `NAMED_BY_REALM` in
-`realms.js` says the same thing from the other end.
+certificate, the directory tree — was consumed for the whole process, realms
+included, so marking one of those would be exactly the silent disagreement this
+section warns about.
+
+**THIS PARAGRAPH NAMED `krb5.realm` AS "THE CLEAREST NO", AND ON 2026-09-15 TEN
+KERBEROS ROWS WERE MARKED — BY THE TEST ABOVE RATHER THAN AGAINST IT.** The
+material a realm's Kerberos is built from is no longer built at startup: a realm
+is created with `krb5.enabled` off and builds its principal database when it is
+turned on, rebuilding it when one of those ten changes. So for a realm nothing
+was consumed at any startup, which is the same argument SPIFFE's six made on
+2026-09-12. What is still consumed for the PROCESS is still a no: `krb5.kdcPort`
+and `krb5.servicePort` are bound sockets, and `krb5.trustedRealm` and its three
+build the development-mode second realm at startup.
 
 **MOVED FROM THE ROOT `CLAUDE.md`'s TRUST-REALM INDEX, AND IT DISAGREES WITH THE
 TWO PARAGRAPHS ABOVE, WHICH SAY ONE ROW** — a realm may be in RFC 9700 mode while
-the process is not: the `realmRuntime` marker, which has SEVEN rows since
-2026-09-12 (it had one until then) and must not get an eighth by analogy:
-`oauth2.rfc9700` and the six SPIFFE rows a realm's own listeners are bound from,
-whose argument is made at the head of that group in `config.js` rather than
-borrowed from this one. **`oauth2.oauth21` (2026-09-13) made the argument again
+the process is not: the `realmRuntime` marker, which had SEVEN rows from
+2026-09-12 (it had one until then), TWELVE from 2026-09-13 and **TWENTY-TWO since
+2026-09-15**, and must not get a twenty-third by analogy: `oauth2.rfc9700`,
+`oauth2.oauth21`, the six SPIFFE rows a realm's own listeners are bound from, and
+the ten Kerberos rows a realm's own principal database is built from — each
+group's argument made at the head of its own group in `config.js` rather than
+borrowed from this one. `tests/config_realm_layer.js` pins the list, which is
+what makes adding one a decision. **`oauth2.oauth21` (2026-09-13) made the argument again
 rather than copying the line**: it turns RFC 9700 mode on, so its ONE
 restart-only consequence is the same socket through the same derivation —
 `global.https` reads both flags through `processValue()` — and nothing else is

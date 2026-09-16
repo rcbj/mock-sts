@@ -72,9 +72,10 @@ const config = require('../common/config');
 // which this module already requires — so it can neither move a route nor
 // close a cycle.
 const mode = require('../common/mode');
-// PER PROCESS AND NOT PER REALM — see the store below. Required only for
-// `sharedMap()`, and it is a LEAF that registers no route, so this cannot
-// move a route or join a cycle.
+// PER TRUST REALM SINCE 2026-09-15 — the store below is a partition per realm,
+// and this is also what `contextOf()` enters to build one. A LEAF that
+// registers no route, so this cannot move a route or join a cycle, and it was
+// already in the parent project's copy set before that change.
 const realms = require('../common/realms');
 // ERROR CODES. A LEAF requiring nothing, already in the parent project's copy
 // set through common/audit.js. Only tag() is used: every failure here happens
@@ -82,8 +83,42 @@ const realms = require('../common/realms');
 // an audit ring exists to hold a row.
 const errorCodes = require('../common/error_codes');
 
-const REALM = config.value('krb5.realm');
-const DOMAIN = REALM.toLowerCase();
+// ---------------------------------------------------------------------------
+// ONE PRINCIPAL DATABASE PER TRUST REALM (2026-09-15).
+//
+// Until this date everything below the requires was a constant read at require
+// time — `REALM`, the domain SID, the etypes, the kvno, every password —
+// because the KDC was one of the socket families a trust realm did not get:
+// port 88 has no path to put a realm segment in, so the database was the
+// PROCESS's and was pinned to the default trust realm. **The Kerberos realm
+// name inside every request is a discriminator the protocol already carries**,
+// and the KDC now routes on it: each trust realm whose Kerberos is on has a
+// `krb5.realm` of its own, a principal database of its own (a partition of the
+// store below) and keys of its own, on the same port.
+//
+// So those values are a CONTEXT per trust realm — see `contextOf()` below —
+// built from that realm's settings inside that realm:
+//
+//   * **THE DEFAULT REALM'S IS BUILT HERE, AT REQUIRE TIME, EXACTLY AS THE
+//     CONSTANTS WERE**, from the process's values, and is never rebuilt — so a
+//     process with no realms defined has the database it always had, and the
+//     parent project's in-process jobs (which set KRB5_REALM and require this
+//     file) see nothing different;
+//   * **ANOTHER REALM'S IS BUILT ON FIRST USE**, only while its `krb5.enabled`
+//     is on, and REBUILT when a setting it was built from changes on that realm
+//     (`realms.onChange`). A realm whose Kerberos is off has an INACTIVE
+//     context: no principal, and no name the KDC routes to it.
+//
+// `REALM`, `KDC_ETYPES` and the rest are still exported under the same names,
+// as getters answering for the AMBIENT realm — the realm `realms.run()`
+// entered, or the default one outside any. The KDC enters the realm a request
+// is for before it looks anything up, which is what makes every reader below
+// right without being told which realm it is in.
+//
+// **WHAT A REALM DOES NOT GET, by rcbj's decision:** a trust with another trust
+// realm. The development-mode second realm and its trust (`krb5.trustedRealm`)
+// stay the DEFAULT realm's, and a realm's KDC holds no `krbtgt/<other realm>`.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // WHETHER THIS DATABASE CARRIES THE FIXTURE ACCOUNTS, DECIDED ONCE
@@ -101,17 +136,17 @@ const DOMAIN = REALM.toLowerCase();
 // `krbtgt` and the account `krb5.servicePrincipal` names — each only where its
 // password is not the published default (see `publishedDefault()` below).
 //
-// **CAPTURED AT REQUIRE TIME AND NOT READ PER REQUEST**, and that is the honest
-// shape rather than a shortcut: the database and every long-term key in it are
-// built here, at require time, which is why `krb5.realm` and every password
-// setting are restart-only. `global.mode` is runtime-settable and per trust
-// realm, but this KDC is one of the socket families a realm does not get — it
-// answers in no realm — so the mode it is built in is the PROCESS's mode at
-// startup, and changing it later adds and removes no principal.
-// `realmsServed()` reads the same captured value so the database and the realms
-// it answers for cannot disagree.
+// **CAPTURED WHEN THE DATABASE IS BUILT AND NOT READ PER REQUEST**, and that is
+// the honest shape rather than a shortcut: the database and every long-term key
+// in it are built at that moment. For the DEFAULT realm that is require time,
+// in the PROCESS's mode, and changing `global.mode` later adds and removes no
+// principal. For another trust realm (2026-09-15) it is when that realm's
+// Kerberos is turned on, in THAT realm's mode — and a change to the realm's
+// `global.mode` rebuilds its database, because a realm's settings are exactly
+// what may change under a running process. `realmsServed()` reads the same
+// captured value, `ctx.SEEDS_DEMO`, so the database and the realms it answers
+// for cannot disagree.
 // ---------------------------------------------------------------------------
-const SEEDS_DEMO = mode.seedsDemoData();
 
 // The value a setting ships with, read off its row rather than written out a
 // second time here. A password equal to it is a password printed in this
@@ -163,29 +198,38 @@ function parseEtypes(list) {
   return { ids: ids, problems: problems };
 }
 
-const KDC_ETYPES = (function configuredEtypes() {
+// The etypes, for the realm being built. FATAL for the DEFAULT realm, whose
+// database is built at require time, for `config.js`'s reason: a KDC answering
+// with a narrower list than it was configured with is wrong in a way no page
+// shows, and a throw out of a require lands as a stack trace whose top frame is
+// node's loader. **For another trust realm it is NOT fatal** (2026-09-15): that
+// value came from a realm override under a running process, and one realm's
+// typo must not stop the service every other realm is on — so the realm's
+// context is left inactive, with the sentence as its reason, and its name is
+// not routed.
+function configuredEtypes(realmId) {
   log.debug("Entering configuredEtypes().");
   const parsed = parseEtypes(config.value('krb5.enctypes'));
   if (parsed.problems.length) {
-    // FATAL, for `config.js`'s reason: a KDC answering with a narrower list
-    // than it was configured with is wrong in a way no page shows, and a throw
-    // out of a require lands as a stack trace whose top frame is node's loader.
-    log.fatal(errorCodes.tag('STS-KRB-0058') +
-              'krb5: NOT STARTING. krb5.enctypes (KRB5_ENCTYPES) names ' +
-              parsed.problems.join(', ') + ', which the Kerberos codec here ' +
-              'does not implement. It performs 17, 18, 19, 20 and 23 ' +
-              '(aes128-cts-hmac-sha1-96, aes256-cts-hmac-sha1-96, ' +
-              'aes128-cts-hmac-sha256-128, aes256-cts-hmac-sha384-192, ' +
-              'rc4-hmac); DES is decode-only.');
-    process.exit(1);
+    const sentence = 'krb5.enctypes (KRB5_ENCTYPES) names ' +
+      parsed.problems.join(', ') + ', which the Kerberos codec here ' +
+      'does not implement. It performs 17, 18, 19, 20 and 23 ' +
+      '(aes128-cts-hmac-sha1-96, aes256-cts-hmac-sha1-96, ' +
+      'aes128-cts-hmac-sha256-128, aes256-cts-hmac-sha384-192, ' +
+      'rc4-hmac); DES is decode-only.';
+    if (realmId === realms.DEFAULT_ID) {
+      log.fatal(errorCodes.tag('STS-KRB-0058') + 'krb5: NOT STARTING. ' +
+                sentence);
+      process.exit(1);
+    }
+    log.error(errorCodes.tag('STS-KRB-0058') + 'krb5: realm "' + realmId +
+              '" has no KDC: ' + sentence);
+    log.debug("Leaving configuredEtypes(). Refused for a realm.");
+    return { ids: null, problem: sentence };
   }
   log.debug("Leaving configuredEtypes().");
-  return parsed.ids;
-})();
-
-// Every account's key version. One per account: rotation is not modelled —
-// see `krb5.kvno`.
-const KVNO = config.value('krb5.kvno');
+  return { ids: parsed.ids, problem: '' };
+}
 
 // AD's salt for a user account: realm + sAMAccountName, no separator.
 function userSalt(realm, name) {
@@ -224,8 +268,10 @@ function userSalt(realm, name) {
 // krbtgt/PARTNER.COM and the trust have to hold three DIFFERENT secrets or
 // every assertion about which key sealed which ticket would pass for the wrong
 // reason.
+//
+// Read into each realm's context (`ctx.USER_PASSWORD`) when its database is
+// built — see contextOf().
 // ---------------------------------------------------------------------------
-const USER_PASSWORD = config.value('krb5.userPassword');
 
 // The usernames that stay unknown, so KDC_ERR_C_PRINCIPAL_UNKNOWN is still
 // reachable.
@@ -285,18 +331,31 @@ function reservedUnknown() {
 // value still creates nothing — the distinction between "unset" and "set to
 // nothing" that this expression used to make with `=== undefined` is now the
 // distinction between a setting with no value anywhere and one set to ''.
-const SERVICE_DOMAINS = config.value('krb5.serviceDomains')
-  .map(function (name) { return name.toLowerCase(); });
+//
+// **AND IT IS THE ONE DERIVED SETTING A TRUST REALM'S VALUE MOVES**
+// (2026-09-15). Its default is `<krb5.realm lower-cased>,localhost,sts,
+// 127.0.0.1`, read where the context is built — inside the realm — so a realm
+// named ACME.EXAMPLE.COM is willing to be `HTTP/web.acme.example.com` and not
+// another realm's `HTTP/web.example.com`. `tests/config_realm_layer.js` carries
+// that decision as the exemption to its rule about derived rows, which is where
+// that file says such a decision gets written down.
+function serviceDomainsFor() {
+  log.debug("Entering serviceDomainsFor().");
+  log.debug("Leaving serviceDomainsFor().");
+  return config.value('krb5.serviceDomains').map(function (name) {
+    return String(name).toLowerCase();
+  });
+}
 
-// One password for every service created on demand, and it is PUBLISHED by GET
-// /krb5/principals for the same reason USER_PASSWORD is: a debugger whose
-// accounts are unusable without reading the source is worse than one that says
-// what they are. It is what lets a reader decrypt a service ticket this mock
-// issued — the ticket's own EncTicketPart, the PAC inside it, the four
-// signatures — which is otherwise the one thing a client can never see. The
-// CONFIGURED service accounts keep their own separate passwords, so nothing
-// about this weakens an assertion about which key sealed which ticket.
-const AUTO_SERVICE_PASSWORD = config.value('krb5.autoServicePassword');
+// One password for every service created on demand
+// (`ctx.AUTO_SERVICE_PASSWORD`), and it is PUBLISHED by GET /krb5/principals
+// for the same reason USER_PASSWORD is: a debugger whose accounts are unusable
+// without reading the source is worse than one that says what they are. It is
+// what lets a reader decrypt a service ticket this mock issued — the ticket's
+// own EncTicketPart, the PAC inside it, the four signatures — which is
+// otherwise the one thing a client can never see. The CONFIGURED service
+// accounts keep their own separate passwords, so nothing about this weakens an
+// assertion about which key sealed which ticket.
 
 // ---------------------------------------------------------------------------
 // The domain SID, and the account data that goes into the PAC.
@@ -312,8 +371,12 @@ const AUTO_SERVICE_PASSWORD = config.value('krb5.autoServicePassword');
 // The domain SID is a fixed made-up one. Real ones are random per domain, and
 // the only thing that matters here is that it is the same in every ticket,
 // since a service compares SIDs and not names.
+//
+// Per trust realm (`ctx.DOMAIN_SID`, 2026-09-15): a realm that inherits the
+// process's SID and a realm that sets its own are both things worth being able
+// to build, and a service authorizing on the PAC is exactly where the
+// difference shows.
 // ---------------------------------------------------------------------------
-const DOMAIN_SID = config.value('krb5.domainSid');
 
 // ---------------------------------------------------------------------------
 // The second realm, and the trust between them.
@@ -331,6 +394,12 @@ const DOMAIN_SID = config.value('krb5.domainSid');
 //
 // Its own domain SID differs, which is the point of having it: SID filtering
 // across a trust is about whose domain a SID belongs to.
+//
+// **THE DEFAULT TRUST REALM'S ALONE** (2026-09-15). These four are the
+// PROCESS's values, read here at require time outside any realm, and only the
+// default realm's database holds the trust or answers for the second realm.
+// Another trust realm's KDC stands alone: rcbj's decision was that trust realms
+// do not trust each other's Kerberos.
 // ---------------------------------------------------------------------------
 const TRUSTED_REALM = config.value('krb5.trustedRealm');
 const TRUSTED_DOMAIN = TRUSTED_REALM.toLowerCase();
@@ -385,391 +454,436 @@ function hostSalt(realm, shortName, dnsDomain) {
 // SEEDS_DEMO above). The HTTP/web entry among the fixtures is REPLACED by the
 // account `krb5.servicePrincipal` names when the two are the same name, which
 // they are at the default settings — see `configuredServiceDefinition()`.
-const KRBTGT_DEFINITION = {
-  name: ['krbtgt', REALM],
-  type: 2,                                   // NT-SRV-INST
-  password: config.value('krb5.krbtgtPassword'),
-  salt: userSalt(REALM, 'krbtgt'),
-  description: 'the ticket-granting service, whose key seals every TGT'
-};
-
-const DEFINITIONS = [
-  KRBTGT_DEFINITION,
-  {
-    name: ['alice'],
-    type: 1,                                   // NT-PRINCIPAL
-    salt: userSalt(REALM, 'alice'),
-    description: 'an ordinary user; pre-authentication required, as Active ' +
-                 'Directory requires it',
-    pac: {
-      rid: 1104,
-      fullName: 'Alice Example',
-      groups: [RID.DOMAIN_USERS, RID.DOMAIN_ADMINS],
-      userAccountControl: UAC.NORMAL_ACCOUNT,
-      // The two well-known SIDs that record HOW an identity was established. A
-      // real AD puts the first one in every PAC it issues from a password
-      // logon, and a service can refuse an identity the KDC merely asserted —
-      // which is why they are here rather than being tidied away as noise.
-      extraSids: ['S-1-18-1', 'S-1-5-11']
-    }
-  },
-  {
-    name: ['bob'],
-    type: 1,
-    salt: userSalt(REALM, 'bob'),
-    description: 'a second user, for impersonation and delegation cases',
-    pac: {
-      rid: 1105,
-      fullName: 'Bob Example',
-      groups: [RID.DOMAIN_USERS],
-      userAccountControl: UAC.NORMAL_ACCOUNT,
-      extraSids: ['S-1-18-1', 'S-1-5-11']
-    }
-  },
-  {
-    // The account whose UF_DONT_REQUIRE_PREAUTH is set. A KDC answers its
-    // AS-REQ with a ticket rather than with KDC_ERR_PREAUTH_REQUIRED, which is
-    // worth being able to SEE: it is the difference between the two-message
-    // dance and the one-message one, and a client has to handle both.
-    name: ['noreauth'],
-    type: 1,
-    salt: userSalt(REALM, 'noreauth'),
-    requiresPreAuth: false,
-    description: 'pre-authentication NOT required, so the AS-REQ is answered ' +
-                 'directly',
-    pac: {
-      rid: 1106,
-      groups: [RID.DOMAIN_USERS],
-      // The flag that MAKES this account behave differently, in the PAC as well
-      // as in the KDC's behaviour. Two views of one setting: a debugger should
-      // show both, because seeing DONT_REQUIRE_PREAUTH in the PAC is what
-      // explains the exchange the reader just watched happen in one message
-      // instead of two.
-      userAccountControl: UAC.NORMAL_ACCOUNT | UAC.DONT_REQUIRE_PREAUTH,
-      extraSids: ['S-1-18-1', 'S-1-5-11']
-    }
-  },
-  {
-    name: ['locked'],
-    type: 1,
-    salt: userSalt(REALM, 'locked'),
-    revoked: true,
-    description: 'a disabled or locked-out account (KDC_ERR_CLIENT_REVOKED)',
-    pac: {
-      rid: 1107,
-      groups: [RID.DOMAIN_USERS],
-      userAccountControl:
-        UAC.NORMAL_ACCOUNT | UAC.ACCOUNT_DISABLED | UAC.ACCOUNT_AUTO_LOCKED
-    }
-  },
-  {
-    name: ['expired'],
-    type: 1,
-    salt: userSalt(REALM, 'expired'),
-    passwordExpired: true,
-    description: 'a password past its expiry (KDC_ERR_KEY_EXPIRED)',
-    pac: {
-      rid: 1108,
-      groups: [RID.DOMAIN_USERS],
-      userAccountControl: UAC.NORMAL_ACCOUNT | UAC.PASSWORD_EXPIRED,
-      passwordMustChange: new Date('2020-01-01T00:00:00Z')
-    }
-  },
-  {
-    // The 2026 case. An account whose msDS-SupportedEncryptionTypes has had RC4
-    // removed will refuse a client that offers only RC4, and the error is
-    // KDC_ERR_ETYPE_NOSUPP — which reads as "the KDC is broken" unless you know
-    // what it means.
-    name: ['aesonly'],
-    type: 1,
-    salt: userSalt(REALM, 'aesonly'),
-    etypes: [18, 17],
-    description: 'AES only — offers no RC4, which is what a hardened AD ' +
-                 'account looks like',
-    pac: {
-      rid: 1109,
-      groups: [RID.DOMAIN_USERS, RID.PROTECTED_USERS],
-      userAccountControl: UAC.NORMAL_ACCOUNT
-    }
-  },
-  {
-    // ...and its opposite, an old account that has only ever had an RC4 key. On
-    // a Windows Server 2025 domain controller this is the one that stops
-    // working.
-    name: ['rc4only'],
-    type: 1,
-    salt: userSalt(REALM, 'rc4only'),
-    etypes: [23],
-    description: 'arcfour-hmac-md5 only — the legacy account that a 2025 ' +
-                 'baseline breaks',
-    pac: {
-      rid: 1110,
-      groups: [RID.DOMAIN_USERS],
-      userAccountControl: UAC.NORMAL_ACCOUNT | UAC.USE_DES_KEY_ONLY
-    }
-  },
-  {
-    // "Account is sensitive and cannot be delegated" — [MS-SAMR]'s USER_ACCOUNT
-    // code NOT_DELEGATED (0x4000). It is the ONE control that stops
-    // unconstrained delegation taking a privileged account's ticket-granting
-    // ticket, and it lives on the account being protected rather than on any
-    // service. A KDC must refuse to issue this account a forwardable ticket at
-    // all, which is what makes the protection work no matter which service the
-    // user visits.
-    name: ['sensitive'],
-    type: 1,
-    salt: userSalt(REALM, 'sensitive'),
-    notDelegated: true,
-    description: 'flagged sensitive and cannot be delegated — the KDC ' +
-                 'refuses it a forwardable ticket, so no service can forward ' +
-                 'its TGT',
-    pac: {
-      rid: 1130,
-      groups: [RID.DOMAIN_USERS, RID.DOMAIN_ADMINS, RID.PROTECTED_USERS],
-      userAccountControl: UAC.NORMAL_ACCOUNT | UAC.NOT_DELEGATED
-    }
-  },
-  {
-    // A computer account, present so the host-shaped salt is exercised by
-    // something rather than only described.
-    name: ['host', 'ws01.' + DOMAIN],
-    type: 3,                                   // NT-SRV-HST
-    password: 'machine-account-password',
-    salt: hostSalt(REALM, 'ws01', DOMAIN),
-    description: 'a computer account, whose salt is host-shaped rather than ' +
-                 'name-shaped',
-    pac: {
-      rid: 1111,
-      // A machine account is not a user: its primary group is Domain Computers
-      // and its UAC says WORKSTATION_TRUST_ACCOUNT. An implementation that
-      // assumes every PAC describes a person gets this wrong in a way no user
-      // account reveals.
-      primaryGroupRid: RID.DOMAIN_COMPUTERS,
-      groups: [RID.DOMAIN_COMPUTERS],
-      userAccountControl: UAC.WORKSTATION_TRUST_ACCOUNT
-    }
-  },
-  {
-    // The ordinary service a ticket gets requested for — the AP exchange's
-    // target, and the one used as an UNAUTHORIZED delegation target by the
-    // tests, since nothing permits the front end to reach it.
-    name: ['HTTP', 'web.' + DOMAIN],
-    type: 3,
-    password: 'service-account-password',
-    salt: userSalt(REALM, 'HTTPweb'),
-    okAsDelegate: true,
-    description: 'an HTTP service principal, flagged ok-as-delegate'
-  },
-  {
-    // ---------------------------------------------------------------------------
-    // DELEGATION, configured two DIFFERENT WAYS on purpose.
-    //
-    // `frontend` is trusted for CLASSIC constrained delegation: the permission
-    // lives on the FRONT-END account, as msDS-AllowedToDelegateTo, and only a
-    // domain admin can set it. `backend-rbcd` authorizes RESOURCE-BASED
-    // constrained delegation: the permission lives on the BACK-END account, as
-    // msDS-AllowedToActOnBehalfOfOtherIdentity, and whoever controls that
-    // object can set it themselves.
-    //
-    // That difference is the entire security story of RBCD, and it is why both
-    // are here. Same protocol messages, same KDC options, opposite direction of
-    // trust — and the second one turns "I can write to this computer object"
-    // into "I can reach this service as anybody".
-    // ---------------------------------------------------------------------------
-    name: ['HTTP', 'frontend.' + DOMAIN],
-    type: 3,
-    password: 'frontend-service-password',
-    salt: userSalt(REALM, 'HTTPfrontend'),
-    okAsDelegate: true,
-    // TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION is what lets it get a FORWARDABLE
-    // ticket out of S4U2Self — the protocol-transition half. Without it
-    // S4U2Self still works and returns a ticket that is not forwardable, so
-    // classic S4U2Proxy then fails for a reason that looks nothing like a
-    // missing flag on the front-end account.
-    trustedToAuthenticateForDelegation: true,
-    // Classic constrained delegation: the list of services this one may reach
-    // as anybody. Note it names a SERVICE, not an account — and the SPN has to
-    // match exactly.
-    allowedToDelegateTo: ['HTTP/backend.' + DOMAIN],
-    description: 'a front-end service trusted for CLASSIC constrained ' +
-                 'delegation (S4U2Self + S4U2Proxy to HTTP/backend), and for ' +
-                 'protocol transition',
-    pac: {
-      rid: 1120,
-      groups: [RID.DOMAIN_USERS],
-      userAccountControl:
-        UAC.NORMAL_ACCOUNT | UAC.TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION |
-        UAC.DONT_EXPIRE_PASSWORD
-    }
-  },
-  {
-    name: ['HTTP', 'backend.' + DOMAIN],
-    type: 3,
-    password: 'backend-service-password',
-    salt: userSalt(REALM, 'HTTPbackend'),
-    description: 'the back-end reached by CLASSIC constrained delegation — ' +
-                 'it authorizes nothing itself; the permission is on the ' +
-                 'front end',
-    pac: { rid: 1121, groups: [RID.DOMAIN_USERS],
-           userAccountControl: UAC.NORMAL_ACCOUNT }
-  },
-  {
-    // The same classic configuration as `frontend` MINUS
-    // TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION. This account exists because that
-    // flag's absence is invisible where it is set: S4U2Self still succeeds and
-    // returns a ticket that simply is not forwardable, and classic S4U2Proxy
-    // then fails a step later complaining about the evidence. Two accounts
-    // differing in exactly one attribute is the only way to show which
-    // attribute did it.
-    name: ['HTTP', 'notrusted.' + DOMAIN],
-    type: 3,
-    password: 'notrusted-service-password',
-    salt: userSalt(REALM, 'HTTPnotrusted'),
-    trustedToAuthenticateForDelegation: false,
-    allowedToDelegateTo: ['HTTP/backend.' + DOMAIN],
-    description: 'allowed to delegate to HTTP/backend but NOT trusted for ' +
-                 'protocol transition, so its S4U2Self ticket is not ' +
-                 'forwardable and classic S4U2Proxy fails',
-    pac: { rid: 1123, groups: [RID.DOMAIN_USERS],
-           userAccountControl: UAC.NORMAL_ACCOUNT }
-  },
-  {
-    name: ['HTTP', 'rbcd.' + DOMAIN],
-    type: 3,
-    password: 'rbcd-service-password',
-    salt: userSalt(REALM, 'HTTPrbcd'),
-    // RESOURCE-based: this account names who may act on ITS behalf. The list is
-    // on the TARGET, which is the inversion that matters.
-    allowedToActOnBehalfOf: ['HTTP/frontend.' + DOMAIN],
-    description: 'a back-end that authorizes RESOURCE-BASED constrained ' +
-                 'delegation itself, naming HTTP/frontend as permitted to ' +
-                 'act on its behalf',
-    pac: { rid: 1122, groups: [RID.DOMAIN_USERS],
-           userAccountControl: UAC.NORMAL_ACCOUNT }
-  },
-  {
-    // ---------------------------------------------------------------------------
-    // THE TRUST. This one principal IS the cross-realm relationship.
-    //
-    // krbtgt/PARTNER.COM@EXAMPLE.COM: the inter-realm ticket-granting account.
-    // When a client of EXAMPLE.COM asks for a service in PARTNER.COM, this
-    // realm's KDC has no such service and does NOT refuse — it issues a
-    // ticket-granting ticket for krbtgt/PARTNER.COM sealed with THIS key, and
-    // the client presents that to the other realm's KDC. Both realms hold the
-    // same key, which is what makes it openable there and nowhere else.
-    //
-    // Its salt is name-shaped like any other account, and its etypes are
-    // deliberately AES-only: a trust that still had an RC4 key is the
-    // configuration that breaks on a 2025 domain controller, and the KDC's
-    // etype negotiation for a referral has to be driven by THIS account rather
-    // than by the service the client actually asked for.
-    // ---------------------------------------------------------------------------
-    name: ['krbtgt', TRUSTED_REALM],
-    type: 2,
-    password: TRUST_PASSWORD,
+//
+// **BUILT PER REALM, FROM THAT REALM'S NAME** (2026-09-15):
+// `definitionsFor(ctx)` returns `{ krbtgt, fixtures, trusted }`, so a realm
+// named ACME.EXAMPLE.COM has `alice@ACME.EXAMPLE.COM` salted
+// `ACME.EXAMPLE.COMalice` and `HTTP/web.acme.example.com`, and only the DEFAULT
+// realm's list carries the trust with krb5.trustedRealm and that realm's own
+// accounts.
+function definitionsFor(ctx) {
+  log.debug("Entering definitionsFor(). realm=" + ctx.REALM);
+  const REALM = ctx.REALM;
+  const DOMAIN = ctx.DOMAIN;
+  const KRBTGT_DEFINITION = {
+    name: ['krbtgt', REALM],
+    type: 2,                                 // NT-SRV-INST
+    password: ctx.KRBTGT_PASSWORD,
     salt: userSalt(REALM, 'krbtgt'),
-    etypes: [18, 17],
-    description: 'the inter-realm trust with ' + TRUSTED_REALM + ' — a ' +
-        'shared key, held as a principal',
-    pac: {
-      rid: 1112,
-      groups: [RID.DOMAIN_USERS],
-      // ok-as-delegate on the ticket and TRUSTED_FOR_DELEGATION in the PAC are
-      // the same setting seen from the two ends: [MS-SAMR] says this bit is
-      // what makes the KDC set that flag. Keeping them consistent here means
-      // the workflow can show the cause beside the effect.
-      userAccountControl: UAC.NORMAL_ACCOUNT | UAC.TRUSTED_FOR_DELEGATION |
-        UAC.DONT_EXPIRE_PASSWORD
-    }
-  }
-];
+    description: 'the ticket-granting service, whose key seals every TGT'
+  };
 
-// The trusted realm's own database. It holds the same trust key (the other half
-// of the relationship), its own ticket-granting service, and a service to reach
-// — which is the destination a referral is FOR. There is deliberately NO second
-// copy of the trust key here.
-//
-// The inter-realm account is krbtgt/PARTNER.COM@EXAMPLE.COM — one principal,
-// whose realm is the ISSUING realm — and both KDCs consult that same entry: the
-// issuer to seal the referral, and the target because the arriving ticket's own
-// `realm` field says EXAMPLE.COM, which is what handleTgsReq looks it up by.
-// Holding a second copy under PARTNER.COM would be two secrets that have to
-// stay equal, and the failure when they drift is "the ticket does not decrypt"
-// at the second KDC — a message about a ticket for a problem about a trust. One
-// entry cannot drift from itself.
-//
-// What PARTNER.COM does need is its OWN ticket-granting service, whose key is a
-// different secret from the trust: it signs the PAC and seals tickets for its
-// own services. Giving it the trust password would have made the two
-// indistinguishable, and every assertion about which key signed what would have
-// passed for the wrong reason.
-const TRUSTED_DEFINITIONS = [
-  {
-    name: ['krbtgt', TRUSTED_REALM],
-    type: 2,
-    password: config.value('krb5.trustedKrbtgtPassword'),
-    salt: userSalt(TRUSTED_REALM, 'krbtgt'),
-    realm: TRUSTED_REALM,
-    description: TRUSTED_REALM + "'s own ticket-granting service — NOT the " +
-                                 "trust key"
-  },
-  {
-    // A user native to the trusted realm. Without one, the second realm is only
-    // ever a referral TARGET and the code path where a ticket-granting ticket
-    // is looked up in its own realm is never exercised — krbtgt/PARTNER.COM
-    // exists in both databases, so a lookup that defaults to the local realm
-    // finds the TRUST key instead of this realm's own, and every ticket issued
-    // inside PARTNER.COM would be sealed with the wrong secret. A referral test
-    // cannot catch that, because there the ticket's realm and the default
-    // happen to agree.
-    name: ['carol'],
-    type: 1,
-    salt: userSalt(TRUSTED_REALM, 'carol'),
-    realm: TRUSTED_REALM,
-    description: 'a user in ' + TRUSTED_REALM + ', so that realm is a realm ' +
-                                                'and not just a target',
-    pac: {
-      rid: 2104,
-      fullName: 'Carol Partner',
-      groups: [RID.DOMAIN_USERS],
-      userAccountControl: UAC.NORMAL_ACCOUNT,
-      extraSids: ['S-1-18-1', 'S-1-5-11']
+  const DEFINITIONS = [
+    KRBTGT_DEFINITION,
+    {
+      name: ['alice'],
+      type: 1,                                   // NT-PRINCIPAL
+      salt: userSalt(REALM, 'alice'),
+      description: 'an ordinary user; pre-authentication required, as Active ' +
+                   'Directory requires it',
+      pac: {
+        rid: 1104,
+        fullName: 'Alice Example',
+        groups: [RID.DOMAIN_USERS, RID.DOMAIN_ADMINS],
+        userAccountControl: UAC.NORMAL_ACCOUNT,
+        // The two well-known SIDs that record HOW an identity was established.
+        // A real AD puts the first one in every PAC it issues from a password
+        // logon, and a service can refuse an identity the KDC merely asserted —
+        // which is why they are here rather than being tidied away as noise.
+        extraSids: ['S-1-18-1', 'S-1-5-11']
+      }
+    },
+    {
+      name: ['bob'],
+      type: 1,
+      salt: userSalt(REALM, 'bob'),
+      description: 'a second user, for impersonation and delegation cases',
+      pac: {
+        rid: 1105,
+        fullName: 'Bob Example',
+        groups: [RID.DOMAIN_USERS],
+        userAccountControl: UAC.NORMAL_ACCOUNT,
+        extraSids: ['S-1-18-1', 'S-1-5-11']
+      }
+    },
+    {
+      // The account whose UF_DONT_REQUIRE_PREAUTH is set. A KDC answers its
+      // AS-REQ with a ticket rather than with KDC_ERR_PREAUTH_REQUIRED, which
+      // is worth being able to SEE: it is the difference between the
+      // two-message dance and the one-message one, and a client has to handle
+      // both.
+      name: ['noreauth'],
+      type: 1,
+      salt: userSalt(REALM, 'noreauth'),
+      requiresPreAuth: false,
+      description: 'pre-authentication NOT required, so the AS-REQ is ' +
+                   'answered directly',
+      pac: {
+        rid: 1106,
+        groups: [RID.DOMAIN_USERS],
+        // The flag that MAKES this account behave differently, in the PAC as
+        // well as in the KDC's behaviour. Two views of one setting: a debugger
+        // should show both, because seeing DONT_REQUIRE_PREAUTH in the PAC is
+        // what explains the exchange the reader just watched happen in one
+        // message instead of two.
+        userAccountControl: UAC.NORMAL_ACCOUNT | UAC.DONT_REQUIRE_PREAUTH,
+        extraSids: ['S-1-18-1', 'S-1-5-11']
+      }
+    },
+    {
+      name: ['locked'],
+      type: 1,
+      salt: userSalt(REALM, 'locked'),
+      revoked: true,
+      description: 'a disabled or locked-out account (KDC_ERR_CLIENT_REVOKED)',
+      pac: {
+        rid: 1107,
+        groups: [RID.DOMAIN_USERS],
+        userAccountControl:
+          UAC.NORMAL_ACCOUNT | UAC.ACCOUNT_DISABLED | UAC.ACCOUNT_AUTO_LOCKED
+      }
+    },
+    {
+      name: ['expired'],
+      type: 1,
+      salt: userSalt(REALM, 'expired'),
+      passwordExpired: true,
+      description: 'a password past its expiry (KDC_ERR_KEY_EXPIRED)',
+      pac: {
+        rid: 1108,
+        groups: [RID.DOMAIN_USERS],
+        userAccountControl: UAC.NORMAL_ACCOUNT | UAC.PASSWORD_EXPIRED,
+        passwordMustChange: new Date('2020-01-01T00:00:00Z')
+      }
+    },
+    {
+      // The 2026 case. An account whose msDS-SupportedEncryptionTypes has had
+      // RC4 removed will refuse a client that offers only RC4, and the error is
+      // KDC_ERR_ETYPE_NOSUPP — which reads as "the KDC is broken" unless you
+      // know what it means.
+      name: ['aesonly'],
+      type: 1,
+      salt: userSalt(REALM, 'aesonly'),
+      etypes: [18, 17],
+      description: 'AES only — offers no RC4, which is what a hardened AD ' +
+                   'account looks like',
+      pac: {
+        rid: 1109,
+        groups: [RID.DOMAIN_USERS, RID.PROTECTED_USERS],
+        userAccountControl: UAC.NORMAL_ACCOUNT
+      }
+    },
+    {
+      // ...and its opposite, an old account that has only ever had an RC4 key.
+      // On a Windows Server 2025 domain controller this is the one that stops
+      // working.
+      name: ['rc4only'],
+      type: 1,
+      salt: userSalt(REALM, 'rc4only'),
+      etypes: [23],
+      description: 'arcfour-hmac-md5 only — the legacy account that a 2025 ' +
+                   'baseline breaks',
+      pac: {
+        rid: 1110,
+        groups: [RID.DOMAIN_USERS],
+        userAccountControl: UAC.NORMAL_ACCOUNT | UAC.USE_DES_KEY_ONLY
+      }
+    },
+    {
+      // "Account is sensitive and cannot be delegated" — [MS-SAMR]'s
+      // USER_ACCOUNT code NOT_DELEGATED (0x4000). It is the ONE control that
+      // stops unconstrained delegation taking a privileged account's
+      // ticket-granting ticket, and it lives on the account being protected
+      // rather than on any service. A KDC must refuse to issue this account a
+      // forwardable ticket at all, which is what makes the protection work no
+      // matter which service the user visits.
+      name: ['sensitive'],
+      type: 1,
+      salt: userSalt(REALM, 'sensitive'),
+      notDelegated: true,
+      description: 'flagged sensitive and cannot be delegated — the KDC ' +
+                   'refuses it a forwardable ticket, so no service can ' +
+                   'forward its TGT',
+      pac: {
+        rid: 1130,
+        groups: [RID.DOMAIN_USERS, RID.DOMAIN_ADMINS, RID.PROTECTED_USERS],
+        userAccountControl: UAC.NORMAL_ACCOUNT | UAC.NOT_DELEGATED
+      }
+    },
+    {
+      // A computer account, present so the host-shaped salt is exercised by
+      // something rather than only described.
+      name: ['host', 'ws01.' + DOMAIN],
+      type: 3,                                   // NT-SRV-HST
+      password: 'machine-account-password',
+      salt: hostSalt(REALM, 'ws01', DOMAIN),
+      description: 'a computer account, whose salt is host-shaped rather ' +
+                   'than name-shaped',
+      pac: {
+        rid: 1111,
+        // A machine account is not a user: its primary group is Domain
+        // Computers and its UAC says WORKSTATION_TRUST_ACCOUNT. An
+        // implementation that assumes every PAC describes a person gets this
+        // wrong in a way no user account reveals.
+        primaryGroupRid: RID.DOMAIN_COMPUTERS,
+        groups: [RID.DOMAIN_COMPUTERS],
+        userAccountControl: UAC.WORKSTATION_TRUST_ACCOUNT
+      }
+    },
+    {
+      // The ordinary service a ticket gets requested for — the AP exchange's
+      // target, and the one used as an UNAUTHORIZED delegation target by the
+      // tests, since nothing permits the front end to reach it.
+      name: ['HTTP', 'web.' + DOMAIN],
+      type: 3,
+      password: 'service-account-password',
+      salt: userSalt(REALM, 'HTTPweb'),
+      okAsDelegate: true,
+      description: 'an HTTP service principal, flagged ok-as-delegate'
+    },
+    {
+      // -----------------------------------------------------------------------
+      // DELEGATION, configured two DIFFERENT WAYS on purpose.
+      //
+      // `frontend` is trusted for CLASSIC constrained delegation: the
+      // permission lives on the FRONT-END account, as msDS-AllowedToDelegateTo,
+      // and only a domain admin can set it. `backend-rbcd` authorizes
+      // RESOURCE-BASED constrained delegation: the permission lives on the
+      // BACK-END account, as msDS-AllowedToActOnBehalfOfOtherIdentity, and
+      // whoever controls that object can set it themselves.
+      //
+      // That difference is the entire security story of RBCD, and it is why
+      // both are here. Same protocol messages, same KDC options, opposite
+      // direction of trust — and the second one turns "I can write to this
+      // computer object" into "I can reach this service as anybody".
+      // -----------------------------------------------------------------------
+      name: ['HTTP', 'frontend.' + DOMAIN],
+      type: 3,
+      password: 'frontend-service-password',
+      salt: userSalt(REALM, 'HTTPfrontend'),
+      okAsDelegate: true,
+      // TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION is what lets it get a
+      // FORWARDABLE ticket out of S4U2Self — the protocol-transition half.
+      // Without it S4U2Self still works and returns a ticket that is not
+      // forwardable, so classic S4U2Proxy then fails for a reason that looks
+      // nothing like a missing flag on the front-end account.
+      trustedToAuthenticateForDelegation: true,
+      // Classic constrained delegation: the list of services this one may reach
+      // as anybody. Note it names a SERVICE, not an account — and the SPN has
+      // to match exactly.
+      allowedToDelegateTo: ['HTTP/backend.' + DOMAIN],
+      description: 'a front-end service trusted for CLASSIC constrained ' +
+                   'delegation (S4U2Self + S4U2Proxy to HTTP/backend), and ' +
+                   'for protocol transition',
+      pac: {
+        rid: 1120,
+        groups: [RID.DOMAIN_USERS],
+        userAccountControl:
+          UAC.NORMAL_ACCOUNT | UAC.TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION |
+          UAC.DONT_EXPIRE_PASSWORD
+      }
+    },
+    {
+      name: ['HTTP', 'backend.' + DOMAIN],
+      type: 3,
+      password: 'backend-service-password',
+      salt: userSalt(REALM, 'HTTPbackend'),
+      description: 'the back-end reached by CLASSIC constrained delegation — ' +
+                   'it authorizes nothing itself; the permission is on the ' +
+                   'front end',
+      pac: { rid: 1121, groups: [RID.DOMAIN_USERS],
+             userAccountControl: UAC.NORMAL_ACCOUNT }
+    },
+    {
+      // The same classic configuration as `frontend` MINUS
+      // TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION. This account exists because
+      // that flag's absence is invisible where it is set: S4U2Self still
+      // succeeds and returns a ticket that simply is not forwardable, and
+      // classic S4U2Proxy then fails a step later complaining about the
+      // evidence. Two accounts differing in exactly one attribute is the only
+      // way to show which attribute did it.
+      name: ['HTTP', 'notrusted.' + DOMAIN],
+      type: 3,
+      password: 'notrusted-service-password',
+      salt: userSalt(REALM, 'HTTPnotrusted'),
+      trustedToAuthenticateForDelegation: false,
+      allowedToDelegateTo: ['HTTP/backend.' + DOMAIN],
+      description: 'allowed to delegate to HTTP/backend but NOT trusted for ' +
+                   'protocol transition, so its S4U2Self ticket is not ' +
+                   'forwardable and classic S4U2Proxy fails',
+      pac: { rid: 1123, groups: [RID.DOMAIN_USERS],
+             userAccountControl: UAC.NORMAL_ACCOUNT }
+    },
+    {
+      name: ['HTTP', 'rbcd.' + DOMAIN],
+      type: 3,
+      password: 'rbcd-service-password',
+      salt: userSalt(REALM, 'HTTPrbcd'),
+      // RESOURCE-based: this account names who may act on ITS behalf. The list
+      // is on the TARGET, which is the inversion that matters.
+      allowedToActOnBehalfOf: ['HTTP/frontend.' + DOMAIN],
+      description: 'a back-end that authorizes RESOURCE-BASED constrained ' +
+                   'delegation itself, naming HTTP/frontend as permitted to ' +
+                   'act on its behalf',
+      pac: { rid: 1122, groups: [RID.DOMAIN_USERS],
+             userAccountControl: UAC.NORMAL_ACCOUNT }
+    },
+    {
+      // -----------------------------------------------------------------------
+      // THE TRUST. This one principal IS the cross-realm relationship.
+      //
+      // krbtgt/PARTNER.COM@EXAMPLE.COM: the inter-realm ticket-granting
+      // account. When a client of EXAMPLE.COM asks for a service in
+      // PARTNER.COM, this realm's KDC has no such service and does NOT refuse —
+      // it issues a ticket-granting ticket for krbtgt/PARTNER.COM sealed with
+      // THIS key, and the client presents that to the other realm's KDC. Both
+      // realms hold the same key, which is what makes it openable there and
+      // nowhere else.
+      //
+      // Its salt is name-shaped like any other account, and its etypes are
+      // deliberately AES-only: a trust that still had an RC4 key is the
+      // configuration that breaks on a 2025 domain controller, and the KDC's
+      // etype negotiation for a referral has to be driven by THIS account
+      // rather than by the service the client actually asked for.
+      // -----------------------------------------------------------------------
+      name: ['krbtgt', TRUSTED_REALM],
+      type: 2,
+      password: TRUST_PASSWORD,
+      salt: userSalt(REALM, 'krbtgt'),
+      etypes: [18, 17],
+      description: 'the inter-realm trust with ' + TRUSTED_REALM + ' — a ' +
+          'shared key, held as a principal',
+      pac: {
+        rid: 1112,
+        groups: [RID.DOMAIN_USERS],
+        // ok-as-delegate on the ticket and TRUSTED_FOR_DELEGATION in the PAC
+        // are the same setting seen from the two ends: [MS-SAMR] says this bit
+        // is what makes the KDC set that flag. Keeping them consistent here
+        // means the workflow can show the cause beside the effect.
+        userAccountControl: UAC.NORMAL_ACCOUNT | UAC.TRUSTED_FOR_DELEGATION |
+          UAC.DONT_EXPIRE_PASSWORD
+      }
     }
-  },
-  {
-    name: ['HTTP', 'app.' + TRUSTED_DOMAIN],
-    type: 3,
-    password: 'partner-service-password',
-    salt: userSalt(TRUSTED_REALM, 'HTTPapp'),
-    realm: TRUSTED_REALM,
-    description: 'a service in ' + TRUSTED_REALM + ', reachable only by ' +
-                                                   'following a referral',
-    pac: {
-      rid: 2101,
-      groups: [RID.DOMAIN_USERS],
-      userAccountControl: UAC.NORMAL_ACCOUNT
-    }
-  }
-];
+  ];
 
-// Which realms this process answers for. A real KDC answers for exactly one;
-// this one answers for two so the whole referral chase is reachable without a
-// second container.
+  // The trusted realm's own database. It holds the same trust key (the other
+  // half of the relationship), its own ticket-granting service, and a service
+  // to reach — which is the destination a referral is FOR. There is
+  // deliberately NO second copy of the trust key here.
+  //
+  // The inter-realm account is krbtgt/PARTNER.COM@EXAMPLE.COM — one principal,
+  // whose realm is the ISSUING realm — and both KDCs consult that same entry:
+  // the issuer to seal the referral, and the target because the arriving
+  // ticket's own `realm` field says EXAMPLE.COM, which is what handleTgsReq
+  // looks it up by. Holding a second copy under PARTNER.COM would be two
+  // secrets that have to stay equal, and the failure when they drift is "the
+  // ticket does not decrypt" at the second KDC — a message about a ticket for a
+  // problem about a trust. One entry cannot drift from itself.
+  //
+  // What PARTNER.COM does need is its OWN ticket-granting service, whose key is
+  // a different secret from the trust: it signs the PAC and seals tickets for
+  // its own services. Giving it the trust password would have made the two
+  // indistinguishable, and every assertion about which key signed what would
+  // have passed for the wrong reason.
+  const TRUSTED_DEFINITIONS = [
+    {
+      name: ['krbtgt', TRUSTED_REALM],
+      type: 2,
+      password: config.value('krb5.trustedKrbtgtPassword'),
+      salt: userSalt(TRUSTED_REALM, 'krbtgt'),
+      realm: TRUSTED_REALM,
+      description: TRUSTED_REALM + "'s own ticket-granting service — NOT the " +
+                                   "trust key"
+    },
+    {
+      // A user native to the trusted realm. Without one, the second realm is
+      // only ever a referral TARGET and the code path where a ticket-granting
+      // ticket is looked up in its own realm is never exercised —
+      // krbtgt/PARTNER.COM exists in both databases, so a lookup that defaults
+      // to the local realm finds the TRUST key instead of this realm's own, and
+      // every ticket issued inside PARTNER.COM would be sealed with the wrong
+      // secret. A referral test cannot catch that, because there the ticket's
+      // realm and the default happen to agree.
+      name: ['carol'],
+      type: 1,
+      salt: userSalt(TRUSTED_REALM, 'carol'),
+      realm: TRUSTED_REALM,
+      description: 'a user in ' + TRUSTED_REALM + ', so that realm is a ' +
+                   'realm and not just a target',
+      pac: {
+        rid: 2104,
+        fullName: 'Carol Partner',
+        groups: [RID.DOMAIN_USERS],
+        userAccountControl: UAC.NORMAL_ACCOUNT,
+        extraSids: ['S-1-18-1', 'S-1-5-11']
+      }
+    },
+    {
+      name: ['HTTP', 'app.' + TRUSTED_DOMAIN],
+      type: 3,
+      password: 'partner-service-password',
+      salt: userSalt(TRUSTED_REALM, 'HTTPapp'),
+      realm: TRUSTED_REALM,
+      description: 'a service in ' + TRUSTED_REALM + ', reachable only by ' +
+                                                     'following a referral',
+      pac: {
+        rid: 2101,
+        groups: [RID.DOMAIN_USERS],
+        userAccountControl: UAC.NORMAL_ACCOUNT
+      }
+    }
+  ];
+
+  // The trust — `krbtgt/<trusted realm>@<this realm>`, the last fixture above —
+  // and the trusted realm's own database are the DEFAULT realm's alone. Another
+  // trust realm's KDC holds no inter-realm key, so a service in another realm's
+  // domain is simply unknown there rather than a referral.
+  const fixtures = DEFINITIONS.filter(function (def) {
+    return def !== KRBTGT_DEFINITION &&
+           (ctx.isDefault || String(def.name[0]) !== 'krbtgt');
+  });
+  log.debug("Leaving definitionsFor().");
+  return { krbtgt: KRBTGT_DEFINITION, fixtures: fixtures,
+           trusted: ctx.isDefault ? TRUSTED_DEFINITIONS : [] };
+}
+
+// Which realms this KDC answers for, AS THE AMBIENT TRUST REALM. A real KDC
+// answers for exactly one; the default realm's answers for two so the whole
+// referral chase is reachable without a second container.
 //
 // **ONE IN PRODUCT MODE.** The second realm, its krbtgt, its user and the trust
-// are all fixtures (SEEDS_DEMO), so a KDC that went on answering for
+// are all fixtures (`ctx.SEEDS_DEMO`), so a KDC that went on answering for
 // PARTNER.COM would be answering for a realm it holds nothing in.
 // KDC_ERR_WRONG_REALM is the true answer to a request naming it.
+//
+// **ONE, OR NONE, IN ANOTHER TRUST REALM** (2026-09-15): its own name while its
+// Kerberos is on, and nothing while it is off.
 function realmsServed() {
   log.debug("Entering realmsServed().");
+  const ctx = current();
   log.debug("Leaving realmsServed().");
-  return SEEDS_DEMO ? [REALM, TRUSTED_REALM] : [REALM];
+  return servedBy(ctx);
+}
+
+function servedBy(ctx) {
+  log.debug("Entering servedBy().");
+  // `enabledIn()` as well as `active`: the default realm's context is built
+  // once and stays active, and `krb5.enabled` is runtime on the service.
+  if (!ctx || !ctx.active || !enabledIn(ctx.id)) {
+    log.debug("Leaving servedBy(). Inactive.");
+    return [];
+  }
+  log.debug("Leaving servedBy().");
+  return ctx.isDefault && ctx.SEEDS_DEMO ? [ctx.REALM, TRUSTED_REALM] :
+                                           [ctx.REALM];
 }
 
 function domainSidFor(realm) {
   log.debug("Entering domainSidFor().");
+  const ctx = current();
   log.debug("Leaving domainSidFor().");
-  return realm === TRUSTED_REALM ? TRUSTED_DOMAIN_SID : DOMAIN_SID;
+  return ctx.isDefault && realm === TRUSTED_REALM ? TRUSTED_DOMAIN_SID :
+                                                    ctx.DOMAIN_SID;
 }
 
 // Which realm a service principal belongs to, decided from its HOST NAME.
@@ -790,17 +904,23 @@ function realmForService(nameComponents) {
     log.debug("Leaving realmForService().");
     return null;
   }
+  const ctx = current();
+  if (!ctx.active) {
+    log.debug("Leaving realmForService(). No KDC in this realm.");
+    return null;
+  }
   const host = String(nameComponents[nameComponents.length - 1]).toLowerCase();
-  // No trust exists in product mode (see realmsServed()), so no host belongs to
-  // the trusted realm and the name is simply unknown here.
-  if (SEEDS_DEMO &&
+  // No trust exists in product mode (see realmsServed()), nor in any trust
+  // realm but the default, so no host belongs to the trusted realm there and
+  // the name is simply unknown.
+  if (ctx.isDefault && ctx.SEEDS_DEMO &&
       (host === TRUSTED_DOMAIN || host.endsWith('.' + TRUSTED_DOMAIN))) {
     log.debug("Leaving realmForService().");
     return TRUSTED_REALM;
   }
-  if (host === DOMAIN || host.endsWith('.' + DOMAIN)) {
+  if (host === ctx.DOMAIN || host.endsWith('.' + ctx.DOMAIN)) {
     log.debug("Leaving realmForService().");
-    return REALM;
+    return ctx.REALM;
   }
   log.debug("Leaving realmForService().");
   return null;
@@ -810,15 +930,15 @@ function realmForService(nameComponents) {
 // PBKDF2 rounds per etype per principal, and deriving them all at startup would
 // make the service slow to start for keys most runs never use.
 // -------------------------------------------------------------------------
-// PERSISTED, AND SHARED RATHER THAN PER REALM (2026-09-06).
-// `realms.sharedMap()` is a plain Map that reports its writes so product mode
-// can write them down; `scope: 'shared'` is what says the store deliberately
-// has no realm in it, which is the discriminator `tests/realm_isolation.js`
-// checks against.
+// PERSISTED (2026-09-06), AND PER TRUST REALM SINCE 2026-09-15.
+// It was `realms.sharedMap()` — one row set for the process, `scope: 'shared'`
+// — while the KDC was one of the socket families a trust realm did not get.
+// Each realm's principal database is now a PARTITION of a `realms.map()`, so a
+// realm removed takes its principals with it and `tests/realm_isolation.js`
+// holds it to the same rule as every other per-realm store. The map key still
+// carries the Kerberos realm (see keyOf()), because the default realm's
+// partition holds two Kerberos realms in development.
 // -------------------------------------------------------------------------
-// The KDC is one of the three socket families a trust realm does not get: a
-// raw socket has no path to put a realm segment in, and the Kerberos realm
-// name inside the protocol is the KERBEROS realm rather than this service's.
 // **A LONG-TERM KEY IS THE PASSWORD**, which is why every row here is sealed
 // before it reaches the store.
 //
@@ -843,12 +963,14 @@ function realmForService(nameComponents) {
 // back anyway, with whatever password it was written with.
 //
 // **THE RULE, AT THE ONE BOUNDARY BOTH DOORS REACH.** `reconcile` below is
-// asked by `realms.sharedMap()`'s `restore` and `remove` accessors, which are
-// what the startup restore AND the replication applier call — so another
-// process's write obeys it exactly as a restart does:
+// asked by the store's `restore` and `remove` accessors, which are what the
+// startup restore AND the replication applier call — so another process's
+// write obeys it exactly as a restart does. **It is asked about the realm the
+// row belongs to** (2026-09-15), and answers from that realm's context:
 //
-//   * a key THIS PROCESS CONFIGURED (`CONFIGURED_KEYS`) keeps every field its
-//     settings built and takes only RUNTIME_FIELDS from the row. A difference
+//   * a key THIS PROCESS CONFIGURED in that realm (`ctx.configuredKeys`) keeps
+//     every field its settings built and takes only RUNTIME_FIELDS from the
+//     row. A difference
 //     in anything else is LOGGED (STS-KRB-0111), by field name and never by
 //     value, so an operator can see that a stored row was stale;
 //   * a RUNTIME-MADE row is restored WHOLE — it has no other source;
@@ -877,10 +999,12 @@ function realmForService(nameComponents) {
 // ---------------------------------------------------------------------------
 const RUNTIME_FIELDS = ['signedOutAt'];
 
-// The keys buildDatabase() registered from settings and code. Filled at require
-// time, before any restore can run, and never shrunk: a configured account does
-// not stop being configured while the process that configured it is running.
-const CONFIGURED_KEYS = new Set();
+// The keys buildDatabase() registered from settings and code are
+// `ctx.configuredKeys`, one set per realm's context. The default realm's is
+// filled at require time, before any restore can run, and never shrunk: a
+// configured account does not stop being configured while the process that
+// configured it is running. Another realm's is filled when its database is
+// built and REPLACED when it is rebuilt — see rebuildContext().
 
 // The fields, by name, on which a stored row differs from what this process
 // built. JSON on both sides because the stored row has been through JSON —
@@ -906,10 +1030,10 @@ function configDrift(incoming, held) {
 // runtime-made row on the way in, so that a collision the allocator did not
 // make — one left by the allocator before autoRidFor(), or the residual it
 // states — is SEEN rather than silently restored beside its twin.
-function ridHolderOtherThan(key, rid) {
+function ridHolderOtherThan(key, rid, partition) {
   log.debug("Entering ridHolderOtherThan().");
   let holder = null;
-  principals.forEach(function (principal, otherKey) {
+  (partition || principals).forEach(function (principal, otherKey) {
     if (!holder && otherKey !== key && principal && principal.pac &&
         Number(principal.pac.rid) === Number(rid)) {
       holder = otherKey;
@@ -919,8 +1043,8 @@ function ridHolderOtherThan(key, rid) {
   return holder;
 }
 
-function reconcileRestored(key, incoming, held) {
-  log.debug('Entering reconcileRestored(). key=' + key);
+function reconcileRestored(key, incoming, held, realmId, partition) {
+  log.debug('Entering reconcileRestored(). key=' + key + ' realm=' + realmId);
   if (!incoming || typeof incoming !== 'object' ||
       !Array.isArray(incoming.name)) {
     log.warn(errorCodes.tag('STS-KRB-0112') + 'krb5: a stored row under "' +
@@ -929,15 +1053,32 @@ function reconcileRestored(key, incoming, held) {
     log.debug('Leaving reconcileRestored(). Not a record.');
     return undefined;
   }
-  if (CONFIGURED_KEYS.has(key)) {
-    if (!held) {
+  // THE REALM'S CONTEXT, built now if it has not been. A row for a realm this
+  // process has not heard of yet — replication can deliver a principal before
+  // the realm it belongs to — has no settings to judge it by, so it is judged
+  // as a realm with nothing configured: a runtime-made row is kept whole and
+  // waits in the partition the realm will use, and a configured one is not
+  // restored, because it will be BUILT when that realm's Kerberos is.
+  const ctx = contextOf(realmId);
+  // **`held` IS READ AGAIN AFTER THE CONTEXT IS BUILT, AND THAT IS NOT
+  // BELT-AND-BRACES** (2026-09-15). The caller evaluates `target.get(key)` on
+  // the way in, and for a realm whose database has not been built yet that is
+  // `undefined` — then `contextOf()` above BUILDS it, registering exactly the
+  // configured principals this row might be one of. Reading the argument would
+  // therefore take the branch below on the first restored row of every
+  // non-default realm, discarding the row's runtime state: a sign-out stamped
+  // on that realm's krbtgt or acceptor account would silently not survive a
+  // restart, which is the one field this reconciler exists to carry across.
+  const here = partition ? partition.get(key) : held;
+  if (ctx.configuredKeys.has(key)) {
+    if (!here) {
       // Unreachable while the removal half refuses a configured key, and
       // answered the safe way if it is ever reached: a configured account is
       // built from settings, so there is nothing in the row to build it from.
       log.debug('Leaving reconcileRestored(). Configured and not held.');
       return undefined;
     }
-    const differing = configDrift(incoming, held);
+    const differing = configDrift(incoming, here);
     if (differing.length) {
       log.warn(errorCodes.tag('STS-KRB-0111') + 'krb5: the stored row for ' +
                'the configured principal ' + key + ' differs from what this ' +
@@ -948,15 +1089,15 @@ function reconcileRestored(key, incoming, held) {
                'time this principal is written.');
     }
     RUNTIME_FIELDS.forEach(function (field) {
-      held[field] = incoming[field] === undefined ? null : incoming[field];
+      here[field] = incoming[field] === undefined ? null : incoming[field];
     });
     log.debug('Leaving reconcileRestored(). Configured; runtime state taken.');
-    return held;
+    return here;
   }
   if (incoming.autoCreated || incoming.directoryKeys) {
     const rid = incoming.pac && incoming.pac.rid;
     const twin = rid === undefined || rid === null ? null :
-                 ridHolderOtherThan(key, rid);
+                 ridHolderOtherThan(key, rid, partition);
     if (twin) {
       log.warn(errorCodes.tag('STS-KRB-0114') +
                'krb5: the restored principal ' +
@@ -977,9 +1118,9 @@ function reconcileRestored(key, incoming, held) {
   return undefined;
 }
 
-function reconcileRemoved(key) {
+function reconcileRemoved(key, held, realmId) {
   log.debug("Entering reconcileRemoved().");
-  if (CONFIGURED_KEYS.has(key)) {
+  if (contextOf(realmId).configuredKeys.has(key)) {
     log.warn(errorCodes.tag('STS-KRB-0113') + 'krb5: a stored removal of the ' +
              'configured principal ' + key + ' was refused; it exists ' +
              'because this process\'s settings build it.');
@@ -990,11 +1131,9 @@ function reconcileRemoved(key) {
   return true;
 }
 
-const principals = realms.sharedMap({ persist: 'krb5.principals',
-                                      scope: 'shared',
-                                      reconcile: { restore: reconcileRestored,
-                                                   remove:
-                                                     reconcileRemoved } });
+const principals = realms.map({ persist: 'krb5.principals',
+                                reconcile: { restore: reconcileRestored,
+                                             remove: reconcileRemoved } });
 
 // ---------------------------------------------------------------------------
 // RIDs FOR THE ACCOUNTS MADE AT RUNTIME, DERIVED FROM THE NAME (2026-09-12).
@@ -1064,7 +1203,7 @@ const AUTO_RID_LIMIT = 0x40000000;
 function autoRidFor(nameComponents, realm) {
   log.debug('Entering autoRidFor().');
   const key = keyOf({ name: (nameComponents || []).map(String),
-                      realm: realm || REALM });
+                      realm: realm || current().REALM });
   const span = AUTO_RID_LIMIT - AUTO_RID_BASE;
   // A label in front of the name, so this digest is never the same bytes as
   // any other SHA-256 of a principal name something else computes.
@@ -1113,12 +1252,16 @@ function keyOf(principal) {
   return principal.name.join('/') + '@' + principal.realm;
 }
 
+// Into the AMBIENT realm's partition, with that realm's defaults — which is
+// the realm `contextOf()` entered while it builds, and the realm the KDC
+// entered for the request everywhere else.
 function register(def) {
   log.debug('Entering register().');
+  const ctx = current();
   const principal = {
     name: def.name,
     type: def.type,
-    realm: def.realm || REALM,
+    realm: def.realm || ctx.REALM,
     // A user entry names no password; it gets the one every user shares. A
     // service, computer or krbtgt entry names its own and keeps it — see
     // USER_PASSWORD.
@@ -1129,13 +1272,14 @@ function register(def) {
     // password left on the record would be a second key for the same account:
     // a cache miss in `longTermKey()` would derive from it, and a product KDC
     // would quietly accept `password!` for every person in the directory.
-    password: def.directoryKeys ? null : (def.password || USER_PASSWORD),
+    password: def.directoryKeys ? null :
+      (def.password || ctx.USER_PASSWORD),
     // Whether the long-term keys come from the KEY SOURCE rather than from a
     // password on this record. Persisted with the record (it is not a secret)
     // so a restored principal is never mistaken for one to derive.
     directoryKeys: !!def.directoryKeys,
     salt: def.salt,
-    etypes: def.etypes || KDC_ETYPES.slice(),
+    etypes: def.etypes || ctx.KDC_ETYPES.slice(),
     requiresPreAuth: def.requiresPreAuth !== false,
     revoked: !!def.revoked,
     passwordExpired: !!def.passwordExpired,
@@ -1168,7 +1312,7 @@ function register(def) {
       passwordMustChange: null
     }, def.pac || {}),
     // `krb5.kvno`, one version for every account. Rotation is not modelled.
-    kvno: KVNO,
+    kvno: ctx.KVNO,
     // WHEN THIS PRINCIPAL LAST SIGNED OUT, as a Date, or null for never.
     //
     // It is the only thing a KDC can honestly do about a credential it has
@@ -1248,36 +1392,37 @@ function register(def) {
 // on the client's side — and a product deployment that wants that says so in
 // its KDC rather than inheriting it from a demonstration.
 // ---------------------------------------------------------------------------
-const SERVICE_ACCOUNT = { spn: '', available: false, reason: '' };
-
-function configuredServiceDefinition() {
+// `ctx.serviceAccount` — `{ spn, available, reason }` — is filled here, for the
+// realm whose database is being built.
+function configuredServiceDefinition(ctx) {
   log.debug('Entering configuredServiceDefinition().');
+  const account = ctx.serviceAccount;
+  const REALM = ctx.REALM;
   const spn = String(config.value('krb5.servicePrincipal') || '').trim();
-  SERVICE_ACCOUNT.spn = spn;
+  account.spn = spn;
   const parts = spn.split('/');
   if (parts.length < 2 ||
       !parts.every(function (part) { return part.length; })) {
-    SERVICE_ACCOUNT.reason = 'krb5.servicePrincipal is "' + spn + '", which ' +
+    account.reason = 'krb5.servicePrincipal is "' + spn + '", which ' +
       'is not a service/host name — an SPN has at least two components, so ' +
       'no account was created for the acceptor.';
-    log.warn(errorCodes.tag('STS-KRB-0059') + 'krb5: ' +
-             SERVICE_ACCOUNT.reason);
+    log.warn(errorCodes.tag('STS-KRB-0059') + 'krb5: ' + account.reason);
     log.debug('Leaving configuredServiceDefinition(). Not an SPN.');
     return null;
   }
   const password = String(config.value('krb5.servicePassword') || '');
   if (!password) {
-    SERVICE_ACCOUNT.reason = 'krb5.servicePassword (KRB5_SERVICE_PASSWORD) ' +
+    account.reason = 'krb5.servicePassword (KRB5_SERVICE_PASSWORD) ' +
       'is empty, so the ' +
       'account ' + spn + '@' + REALM + ' was not created and ' +
       'the acceptor holds no key to decrypt a ticket with.';
-    log.warn(errorCodes.tag('STS-KRB-0060') + 'krb5: ' +
-             SERVICE_ACCOUNT.reason);
+    log.warn(errorCodes.tag('STS-KRB-0060') + 'krb5: ' + account.reason);
     log.debug('Leaving configuredServiceDefinition(). No password.');
     return null;
   }
-  if (!SEEDS_DEMO && password === publishedDefault('krb5.servicePassword')) {
-    SERVICE_ACCOUNT.reason = 'product mode refuses the published default ' +
+  if (!ctx.SEEDS_DEMO &&
+      password === publishedDefault('krb5.servicePassword')) {
+    account.reason = 'product mode refuses the published default ' +
       'krb5.servicePassword: that value is written in this service\'s ' +
       'source, so a key derived from it would let anybody mint a ticket this ' +
       'acceptor accepts. The ' +
@@ -1285,16 +1430,15 @@ function configuredServiceDefinition() {
       'the acceptor on krb5.servicePort and /authn/spnego accept no ticket. ' +
       'Set KRB5_SERVICE_PASSWORD to the password of that SPN\'s account in ' +
       'the KDC that issues its tickets (and KRB5_SERVICE_SALT to its salt).';
-    log.warn(errorCodes.tag('STS-KRB-0061') + 'krb5: ' +
-             SERVICE_ACCOUNT.reason);
+    log.warn(errorCodes.tag('STS-KRB-0061') + 'krb5: ' + account.reason);
     log.debug('Leaving configuredServiceDefinition(). Published default ' +
               'refused.');
     return null;
   }
   const host = parts[parts.length - 1];
   const configuredSalt = String(config.value('krb5.serviceSalt') || '');
-  SERVICE_ACCOUNT.available = true;
-  SERVICE_ACCOUNT.reason = '';
+  account.available = true;
+  account.reason = '';
   log.debug('Leaving configuredServiceDefinition(). ' + spn);
   return {
     name: parts,
@@ -1304,7 +1448,7 @@ function configuredServiceDefinition() {
     // host's first label, which for HTTP/web.example.com is EXAMPLE.COMHTTPweb.
     salt: configuredSalt ||
       userSalt(REALM, parts.slice(0, -1).join('') + host.split('.')[0]),
-    okAsDelegate: SEEDS_DEMO,
+    okAsDelegate: ctx.SEEDS_DEMO,
     description: 'an HTTP service principal, flagged ok-as-delegate'
   };
 }
@@ -1323,40 +1467,54 @@ function sameName(a, b) {
 // `krbtgt-mock-password` is a key anybody can forge a ticket-granting ticket
 // with — a golden ticket, handed out in the README. Product mode refuses to
 // create it; the KDC then issues nothing, which is the truthful state of a KDC
-// nobody gave a key.
+// nobody gave a key. The reason is `ctx.krbtgtReason`.
 // ---------------------------------------------------------------------------
-let krbtgtReason = '';
 
 // A principal built from settings and code, which a restore may not override.
-// See CONFIGURED_KEYS and reconcileRestored() above.
+// See `ctx.configuredKeys` and reconcileRestored() above.
+//
+// **A REBUILT REALM KEEPS WHAT IS RUNTIME STATE ON IT** (2026-09-15): a
+// trust realm's database is rebuilt when a setting it was built from changes,
+// and a sign-out instant stamped on a configured account before that must still
+// be there after it — so the RUNTIME_FIELDS of a record already held under the
+// same key are carried onto the new one.
 function registerConfigured(def) {
   log.debug("Entering registerConfigured().");
+  const ctx = current();
+  const key = keyOf({ name: def.name, realm: def.realm || ctx.REALM });
+  const held = principals.get(key);
   const principal = register(def);
-  CONFIGURED_KEYS.add(keyOf(principal));
+  if (held) {
+    RUNTIME_FIELDS.forEach(function (field) {
+      if (held[field] !== undefined) {
+        principal[field] = held[field];
+      }
+    });
+    principals.set(key, principal);
+  }
+  ctx.configuredKeys.add(key);
   log.debug("Leaving registerConfigured().");
   return principal;
 }
 
-function buildDatabase() {
-  log.debug('Entering buildDatabase().');
-  const service = configuredServiceDefinition();
+function buildDatabase(ctx) {
+  log.debug('Entering buildDatabase(). realm=' + ctx.REALM);
+  const defs = definitionsFor(ctx);
+  const service = configuredServiceDefinition(ctx);
   let serviceRegistered = false;
-  if (!SEEDS_DEMO &&
-      KRBTGT_DEFINITION.password === publishedDefault('krb5.krbtgtPassword')) {
-    krbtgtReason = 'product mode refuses the published default ' +
+  if (!ctx.SEEDS_DEMO &&
+      defs.krbtgt.password === publishedDefault('krb5.krbtgtPassword')) {
+    ctx.krbtgtReason = 'product mode refuses the published default ' +
       'krb5.krbtgtPassword (KRB5_KRBTGT_PASSWORD): a krbtgt key derived from ' +
       'it would let anybody forge a ticket-granting ticket. ' +
-      'krbtgt/' + REALM + ' ' +
+      'krbtgt/' + ctx.REALM + ' ' +
       'was NOT created, so this KDC issues no ticket until it is set.';
-    log.warn(errorCodes.tag('STS-KRB-0062') + 'krb5: ' + krbtgtReason);
+    log.warn(errorCodes.tag('STS-KRB-0062') + 'krb5: ' + ctx.krbtgtReason);
   } else {
-    registerConfigured(KRBTGT_DEFINITION);
+    registerConfigured(defs.krbtgt);
   }
-  if (SEEDS_DEMO) {
-    DEFINITIONS.forEach(function (def) {
-      if (def === KRBTGT_DEFINITION) {
-        return;
-      }
+  if (ctx.SEEDS_DEMO) {
+    defs.fixtures.forEach(function (def) {
       if (service && !serviceRegistered && sameName(def.name, service.name)) {
         // In place, so the database lists its accounts in the order it always
         // did.
@@ -1366,15 +1524,16 @@ function buildDatabase() {
       }
       registerConfigured(def);
     });
-    TRUSTED_DEFINITIONS.forEach(registerConfigured);
+    defs.trusted.forEach(registerConfigured);
   } else {
     log.info('krb5: product mode, so the fixture accounts (alice, bob, ' +
              'locked, expired, the computer account, the delegation services ' +
-             'and their rules, and ' +
-             'the ' + TRUSTED_REALM + ' realm and trust) were NOT ' +
-             'created. This KDC holds krbtgt/' + REALM + ' and ' +
-             (SERVICE_ACCOUNT.spn || 'no service account') + ' where their ' +
-             'passwords are configured, and nothing else.');
+             'and their rules' +
+             (ctx.isDefault ? ', and the ' + TRUSTED_REALM + ' realm and ' +
+                              'trust' : '') + ') were NOT ' +
+             'created. This KDC holds krbtgt/' + ctx.REALM + ' and ' +
+             (ctx.serviceAccount.spn || 'no service account') + ' where ' +
+             'their passwords are configured, and nothing else.');
   }
   if (service && !serviceRegistered) {
     registerConfigured(service);
@@ -1382,9 +1541,331 @@ function buildDatabase() {
   log.debug('Leaving buildDatabase().');
 }
 
-buildDatabase();
-log.info('krb5: principal database for realm ' + REALM + ' — ' +
-  Array.from(principals.keys()).join(', '));
+// ---------------------------------------------------------------------------
+// THE CONTEXTS: ONE PER TRUST REALM, BUILT FROM THAT REALM'S SETTINGS
+// (2026-09-15).
+//
+// See the header of this file for why. The mechanics, each of which is what
+// something below depends on:
+//
+//   * **A CONTEXT IS PUT IN THE MAP BEFORE ITS DATABASE IS BUILT**, because
+//     building registers principals and register() asks current() for the
+//     defaults — which must find the context being built rather than start
+//     building it a second time.
+//   * **THE DEFAULT REALM'S IS BUILT ONCE, AT REQUIRE TIME**, from the
+//     process's values (`realms.run()` there reads no realm layer), and is
+//     never rebuilt: its settings are restart-only for the process.
+//   * **ANOTHER REALM'S IS BUILT ON FIRST USE WHILE ITS KERBEROS IS ON**, and a
+//     realm whose Kerberos is off gets an INACTIVE context — no principal, no
+//     name served — which is cached too, so it is not recomputed per request.
+//   * **A REALM'S CONTEXT IS REBUILT WHEN ONE OF `BUILT_FROM` CHANGES ON IT**,
+//     compared as a signature over the realm's own overrides. A change to any
+//     other setting — a runtime row such as krb5.clockSkew, which is read per
+//     request — leaves the database alone. A rebuild removes the configured
+//     accounts the new settings no longer build (a renamed SPN, a realm turned
+//     off) and keeps every runtime-made one; see rebuildContext().
+// ---------------------------------------------------------------------------
+const contexts = new Map();
+
+const BUILT_FROM = ['krb5.enabled', 'krb5.realm', 'krb5.domainSid',
+                    'krb5.krbtgtPassword', 'krb5.servicePrincipal',
+                    'krb5.servicePassword', 'krb5.serviceSalt', 'krb5.kvno',
+                    'krb5.enctypes', 'krb5.userPassword',
+                    'krb5.autoServicePassword', 'global.mode'];
+
+function builtFromSignature(realm) {
+  log.debug("Entering builtFromSignature().");
+  const own = (realm && realm.overrides) || {};
+  log.debug("Leaving builtFromSignature().");
+  return JSON.stringify(BUILT_FROM.map(function (key) {
+    return [key, own[key] === undefined ? null : own[key]];
+  }));
+}
+
+function idOf(realmId) {
+  log.debug("Entering idOf().");
+  log.debug("Leaving idOf().");
+  return !realmId || realmId === realms.DEFAULT_ID ? realms.DEFAULT_ID :
+                                                     String(realmId);
+}
+
+// The Kerberos realm a trust realm answers as: the process's for the default
+// realm, and the realm's OWN `krb5.realm` for any other — never an inherited
+// one, since two realms answering to one name is a request nothing can route.
+// Empty for a realm that names none.
+function nameOf(realmId) {
+  log.debug("Entering nameOf().");
+  const id = idOf(realmId);
+  if (id === realms.DEFAULT_ID) {
+    log.debug("Leaving nameOf(). The default realm.");
+    return String(realms.run(realms.DEFAULT_REALM, function () {
+      return config.value('krb5.realm');
+    }) || '');
+  }
+  const realm = realms.get(id);
+  const raw = realm && realm.overrides ? realm.overrides['krb5.realm'] :
+                                         undefined;
+  log.debug("Leaving nameOf().");
+  return raw === undefined || raw === null ? '' : String(raw).trim();
+}
+
+// Whether a trust realm's KDC answers. The default realm reads `krb5.enabled`,
+// which is on unless somebody turned the service's Kerberos off. Another realm
+// reads its OWN override — as `spiffe_server.js` does for `spiffe.enabled` — so
+// clearing it is off rather than an inherited on, and it counts only with a
+// name of its own beside it (realms.js refuses the one without the other; a
+// realm restored from before that rule is held to it here).
+function enabledIn(realmId) {
+  log.debug("Entering enabledIn().");
+  const id = idOf(realmId);
+  if (id === realms.DEFAULT_ID) {
+    log.debug("Leaving enabledIn(). The default realm.");
+    return !!realms.run(realms.DEFAULT_REALM, function () {
+      return config.value('krb5.enabled');
+    });
+  }
+  const realm = realms.get(id);
+  const own = (realm && realm.overrides) || {};
+  if (!Object.prototype.hasOwnProperty.call(own, 'krb5.enabled')) {
+    log.debug("Leaving enabledIn(). Not set on the realm.");
+    return false;
+  }
+  const parsed = config.parseAs('krb5.enabled', own['krb5.enabled']);
+  log.debug("Leaving enabledIn().");
+  return !!(parsed.ok && parsed.value === true) && !!nameOf(id);
+}
+
+function inactiveContext(id, reason) {
+  log.debug("Entering inactiveContext(). realm=" + id);
+  const name = nameOf(id);
+  log.debug("Leaving inactiveContext().");
+  return {
+    id: id, isDefault: false, active: false, inactiveReason: reason,
+    REALM: name, DOMAIN: name.toLowerCase(), SEEDS_DEMO: false,
+    KDC_ETYPES: [], KVNO: null, USER_PASSWORD: null,
+    AUTO_SERVICE_PASSWORD: null, SERVICE_DOMAINS: [], DOMAIN_SID: '',
+    KRBTGT_PASSWORD: null,
+    serviceAccount: { spn: '', available: false, reason: reason },
+    krbtgtReason: reason, configuredKeys: new Set(),
+    signature: builtFromSignature(realms.get(id))
+  };
+}
+
+function buildContext(realm) {
+  log.debug("Entering buildContext(). realm=" + realm.id);
+  const isDefault = realm.id === realms.DEFAULT_ID;
+  const ctx = realms.run(realm, function () {
+    const name = isDefault ? String(config.value('krb5.realm')) :
+                             nameOf(realm.id);
+    const etypes = configuredEtypes(realm.id);
+    const built = {
+      id: realm.id, isDefault: isDefault, active: true, inactiveReason: '',
+      REALM: name,
+      DOMAIN: name.toLowerCase(),
+      SEEDS_DEMO: mode.seedsDemoData(),
+      KDC_ETYPES: etypes.ids || [],
+      // Every account's key version. One per account: rotation is not
+      // modelled — see `krb5.kvno`.
+      KVNO: config.value('krb5.kvno'),
+      USER_PASSWORD: config.value('krb5.userPassword'),
+      AUTO_SERVICE_PASSWORD: config.value('krb5.autoServicePassword'),
+      SERVICE_DOMAINS: serviceDomainsFor(),
+      DOMAIN_SID: config.value('krb5.domainSid'),
+      KRBTGT_PASSWORD: config.value('krb5.krbtgtPassword'),
+      serviceAccount: { spn: '', available: false, reason: '' },
+      krbtgtReason: '',
+      configuredKeys: new Set(),
+      signature: builtFromSignature(isDefault ? null : realm)
+    };
+    contexts.set(realm.id, built);
+    if (!etypes.ids) {
+      built.active = false;
+      built.inactiveReason = etypes.problem;
+      built.serviceAccount.reason = etypes.problem;
+      built.krbtgtReason = etypes.problem;
+      return built;
+    }
+    buildDatabase(built);
+    return built;
+  });
+  if (ctx.active) {
+    log.info('krb5: principal database for ' +
+             (isDefault ? 'realm ' + ctx.REALM
+                        : 'Kerberos realm ' + ctx.REALM + ' (trust realm "' +
+                          realm.id + '")') + ' — ' +
+             Array.from(principals.realmMap(realm.id).keys()).join(', '));
+  }
+  log.debug("Leaving buildContext().");
+  return ctx;
+}
+
+// THE CONTEXT FOR A TRUST REALM, built if it has not been. A realm this process
+// does not hold — removed, or not yet replicated here — gets an inactive
+// context that is NOT cached, so the realm is built properly once it arrives.
+function contextOf(realmId) {
+  const id = idOf(realmId);
+  const held = contexts.get(id);
+  if (held) {
+    return held;
+  }
+  log.debug("Entering contextOf(). Building for realm " + id);
+  const realm = realms.get(id);
+  if (!realm) {
+    log.debug("Leaving contextOf(). No such realm here.");
+    return inactiveContext(id, 'there is no trust realm "' + id + '" in ' +
+                                'this process');
+  }
+  if (!enabledIn(id)) {
+    const off = inactiveContext(id, 'Kerberos is off in trust realm "' + id +
+      '" (krb5.enabled, with a krb5.realm of its own)');
+    contexts.set(id, off);
+    log.debug("Leaving contextOf(). Kerberos is off there.");
+    return off;
+  }
+  log.debug("Leaving contextOf().");
+  return buildContext(realm);
+}
+
+// The AMBIENT realm's context. On the hot path — the KDC asks it several times
+// for every request it answers — so no Entering/Leaving pair here, which would
+// drown the log; contextOf() logs the one call that builds anything.
+function current() {
+  return contextOf(realms.currentId());
+}
+
+// A REBUILD, for a realm whose `BUILT_FROM` settings changed. The configured
+// accounts the new settings no longer build are removed from the realm's
+// partition, through the journalling view so every other process sees it; a
+// runtime-made account — somebody who authenticated, a directory person — is
+// kept, because nothing but the store holds it.
+function rebuildContext(realm, old) {
+  log.debug("Entering rebuildContext(). realm=" + realm.id);
+  contexts.delete(realm.id);
+  const fresh = contextOf(realm.id);
+  const partition = principals.realmMap(realm.id);
+  let removed = 0;
+  old.configuredKeys.forEach(function (key) {
+    if (!fresh.configuredKeys.has(key) && partition.has(key)) {
+      partition.delete(key);
+      removed++;
+    }
+  });
+  // **AND EVERY ROW FOR A KERBEROS REALM THIS ONE NO LONGER ANSWERS AS.** The
+  // supported way to rename a realm's Kerberos realm is to turn it off, rename
+  // it and turn it on, and the runtime-made principals — a directory person
+  // keyed at their first sign-in, a service created on demand — are keyed
+  // `name@OLD.REALM`. Pruning only the CONFIGURED keys left those behind: rows
+  // `find()` can never reach again, carrying a salt and a kvno for a realm that
+  // no longer exists, listed on /admin/kerberos/principals beside the live ones
+  // and re-journalled for ever. A realm serves exactly one Kerberos realm, so
+  // any row naming another is dead by construction.
+  if (fresh.active) {
+    const served = servedBy(fresh);
+    partition.forEach(function (principal, key) {
+      if (principal && served.indexOf(String(principal.realm)) === -1) {
+        partition.delete(key);
+        removed++;
+      }
+    });
+  }
+  log.info('krb5: trust realm "' + realm.id + '" changed a setting its ' +
+           'principal database is built from, so the database was rebuilt: ' +
+           (fresh.active ? 'Kerberos realm ' + fresh.REALM + ', ' +
+                           fresh.configuredKeys.size + ' configured account(s)'
+                         : 'no KDC (' + fresh.inactiveReason + ')') +
+           (removed ? '; ' + removed + ' account(s) the new settings no ' +
+                      'longer build, or naming a Kerberos realm this one no ' +
+                      'longer answers as, were removed' : '') + '.');
+  log.debug("Leaving rebuildContext().");
+  return fresh;
+}
+
+realms.onChange(function (id, what) {
+  log.debug("Entering a realms.onChange listener in krb5_principals.js.");
+  const realmId = idOf(id);
+  if (realmId === realms.DEFAULT_ID) {
+    log.debug("Leaving the listener. The default realm is never rebuilt.");
+    return;
+  }
+  const held = contexts.get(realmId);
+  const realm = realms.get(realmId);
+  if (what === 'remove' || !realm) {
+    contexts.delete(realmId);
+    log.debug("Leaving the listener. The realm is gone.");
+    return;
+  }
+  // **A REALM THAT ARRIVES WITH KERBEROS ON IS BUILT NOW, NOT ON FIRST USE**
+  // (2026-09-15). A realm restored from the store or replicated from another
+  // node is created before its principals are restored — persistence restores
+  // realms, then the directory, then what was minted — so building here means
+  // the reconciler below almost never has to build one WHILE a row is being
+  // restored. It still can (a realm whose rows arrive before the realm does),
+  // and that path is correct; what it is not is free, because registering a
+  // configured principal is a write, and a write during a replicated apply is
+  // journalled. Doing it here moves those writes to the moment the realm
+  // appears, where they are exactly the writes a realm's first start makes.
+  if (!held && enabledIn(realmId)) {
+    contextOf(realmId);
+    log.debug("Leaving the listener. Built for a realm that arrived.");
+    return;
+  }
+  if (!held || builtFromSignature(realm) === held.signature) {
+    log.debug("Leaving the listener. Nothing it was built from changed.");
+    return;
+  }
+  rebuildContext(realm, held);
+  log.debug("Leaving the listener. Rebuilt.");
+});
+
+// ROUTING (2026-09-15): the trust realm a Kerberos realm name in a request is
+// for, or null when no realm whose Kerberos is on answers to it. Compared
+// EXACTLY, as the KDC always compared a request's realm: Kerberos names are
+// case-sensitive on the wire, and realms.js refuses two realms whose names
+// differ only in case, so an exact miss is a genuine miss.
+//
+// The default realm is asked first — for its own name and, in development, the
+// trusted realm it answers for. A restored or replicated realm that shares a
+// name with another (realms.js judges neither) loses to the first, and that is
+// LOGGED ONCE per name rather than on every request that meets it.
+const collisionsLogged = new Set();
+
+function trustRealmFor(krbName) {
+  log.debug("Entering trustRealmFor(). name=" + krbName);
+  const name = String(krbName || '');
+  if (!name) {
+    log.debug("Leaving trustRealmFor(). No name.");
+    return null;
+  }
+  if (servedBy(contexts.get(realms.DEFAULT_ID)).indexOf(name) !== -1) {
+    log.debug("Leaving trustRealmFor(). The default realm.");
+    return realms.DEFAULT_REALM;
+  }
+  const matching = realms.list().filter(function (realm) {
+    return realm.id !== realms.DEFAULT_ID && nameOf(realm.id) === name &&
+           enabledIn(realm.id);
+  });
+  if (matching.length > 1 && !collisionsLogged.has(name)) {
+    collisionsLogged.add(name);
+    log.warn(errorCodes.tag('STS-KRB-0127') + 'krb5: the Kerberos realm ' +
+             name + ' is claimed by trust realms ' +
+             matching.map(function (realm) {
+               return '"' + realm.id + '"';
+             }).join(', ') + '; requests naming it reach "' +
+             matching[0].id + '" only. Give the others a name of their own.');
+  }
+  log.debug("Leaving trustRealmFor(). " +
+            (matching.length ? matching[0].id : 'none'));
+  return matching.length ? matching[0] : null;
+}
+
+// The Kerberos realms a trust realm's KDC answers for, by id.
+function servedIn(realmId) {
+  log.debug("Entering servedIn().");
+  log.debug("Leaving servedIn().");
+  return servedBy(contextOf(realmId));
+}
+
+buildContext(realms.DEFAULT_REALM);
 
 // ---------------------------------------------------------------------------
 // SIGNING OUT, WHICH IS A STATEMENT ABOUT TICKETS AND NOT ABOUT THE ACCOUNT.
@@ -1414,7 +1895,7 @@ function signOut(nameComponents, realm, at) {
   principal.signedOutAt = asDate(at) || new Date();
   // WRITTEN BACK THROUGH THE STORE, and not merely mutated (2026-09-08). The
   // principal is an object HELD in `principals`, so stamping a field on it
-  // changes this process's memory and nothing else: `realms.sharedMap()`
+  // changes this process's memory and nothing else: `realms.map()`
   // journals a write when `set()` is called, so an in-place mutation is
   // invisible to the persistence store, never becomes a change row and never
   // reaches another process. With request workers that is a global sign-out
@@ -1505,6 +1986,8 @@ function signedOutAt(nameComponents, realm) {
 // which is the one-store rule this service applies everywhere else.
 function signedOutPrincipals() {
   log.debug("Entering signedOutPrincipals().");
+  // Built first, for `all()`'s reason: this reads the realm's partition.
+  current();
   const out = [];
   principals.forEach(function (principal) {
     if (asDate(principal.signedOutAt)) {
@@ -1621,14 +2104,15 @@ function setKeySource(source) {
 
 // Whether a name, in a realm, is one the PERSON half of the source answers:
 // product mode, one component, this KDC's own realm. The realm check is not
-// caution — the source reads the DEFAULT trust realm's directory, whose people
-// are this realm's users; a name in the trusted realm is nobody there.
+// caution — the source reads the AMBIENT trust realm's directory, whose people
+// are this Kerberos realm's users; a name in the trusted realm is nobody there.
 function personShaped(nameComponents, realm) {
   log.debug("Entering personShaped().");
+  const ctx = current();
   log.debug("Leaving personShaped().");
-  return !SEEDS_DEMO && Array.isArray(nameComponents) &&
+  return ctx.active && !ctx.SEEDS_DEMO && Array.isArray(nameComponents) &&
          nameComponents.length === 1 && !!nameComponents[0] &&
-         (realm || REALM) === REALM;
+         (realm || ctx.REALM) === ctx.REALM;
 }
 
 // The e-texts, one per state the source can report. No em dash and nothing
@@ -1670,6 +2154,7 @@ const PERSON_REFUSALS = {
 // ---------------------------------------------------------------------------
 function directoryUser(name) {
   log.debug('Entering directoryUser(). name=' + name);
+  const REALM = current().REALM;
   if (!keySource) {
     log.info('krb5: product mode and no key source is installed, so ' + name +
              '@' + REALM + ' cannot authenticate.');
@@ -1840,7 +2325,9 @@ function lookupUser(nameComponents, realm) {
 // ---------------------------------------------------------------------------
 function storedService(nameComponents, realm) {
   log.debug("Entering storedService().");
-  if (!keySource || !Array.isArray(nameComponents) ||
+  const ctx = current();
+  const REALM = ctx.REALM;
+  if (!keySource || !ctx.active || !Array.isArray(nameComponents) ||
       nameComponents.length < 2 ||
       String(nameComponents[0]).toLowerCase() === 'krbtgt' ||
       (realm || REALM) !== REALM) {
@@ -1902,7 +2389,9 @@ function storedService(nameComponents, realm) {
 
 function find(nameComponents, realm) {
   log.debug("Entering find().");
-  if (!nameComponents || !nameComponents.length) {
+  const ctx = current();
+  // A trust realm whose Kerberos is off holds no principal (2026-09-15).
+  if (!nameComponents || !nameComponents.length || !ctx.active) {
     log.debug("Leaving find().");
     return null;
   }
@@ -1916,7 +2405,8 @@ function find(nameComponents, realm) {
   // EVERY READER COMES THROUGH HERE, which is why the cache is repaired here
   // rather than at each of the two places that use it.
   const held = withKeyCache(
-    principals.get(nameComponents.join('/') + '@' + (realm || REALM))) || null;
+    principals.get(nameComponents.join('/') + '@' +
+                   (realm || ctx.REALM))) || null;
   // A DIRECTORY PERSON IS READ AGAIN FROM THE SOURCE (2026-09-12). Their
   // record's key cache holds whatever the LAST AS lookup found, so a TGS naming
   // them — as the service a ticket is for, or the ticket being presented —
@@ -1981,7 +2471,7 @@ function findOrCreateUser(nameComponents, realm) {
 
 function findOrCreateUserInDatabase(nameComponents, realm) {
   log.debug('Entering findOrCreateUser().');
-  const inRealm = realm || REALM;
+  const inRealm = realm || current().REALM;
   const existing = find(nameComponents, inRealm);
   if (existing) {
     log.debug('Leaving findOrCreateUser(). ' + keyOf(existing) + ' was ' +
@@ -2062,7 +2552,8 @@ function findOrCreateUserInDatabase(nameComponents, realm) {
 // ---------------------------------------------------------------------------
 function findOrCreateService(nameComponents, realm) {
   log.debug('Entering findOrCreateService().');
-  const inRealm = realm || REALM;
+  const ctx = current();
+  const inRealm = realm || ctx.REALM;
   const existing = find(nameComponents, inRealm);
   if (existing) {
     log.debug('Leaving findOrCreateService(). ' + keyOf(existing) + ' was ' +
@@ -2094,13 +2585,14 @@ function findOrCreateService(nameComponents, realm) {
     return null;
   }
   const host = String(nameComponents[nameComponents.length - 1]).toLowerCase();
-  const matched = SERVICE_DOMAINS.filter(function (entry) {
+  const matched = ctx.SERVICE_DOMAINS.filter(function (entry) {
     return host === entry || host.endsWith('.' + entry);
   })[0];
   if (!matched) {
     log.info('krb5: ' + nameComponents.join('/') + ' names a host this ' +
       'service is not willing to be (' + host + ' matches none of ' +
-      (SERVICE_DOMAINS.join(', ') || '(nothing configured)') + '), so it ' +
+      (ctx.SERVICE_DOMAINS.join(', ') || '(nothing configured)') + '), so ' +
+      'it ' +
       'stays KDC_ERR_S_PRINCIPAL_UNKNOWN');
     log.debug('Leaving findOrCreateService(). Host not covered.');
     return null;
@@ -2117,7 +2609,7 @@ function findOrCreateService(nameComponents, realm) {
     name: nameComponents.map(String),
     type: 3,                                   // NT-SRV-HST
     realm: inRealm,
-    password: AUTO_SERVICE_PASSWORD,
+    password: ctx.AUTO_SERVICE_PASSWORD,
     salt: userSalt(inRealm, nameComponents.slice(0, -1).join('') + short),
     autoCreated: true,
     description: 'created on first sight because ' + host + ' matches ' +
@@ -2180,7 +2672,7 @@ async function longTermKey(principal, etype) {
 function supportedEtypes(principal) {
   log.debug("Entering supportedEtypes().");
   log.debug("Leaving supportedEtypes().");
-  return KDC_ETYPES.filter(function (id) {
+  return current().KDC_ETYPES.filter(function (id) {
     return principal.etypes.indexOf(id) !== -1;
   });
 }
@@ -2457,28 +2949,53 @@ function delegationPolicy() {
 }
 
 module.exports = {
-  REALM: REALM,
-  DOMAIN: DOMAIN,
-  KDC_ETYPES: KDC_ETYPES,
-  KVNO: KVNO,
   parseEtypes: parseEtypes,
-  // Whether the fixture accounts are in this database — captured at require
-  // time, see SEEDS_DEMO.
-  seedsDemoPrincipals: SEEDS_DEMO,
-  // The acceptor's account: its SPN, whether it exists, and if not, why. A
-  // copy, so a caller cannot change what the next caller is told.
+  // The acceptor's account in the AMBIENT realm: its SPN, whether it exists,
+  // and if not, why. A copy, so a caller cannot change what the next caller is
+  // told.
   serviceAccount: function () {
     log.debug("Entering serviceAccount().");
+    const ctx = current();
     // `storedKey` since 2026-09-12: whether an operator stored a RANDOM key
     // for this SPN at /admin/kerberos/principals, which the acceptor prefers
     // over the password-derived account. An account refused for its published
     // password is then keyed anyway, which is the way out that refusal names.
-    const stored = !!storedService(SERVICE_ACCOUNT.spn.split('/'), REALM);
+    const stored = !!ctx.serviceAccount.spn &&
+      !!storedService(ctx.serviceAccount.spn.split('/'), ctx.REALM);
     log.debug("Leaving serviceAccount().");
-    return { spn: SERVICE_ACCOUNT.spn,
-             available: SERVICE_ACCOUNT.available || stored,
+    return { spn: ctx.serviceAccount.spn,
+             available: ctx.serviceAccount.available || stored,
              storedKey: stored,
-             reason: stored ? '' : SERVICE_ACCOUNT.reason };
+             reason: stored ? '' : ctx.serviceAccount.reason };
+  },
+  // The SPN the acceptor holds in the AMBIENT realm, as components — what
+  // `krb5_service.js` read once from `krb5.servicePrincipal` until that became
+  // a setting a trust realm carries (2026-09-15).
+  servicePrincipal: function () {
+    log.debug("Entering servicePrincipal().");
+    const ctx = current();
+    log.debug("Leaving servicePrincipal().");
+    return String(ctx.serviceAccount.spn ||
+                  config.value('krb5.servicePrincipal') || '').split('/');
+  },
+  // PER TRUST REALM (2026-09-15) — see ONE PRINCIPAL DATABASE PER TRUST REALM
+  // at the top of this file. `trustRealmFor()` is the KDC's router,
+  // `servedIn()` what a realm's own /KdcProxy and acceptor check a name
+  // against, and `kerberosRealmOf()` what a page says about the realm it is
+  // read in.
+  enabledIn: enabledIn,
+  nameOf: nameOf,
+  trustRealmFor: trustRealmFor,
+  servedIn: servedIn,
+  kerberosRealmOf: function (realmId) {
+    log.debug("Entering kerberosRealmOf().");
+    const ctx = contextOf(realmId === undefined ? realms.currentId() :
+                                                  realmId);
+    log.debug("Leaving kerberosRealmOf().");
+    return { trustRealm: ctx.id, kerberosRealm: ctx.REALM || null,
+             enabled: enabledIn(ctx.id), active: ctx.active,
+             reason: ctx.active ? '' : ctx.inactiveReason,
+             served: servedBy(ctx) };
   },
   // The key source (see KEY SOURCE). `lookupUser()` is the AS exchange's
   // lookup, with the reason for a refusal beside a null principal.
@@ -2496,19 +3013,23 @@ module.exports = {
   krbtgtUnavailableReason: function () {
     log.debug("Entering krbtgtUnavailableReason().");
     log.debug("Leaving krbtgtUnavailableReason().");
-    return krbtgtReason;
+    return current().krbtgtReason;
   },
   publishedDefault: publishedDefault,
   find: find,
   delegationPolicy: delegationPolicy,
   findOrCreateUser: findOrCreateUser,
   findOrCreateService: findOrCreateService,
-  USER_PASSWORD: USER_PASSWORD,
-  AUTO_SERVICE_PASSWORD: AUTO_SERVICE_PASSWORD,
-  SERVICE_DOMAINS: SERVICE_DOMAINS,
   reservedUnknown: reservedUnknown,
   all: function () {
     log.debug("Entering all().");
+    // `current()` FIRST, so the realm's database is built before its partition
+    // is read (2026-09-15). A realm's context is built on first use, and this
+    // reader would otherwise answer with the empty partition of a realm nothing
+    // had asked about yet — which is what `GET /realm/<id>/krb5/principals`
+    // did on a freshly enabled realm: an empty table beside a `realm` field
+    // naming a KDC that was about to work.
+    current();
     log.debug("Leaving all().");
     return Array.from(principals.values());
   },
@@ -2523,8 +3044,9 @@ module.exports = {
   isConfigured: function (nameComponents, realm) {
     log.debug("Entering isConfigured().");
     log.debug("Leaving isConfigured().");
-    return CONFIGURED_KEYS.has((nameComponents || []).join(
-        '/') + '@' + (realm || REALM));
+    const ctx = current();
+    return ctx.configuredKeys.has((nameComponents || []).join(
+        '/') + '@' + (realm || ctx.REALM));
   },
   RUNTIME_FIELDS: RUNTIME_FIELDS.slice(),
   longTermKey: longTermKey,
@@ -2534,7 +3056,6 @@ module.exports = {
   s2kparamsMode: s2kparamsMode,
   userSalt: userSalt,
   hostSalt: hostSalt,
-  DOMAIN_SID: DOMAIN_SID,
   TRUSTED_REALM: TRUSTED_REALM,
   TRUSTED_DOMAIN: TRUSTED_DOMAIN,
   TRUSTED_DOMAIN_SID: TRUSTED_DOMAIN_SID,
@@ -2552,3 +3073,29 @@ module.exports = {
   signedOutAt: signedOutAt,
   signedOutPrincipals: signedOutPrincipals
 };
+
+// ---------------------------------------------------------------------------
+// THE NAMES THAT WERE CONSTANTS, AS GETTERS FOR THE AMBIENT REALM (2026-09-15).
+//
+// Every one of these was a value read at require time and exported as such,
+// and callers in six directories read them as properties. They keep the
+// property shape — `principals.REALM` — and answer for the realm the caller is
+// in, which outside any realm is the default one and therefore exactly what
+// the constant was. Enumerable, so a caller that spreads or lists the module
+// still sees them.
+// ---------------------------------------------------------------------------
+[
+  ['REALM', 'REALM'], ['DOMAIN', 'DOMAIN'], ['KDC_ETYPES', 'KDC_ETYPES'],
+  ['KVNO', 'KVNO'], ['USER_PASSWORD', 'USER_PASSWORD'],
+  ['AUTO_SERVICE_PASSWORD', 'AUTO_SERVICE_PASSWORD'],
+  ['SERVICE_DOMAINS', 'SERVICE_DOMAINS'], ['DOMAIN_SID', 'DOMAIN_SID'],
+  // Whether the fixture accounts are in this realm's database — captured when
+  // it was built, see SEEDS_DEMO.
+  ['seedsDemoPrincipals', 'SEEDS_DEMO']
+].forEach(function (pair) {
+  Object.defineProperty(module.exports, pair[0], {
+    enumerable: true,
+    get: function () { return current()[pair[1]]; }
+  });
+});
+

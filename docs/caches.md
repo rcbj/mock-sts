@@ -116,7 +116,7 @@ console, `/admin-api`, SCIM or LDAP on port 389.
 | XACML policies | each policy document, parsed and validated | per process, shared by all realms | never evicted (see below) | — |
 | Federation release policy | which attributes each application releases to its partner | per realm | the setting | `federation.releaseIndexTtlMs` (5000) |
 | SPIFFE authorities | a realm's X.509 SVID authorities, unpacked | per process | until the stored authorities change | — |
-| Kerberos keys | long-term keys derived for each principal | per process | until the principal changes; never persisted | — |
+| Kerberos keys | long-term keys derived for each principal | per trust realm, in the realm's own principal database | until the principal changes; never persisted | — |
 | SAML 1.1 assertions | issued assertions, kept so a Browser/Artifact request can be answered | per realm, persisted | the oldest is dropped past the limit | `saml11.assertionCacheMax` (500) |
 | SAML SP metadata | a service provider's metadata, stored as received | the application entry | until refreshed from the application's page | — |
 | Dead-letter counts | an estimate of each Shared Signals stream's dead letters | per realm | recounted at each sweep | — |
@@ -148,7 +148,7 @@ something be used twice, which is why none of them has a control.
 | Store | Remembers | Scope | Limit | Forgets |
 |---|---|---|---|---|
 | Used assertions | every RFC 7523 JWT and RFC 7522 SAML assertion accepted, for a grant or client authentication | per realm, persisted in every store mode | `oauth2.assertionReplayCacheSize` (1000); **refuses new assertions when full** | once the assertion itself expires; a request that fails releases its claim |
-| Kerberos authenticators | each authenticator the protected service accepted | all realms together, persisted | `krb5.replayCacheMaxEntries` (10000); **refuses when full** | after twice the clock skew |
+| Kerberos authenticators | each authenticator the protected service accepted | per trust realm (the realm whose Kerberos realm issued the ticket), persisted | `krb5.replayCacheMaxEntries` (10000); **refuses when full** | after twice the clock skew |
 | DPoP proof IDs | each DPoP proof's `jti` | per realm, persisted | no size limit | after twice `oauth2.dpopIatSkewS` (300) |
 | DPoP nonces | server-issued DPoP nonces | per realm, persisted | none | after `oauth2.dpopNonceTtlS` (300) |
 | GNAP signatures | each signed GNAP request | per realm, persisted | none | after twice `gnap.signatureMaxAgeS` (300) |

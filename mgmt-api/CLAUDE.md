@@ -1190,8 +1190,11 @@ Four things a caller is told, and the descriptions tell them:
   key back afterwards, the GET included. A lost keytab is a rotation, not a read.
 * **NEITHER LIST CARRIES A KEY** — people and services are enctypes, kvno, salt
   and when, which is the public half (`stsKrb5KeyInfo`, `krb5ServiceKeyInfo`).
-* **IT IS THE DEFAULT TRUST REALM'S**, under every prefix, and every reply says
-  `trustRealm: "default"`: the KDC's sockets and `krb5.realm` are the process's.
+* **IT IS THE REALM THE CALL IS IN (2026-09-15)**, and every reply says which as
+  `trustRealm`. It read *IT IS THE DEFAULT TRUST REALM'S, under every prefix* while
+  the KDC was the process's; each trust realm whose `krb5.enabled` is on now has a
+  Kerberos realm and a principal database of its own, and a realm with none answers
+  with empty lists and says so.
 * **`clear-person-keys` for somebody with no keys is `ok` with `cleared: false`**
   rather than a refusal, because the state asked for is the state that holds.
 * **SIX ACTIONS SINCE LATER THE SAME DAY**: `drop-previous-service-keys` (`spn`)

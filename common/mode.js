@@ -986,7 +986,9 @@ const NOT_YET = [
           'and issuance use the current key only; "Drop previous versions" ' +
           'ends that window. Not yet: the krbtgt key has no rotation and so ' +
           'no previous version (a TGT under an older krb5.krbtgtPassword is ' +
-          'refused), and one KDC serves the default trust realm only.' },
+          'refused). Since 2026-09-15 each trust realm whose krb5.enabled ' +
+          'is on has a KDC, a Kerberos realm and keys of its own, on the ' +
+          'shared port.' },
   // `vci-request-encryption-key` WAS HERE AND WAS PAID ON 2026-09-12. The
   // OpenID4VCI request-encryption key is a member of each realm's key set now
   // (`helpers.js`'s `makeStsKeys()`), so it is per realm, travels to request

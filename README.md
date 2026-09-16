@@ -1154,7 +1154,8 @@ ordinary case, and one `entityId` between them would make that unexpressible.
 
 | Appconfig key | Environment variable | Default | Change while running? | What it does |
 |---|---|---|---|---|
-| `krb5.realm` | `KRB5_REALM` | `EXAMPLE.COM` | **restart** — the principal database and every long-term key in it are derived from the realm at startup | The realm this KDC serves. Its lower-cased form is the domain, which is where the default service domains and the PAC's domain name come from. |
+| `krb5.enabled` | `KRB5_ENABLED` | `true` | yes | Whether this realm's KDC answers. On the service as a whole it is on, and the sockets stay bound either way. **On a TRUST REALM it decides whether that realm has a Kerberos realm at all**, and a realm is created with it OFF: turning it on is refused until the realm has a `krb5.realm` of its own that no other realm answers to, and it builds that realm's principal database. |
+| `krb5.realm` | `KRB5_REALM` | `EXAMPLE.COM` | **restart** for the process — the principal database and every long-term key in it are derived from the realm at startup; **settable on a trust realm**, whose database is built when its Kerberos is turned on | The realm this KDC serves. Its lower-cased form is the domain, which is where the default service domains and the PAC's domain name come from. On a trust realm it is the name port 88 routes that realm's requests by: no two realms may answer to one name, and it cannot be changed while that realm's Kerberos is on. |
 | `krb5.kdcPort` | `KRB5_KDC_PORT` | `88` | **restart** — the TCP and UDP sockets are bound when the process starts | The KDC listens on TCP and UDP alike. 88 is privileged, so a host run that is not root fails to bind it — which is recorded rather than thrown, and reported by GET /krb5/principals. 0 asks for any free port. |
 | `krb5.servicePort` | `KRB5_SERVICE_PORT` | `8888` | **restart** — the socket is bound when the process starts | The Kerberized test service that accepts an AP-REQ. |
 | `krb5.servicePrincipal` | `KRB5_SERVICE_PRINCIPAL` | `HTTP/web.example.com` | **restart** — the account and its long-term keys are created at startup | The SPN that test service holds, in the usual service/hostname form. |
@@ -1732,17 +1733,22 @@ product; `?realm=<id>` skips the question). `/admin-api` accepts the default
 realm's token everywhere and a realm's own `sts-management-api` token in that
 realm only.
 
-**Not separated — three socket families.** Kerberos (over raw UDP/TCP 88 and
-over MS-KKDCP alike: `/KdcProxy` is reachable under a prefix but reaches the same
-KDC), the two TLS listeners, and SPIFFE's four sockets. LDAP's 389 and 636 used
-to be on this list and no longer are — the sockets are still shared, but what
-they serve is partitioned by DN. A
-socket has no path in it. Kerberos is the one with an obvious way forward and it
-is written down rather than left to be rediscovered — Kerberos already HAS a
-realm, so give each trust realm a `krb5.realm` of its own and dispatch on the
-realm name a request carries; what stands in the way is that `krb5.realm` is not
-runtime-settable, since the principal database and its long-term keys are built
-from it at startup.
+**Separated — Kerberos, by REALM NAME (2026-09-15).** Port 88 is one socket for
+every realm, and the Kerberos realm name inside each request says which trust
+realm answers it — the discriminator the protocol has always carried. A realm is
+created with `krb5.enabled` OFF and no name of its own; give it a `krb5.realm`
+no other realm answers to and turn it on, and it builds a principal database,
+long-term keys, a krbtgt and a service account of its own, from its own
+settings, over its own directory subtree. A bare `/KdcProxy` routes by the name
+too; a realm's own `/realm/<id>/KdcProxy` is pinned to that realm and refuses
+another realm's name. Trust realms do not trust each other's Kerberos: the
+cross-realm trust with `krb5.trustedRealm` is the default realm's alone.
+
+**Not separated — two socket families.** The two TLS listeners, and SPIFFE's
+four sockets. LDAP's 389 and 636 used to be on this list and no longer are — the
+sockets are still shared, but what they serve is partitioned by DN — and
+Kerberos left it on 2026-09-15. A socket has no path in it, and what is left on
+this list is what has no name inside its protocol to put a realm in either.
 
 `GET /realms` and `/admin/realms` both publish this list, family by family, so
 the answer is something the service tells you rather than something to remember.
@@ -5739,9 +5745,11 @@ as ONE sealed value (`stsKrb5Keys`, with the public `stsKrb5KeyInfo` beside it).
   door, an `ldapmodify` included, is never answered with a key from the old one.
 * **The derivation is asynchronous and lags the password by a few tens of milliseconds**;
   in that window the person is refused rather than keyed from anything older.
-* **Which trust realm: the DEFAULT one.** The KDC's sockets and `krb5.realm` are the
-  process's, so its people are the default trust realm's; a password set in another realm
-  derives nothing.
+* **Which trust realm: the one the password was set in (2026-09-15).** A trust realm whose
+  `krb5.enabled` is on has a Kerberos realm and a principal database of its own, so the
+  people it keys are the people in its own directory subtree, and their keys go onto their
+  own entries there. A password set in a realm with no KDC derives nothing. Until that date
+  the KDC was the process's and only the default realm's people were keyed.
 * `krb5.personKeys` turns it off — the setting for a deployment whose Kerberos is a real KDC
   elsewhere and which uses this service only as an acceptor.
 

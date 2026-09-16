@@ -27,7 +27,7 @@ answer stopped being the same in every configuration.**
 |---|---|---|
 | the embedded **LDAP directory** — every entry under every realm's base | sessions, access tokens, ID Tokens, refresh tokens | nothing, beyond two caches that are re-derivable |
 | …which is also the **applications registry**, the **federation register**, the **SPIFFE registry** and the **group roster**, because in this service those *are* directory entries | authorization codes, pre-authorized codes, SAML artifacts | |
-| the **trust realm registry** — names, descriptions, per-realm settings | Kerberos principals and tickets, the replay caches | |
+| the **trust realm registry** — names, descriptions, per-realm settings | Kerberos principals and tickets, the replay caches (per trust realm since 2026-09-15) | |
 | the **used-assertion history** — every RFC 7523 and RFC 7522 assertion accepted and not yet expired, so none is accepted twice across a restart (both modes; its own table on postgres, a file per realm on ldif) | | |
 | **runtime setting changes** — what the console and `POST /admin-api/config/set` write | the statistics, the counters and the audit log | |
 | the **signing keys**, encrypted (product mode only) | | |

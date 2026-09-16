@@ -10,7 +10,7 @@ nav_order: 18
 # Error codes
 
 Every way this service can fail or refuse has a code of the form
-`STS-<SUBSYSTEM>-<NNNN>`. There are **2656** of them, in **34** subsystems.
+`STS-<SUBSYSTEM>-<NNNN>`. There are **2664** of them, in **34** subsystems.
 
 ## Where a code appears
 
@@ -67,7 +67,7 @@ is an ordinary outcome.
 * [WS-Trust (`STS-WSTRUST`)](#sts-wstrust) — 17
 * [WS-Federation (`STS-WSFED`)](#sts-wsfed) — 16
 * [Federation (`STS-FED`)](#sts-fed) — 74
-* [Kerberos and SPNEGO (`STS-KRB`)](#sts-krb) — 120
+* [Kerberos and SPNEGO (`STS-KRB`)](#sts-krb) — 128
 * [LDAP directory (`STS-LDAP`)](#sts-ldap) — 70
 * [SCIM 2.0 (`STS-SCIM`)](#sts-scim) — 73
 * [SPIFFE (`STS-SPIFFE`)](#sts-spiffe) — 76
@@ -1736,6 +1736,14 @@ Raised from: kerberos/.
 | `STS-KRB-0118` | A KDC request was answered before this node caught up with the other nodes' committed changes, so a sign-out committed elsewhere in the last moment may not be honoured by it. | none — logged; the request is answered |
 | `STS-KRB-0119` | A SPNEGO request-mic continuation was refused because another process of this service had already completed that negotiation. | RFC 4178 section 4.2.2, a reject NegTokenResp; HTTP 401 |
 | `STS-KRB-0120` | A SPNEGO request-mic continuation could not be proved unspent because the store that records completed negotiations could not be asked; it was refused (fail closed). | RFC 4178 section 4.2.2, a reject NegTokenResp; HTTP 401 |
+| `STS-KRB-0121` | A TGS-REQ named a realm this KDC does not serve. Until 2026-09-15 such a request was answered as the default realm. | KDC_ERR_WRONG_REALM (68) |
+| `STS-KRB-0122` | A KDC request sent to a trust realm's own /realm/<id>/KdcProxy named a Kerberos realm that realm does not serve (another realm's name, or one whose Kerberos is off). | KDC_ERR_WRONG_REALM (68) |
+| `STS-KRB-0123` | Kerberos was turned on for a trust realm that has no krb5.realm of its own. | none (a refused administrative change) |
+| `STS-KRB-0124` | A trust realm was given a krb5.realm another realm already answers to (another realm's, the default realm's, or krb5.trustedRealm), compared without regard to case. | none (a refused administrative change) |
+| `STS-KRB-0125` | A trust realm's krb5.realm was changed or cleared while its Kerberos was on. | none (a refused administrative change) |
+| `STS-KRB-0126` | The acceptor was presented a ticket for a Kerberos realm the trust realm it was reached in does not serve. | KRB_AP_ERR_NOT_US (35); over SPNEGO, HTTP 401 |
+| `STS-KRB-0127` | Two trust realms answer to one Kerberos realm name (a restored or replicated realm the registry did not re-judge), so the KDC routes that name to the first and not the second. | none (logged when the router finds it) |
+| `STS-KRB-0128` | A Kerberos key act — creating, rotating, deleting or clearing a stored key — was asked of a trust realm that has no KDC, so there is no principal for the key to belong to. | HTTP 400 { ok: false, errors } / 303 with error= |
 
 ## STS-LDAP
 

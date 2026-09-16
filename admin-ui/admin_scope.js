@@ -52,7 +52,14 @@ const SERVICE_PAGES = [
   '/admin/secrets',
   '/admin/debugger',
   '/admin/tls',
-  '/admin/kerberos',
+  // `/admin/kerberos` and `/admin/kerberos/principals` LEFT THIS LIST on
+  // 2026-09-15, when a trust realm got a Kerberos realm and a principal
+  // database of its own: what those pages show is then the realm's own, and a
+  // realm administrator managing their realm's people and service principals
+  // is exactly #32's rule. The settings that are still the PROCESS's — the two
+  // sockets and the development-mode trust — are refused by
+  // SERVICE_SETTING_KEYS below, per key rather than by the `krb5.` prefix this
+  // used to carry.
   '/admin/ldap/service',
   // The explorer mints a DEFAULT-realm token for whoever holds the session,
   // which would hand a realm administrator a service credential. It is a
@@ -66,7 +73,7 @@ const SERVICE_PAGES = [
 // keys a realm CAN carry that still name the whole service.
 const SERVICE_SETTING_PREFIXES = [
   'admin.', 'adminApi.', 'realms.', 'workers.', 'persistence.', 'debugger.',
-  'tls.', 'krb5.', 'keys.', 'security.passwordHash'
+  'tls.', 'keys.', 'security.passwordHash'
 ];
 
 const SERVICE_SETTING_KEYS = [
@@ -76,7 +83,15 @@ const SERVICE_SETTING_KEYS = [
   'pki.distributionBaseUrl', 'pki.distributionLdapHost',
   'pki.distributionLdapPort', 'pki.httpPort',
   'spiffe.workloadSocket', 'spiffe.serverSocket', 'spiffe.grpcHost',
-  'spiffe.workloadPort', 'spiffe.serverPort'
+  'spiffe.workloadPort', 'spiffe.serverPort',
+  // KERBEROS, PER KEY SINCE 2026-09-15 (it was the `krb5.` prefix). A realm
+  // carries its own Kerberos realm, principal database and keys, so the rows
+  // those are built from are the realm administrator's. These five are not:
+  // the two SOCKETS are bound once for the process, and the development-mode
+  // trust is the DEFAULT realm's second Kerberos realm — no other realm has
+  // one, so setting them on a realm would say something untrue.
+  'krb5.kdcPort', 'krb5.servicePort', 'krb5.trustedRealm',
+  'krb5.trustPassword', 'krb5.trustedDomainSid', 'krb5.trustedKrbtgtPassword'
 ];
 
 // The realm-scoped pages whose ACTIONS can reach past the realm, and what each

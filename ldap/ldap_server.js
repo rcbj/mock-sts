@@ -8503,12 +8503,16 @@ if (typeof consent.setDirectory === 'function') {
 // at 15 requires, so the directory reached from the KDC's side would move them
 // further still.
 //
-// **EVERY FUNCTION RUNS IN THE DEFAULT REALM**, through `inDefaultRealm()`. The
-// KDC's sockets and `krb5.realm` are process-wide — a raw Kerberos socket has
-// no path to carry a trust-realm segment — so the KDC answers in no trust
-// realm, and its people are the default realm's people. A person reached from a
-// request in `acme` is not a principal of this KDC; the register refuses to
-// derive for one before it ever gets here.
+// **EVERY FUNCTION RUNS IN THE AMBIENT REALM SINCE 2026-09-15**, where all six
+// were wrapped in `inDefaultRealm()` before it. The paragraph here read *the
+// KDC's sockets and `krb5.realm` are process-wide … so the KDC answers in no
+// trust realm, and its people are the default realm's people*. It does now:
+// each trust realm whose Kerberos is on has a Kerberos realm and a principal
+// database of its own, and the KDC ENTERS that realm before it looks anybody
+// up — so a person reached from a request in `acme` is exactly the principal of
+// `acme`'s KDC, and their keys belong on their entry in `acme`'s subtree. The
+// register asks `principals.enabledIn()` before deriving for a realm with no
+// KDC.
 //
 // **THE WRITES GO STRAIGHT ONTO THE STORED ENTRY, AND FOR AN APPLICATION THAT
 // IS DELIBERATE.** `applications.updateApplication()` quotes the value it wrote
@@ -8536,7 +8540,7 @@ function assignOrDelete(stored, lowerName, value) {
 
 if (typeof krb5PersonKeys.setDirectory === 'function') {
   krb5PersonKeys.setDirectory({
-    readPerson: inDefaultRealm(function (username) {
+    readPerson: function (username) {
       log.debug('Entering readPerson(). username=' + username);
       const located = locateEntry(String(username || ''));
       if (!located.stored || !isPersonEntry(located.stored)) {
@@ -8549,14 +8553,14 @@ if (typeof krb5PersonKeys.setDirectory === 'function') {
                keys: firstValue(stored, 'stskrb5keys'),
                info: firstValue(stored, 'stskrb5keyinfo'),
                passwordHash: firstValue(stored, 'userpassword') };
-    }),
-    writePerson: inDefaultRealm(function (username, keysValue, infoValue) {
+    },
+    writePerson: function (username, keysValue, infoValue) {
       log.debug('Entering writePerson(). username=' + username);
       const located = locateEntry(String(username || ''));
       if (!located.stored || !isPersonEntry(located.stored)) {
         // NOT created here, for `writeStoredPassword()`'s reason.
         log.warn(errorCodes.tag('STS-LDAP-0040') + 'ldap: "' + username +
-                 '" has no entry in the default realm, so no Kerberos key ' +
+                 '" has no entry in this trust realm, so no Kerberos key ' +
                  'was written.');
         log.debug('Leaving writePerson(). No entry.');
         return false;
@@ -8568,8 +8572,8 @@ if (typeof krb5PersonKeys.setDirectory === 'function') {
       touchDirectory(located.stored.dn);
       log.debug('Leaving writePerson(). ' + located.stored.dn);
       return true;
-    }),
-    personKeyInfos: inDefaultRealm(function () {
+    },
+    personKeyInfos: function () {
       log.debug('Entering personKeyInfos().');
       const out = [];
       eachEntryInRealm(function (stored) {
@@ -8582,8 +8586,8 @@ if (typeof krb5PersonKeys.setDirectory === 'function') {
       });
       log.debug('Leaving personKeyInfos(). ' + out.length + ' person(s).');
       return out;
-    }),
-    readService: inDefaultRealm(function (identifier) {
+    },
+    readService: function (identifier) {
       log.debug('Entering readService(). identifier=' + identifier);
       const stored = applicationEntry(String(identifier || ''));
       if (!stored) {
@@ -8593,8 +8597,8 @@ if (typeof krb5PersonKeys.setDirectory === 'function') {
       log.debug('Leaving readService(). ' + stored.dn);
       return { dn: stored.dn, keys: firstValue(stored, 'krb5servicekeys'),
                info: firstValue(stored, 'krb5servicekeyinfo') };
-    }),
-    writeService: inDefaultRealm(function (identifier, keysValue, infoValue) {
+    },
+    writeService: function (identifier, keysValue, infoValue) {
       log.debug('Entering writeService(). identifier=' + identifier);
       const stored = applicationEntry(String(identifier || ''));
       if (!stored) {
@@ -8606,8 +8610,8 @@ if (typeof krb5PersonKeys.setDirectory === 'function') {
       touchDirectory(stored.dn);
       log.debug('Leaving writeService(). ' + stored.dn);
       return true;
-    }),
-    serviceKeyInfos: inDefaultRealm(function () {
+    },
+    serviceKeyInfos: function () {
       log.debug('Entering serviceKeyInfos().');
       const out = [];
       entriesUnder(applicationsDn()).forEach(function (stored) {
@@ -8621,7 +8625,7 @@ if (typeof krb5PersonKeys.setDirectory === 'function') {
       });
       log.debug('Leaving serviceKeyInfos(). ' + out.length + ' entr(ies).');
       return out;
-    })
+    }
   });
 } else {
   log.warn('ldap: kerberos/krb5_person_keys.js offers no setDirectory(), so ' +

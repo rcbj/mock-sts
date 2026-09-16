@@ -165,8 +165,10 @@ Every realm has two administrator rosters that matter to it:
 A realm's own administrators are **confined to their realm**. Everything about
 the whole process is hidden from them and refused if asked for: the persistence
 store, the database, encryption, the secret store, the TLS listeners and client
-truststore, Kerberos, the LDAP service page, the embedded debugger and the API
-explorer. So are creating or removing a realm, reading or editing another realm,
+truststore, the LDAP service page, the embedded debugger and the API explorer.
+(Kerberos left that list on 2026-09-15: a realm has a KDC of its own, so its
+principals and keytabs are its administrator's — what stays service-wide is the
+two Kerberos sockets and the development-mode trust.) So are creating or removing a realm, reading or editing another realm,
 replacing the service Root, exporting the TLS listener's key, and every setting
 that belongs to the process. That confinement is what makes a per-realm roster
 safe: creating a realm makes somebody an administrator of that realm and of
@@ -232,23 +234,84 @@ realm may register one under a trust domain any realm of this service serves —
 until then a bundle one realm registered was trusted in every realm, including
 under another realm's name.
 
-### Not separated — two socket families
+### Separated — Kerberos, by REALM NAME (2026-09-15)
 
-Kerberos (over raw UDP/TCP 88 *and* over MS-KKDCP — `/KdcProxy` is reachable
-under a prefix but reaches the same KDC behind it) and the two TLS listeners. A
-socket has no path in it. LDAP's 389 and 636 were on this list until the
-directory was partitioned — the sockets are still shared, but what they serve is
-told apart by DN — and SPIFFE's four left it on 2026-09-12, by giving each realm
-sockets of its own.
+Kerberos was on the not-separated list until this date: one KDC, one principal
+database and one `krb5.realm` for the whole process, answering in the default
+realm. It is separated now, and the discriminator is neither a path nor an
+address but the **Kerberos realm name inside every request** — which the
+protocol has always carried, because Kerberos has realms of its own.
 
-Kerberos is the one with an obvious way forward, and it is written down here
-rather than left to be rediscovered: Kerberos already *has* a realm, so the
-natural design is to give each trust realm a `krb5.realm` of its own and dispatch
-a request on the realm name it carries, letting the shared port serve both. What
-stands in the way today is that `krb5.realm` cannot be changed while the service
-runs — the principal database and every long-term key in it is built from it when
-the process starts — so that database has to become per-realm and lazily built
-first.
+**Port 88 is still one socket.** An AS-REQ or TGS-REQ names the realm it is
+for, and the KDC answers it out of that trust realm's principal database.
+
+**A realm is created with Kerberos off, and you name it yourself.** Nothing is
+seeded: `krb5.enabled` is seeded `false`, and there is no default name, because
+two realms answering to one name is a request nothing can route. So:
+
+```bash
+# Give the realm a Kerberos realm of its own, then turn it on.
+curl -X POST .../admin-api/realms/set \
+  -d '{"realm":"acme","key":"krb5.realm","value":"ACME.EXAMPLE.COM"}'
+curl -X POST .../admin-api/realms/set \
+  -d '{"realm":"acme","key":"krb5.enabled","value":"true"}'
+```
+
+Turning it on builds that realm's principal database from **its own settings**:
+its own `krbtgt`, its own service account, its own fixture accounts in
+development mode, every key salted with its own realm name. Its people are the
+people in its own directory subtree, and their Kerberos keys (product mode) are
+derived onto their own entries there. Nothing restarts.
+
+Three refusals keep the routing honest, and each is a code in
+[error codes](error-codes.md):
+
+* **Turning Kerberos on without a `krb5.realm` of its own** — `STS-KRB-0123`.
+* **A name another realm already answers to** — `STS-KRB-0124`: another realm's,
+  the default realm's, or `krb5.trustedRealm`. Compared without regard to case,
+  because two realms that differ only in case are two realms nobody can tell
+  apart in a `krb5.conf`.
+* **Renaming or clearing it while Kerberos is on** — `STS-KRB-0125`. Every key
+  in that realm's database is salted with the name. Turn it off, rename, turn it
+  on.
+
+**A client reaches a realm by naming it**, which is what a `krb5.conf` already
+does:
+
+```ini
+[realms]
+  EXAMPLE.COM      = { kdc = sts-host:88 }
+  ACME.EXAMPLE.COM = { kdc = sts-host:88 }   # the same port
+```
+
+Over MS-KKDCP there are two doors. A bare `/KdcProxy` routes by the name, like
+the socket. A realm's own `/realm/acme/KdcProxy` is **pinned** to that realm and
+refuses another realm's name with `KDC_ERR_WRONG_REALM` (`STS-KRB-0122`) — the
+prefix is an address somebody chose. The acceptor on `krb5.servicePort` and
+SPNEGO follow the same two rules: a ticket is accepted in the realm that issued
+it, and a ticket from another realm presented under a realm's prefix is refused
+(`STS-KRB-0126`).
+
+**Trust realms do not trust each other's Kerberos.** A realm's KDC holds no
+inter-realm key for another realm, so a ticket from one is not a referral to
+another — it is unknown there. The cross-realm referral this service does serve
+is the development-mode second realm (`krb5.trustedRealm`, `PARTNER.COM`), which
+belongs to the default realm alone.
+
+**What is still the process's:** the two sockets (`krb5.kdcPort`,
+`krb5.servicePort`), so a realm cannot move or take a port of its own, and that
+development trust. A realm administrator manages their realm's Kerberos —
+principals, keytabs and the settings the database is built from — and those five
+settings stay service-wide.
+
+### Not separated — the TLS listeners
+
+The 8443 and 9443 listeners. A socket has no path in it, and what those two
+endpoints publish is what the server saw of the connection. LDAP's 389 and 636
+were on this list until the directory was partitioned — the sockets are still
+shared, but what they serve is told apart by DN — SPIFFE's four left it on
+2026-09-12 by giving each realm sockets of its own, and Kerberos left it on
+2026-09-15 by routing on the realm name in the request.
 
 ### Not separated — the key-encryption key
 

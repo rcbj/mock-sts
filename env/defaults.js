@@ -588,6 +588,7 @@ var config = {
 
   // --- Kerberos --------------------------------------------------------
   krb5: {
+    enabled: true,                                                 // Enable Kerberos
     realm: "EXAMPLE.COM",                                          // Realm; restart to apply
     kdcPort: 88,                                                   // KDC port; restart to apply
     servicePort: 8888,                                             // Test service port; restart to apply

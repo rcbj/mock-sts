@@ -760,6 +760,21 @@ const FAMILIES = [
         return [];
       }
       const realm = krb5Principals.REALM;
+      // NO KDC IN THIS TRUST REALM (2026-09-15). Kerberos is per realm now, and
+      // a realm with `krb5.enabled` off holds no principal at all — which is a
+      // different sentence from "nothing has authenticated as that name", and
+      // the one somebody reading this page in such a realm needs.
+      if (!krb5Principals.kerberosRealmOf().enabled) {
+        log.debug("Leaving krb5.collect(). No KDC in this realm.");
+        return [row('krb5', 'ticket-granting tickets', ctx.key, {
+          label: ctx.key,
+          terminable: false,
+          detail: 'this trust realm has no KDC',
+          why: 'Kerberos is off in this trust realm (krb5.enabled), so it ' +
+               'has issued no ticket and there is no principal to stamp a ' +
+               'sign-out instant on.'
+        })];
+      }
       const already = krb5Principals.signedOutAt([ctx.key], realm);
       const principal = krb5Principals.find([ctx.key], realm);
       if (!principal) {
@@ -805,6 +820,18 @@ const FAMILIES = [
     },
     terminate: function (r, ctx) {
       log.debug("Entering krb5.terminate().");
+      // NO KDC IN THIS TRUST REALM — `collect()` above says so on the row and
+      // marks it not terminable, and this is the same answer for a caller that
+      // posts the family anyway (`POST /admin-api/logout` takes a list).
+      // Without it the refusal named `alice@`, the empty realm of a realm with
+      // no Kerberos realm at all.
+      if (!krb5Principals.kerberosRealmOf().enabled) {
+        log.debug("Leaving krb5.terminate(). No KDC in this realm.");
+        return { ok: false,
+                 message: 'Kerberos is off in this trust realm, so it has ' +
+                          'issued no ticket and there is nothing to sign ' +
+                          'out.' };
+      }
       const realm = krb5Principals.REALM;
       const principal = krb5Principals.signOut([ctx.key], realm);
       if (!principal) {

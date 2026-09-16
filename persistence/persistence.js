@@ -1804,8 +1804,12 @@ function restoreRealms(rows, replicated) {
       // The realm is here because it replicated. Take what another process
       // changed — its overrides above all, which is what a realm-scoped
       // setting IS.
+      // `replicated`, so the realm registry does not re-judge a change the
+      // process that made it already judged (realms.js,
+      // kerberosOverrideProblem()).
       realms.update(row.id, { name: row.name, description: row.description,
-                              overrides: row.overrides || {} });
+                              overrides: row.overrides || {},
+                              replicated: true });
       return;
     }
     const result = realms.create({
